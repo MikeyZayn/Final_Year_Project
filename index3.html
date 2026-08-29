@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TEMBA - Smart Taxi Information & Verified Feedback Platform</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        tembaNavy: '#0A1128',
+                        tembaBlue: '#001F54',
+                        tembaAccent: '#034078',
+                        tembaHighlight: '#1282A2',
+                        tembaYellow: '#F39C12',
+                        tembaYellowHover: '#E08E0B',
+                        tembaLightBg: '#FEFCFB',
+                        tembaCardBg: '#0F172A'
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0b132b;
+            color: #f8fafc;
+            min-height: 100vh;
+        }
+
+        /* Glassmorphism effects */
+        .glass-card {
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .glass-input {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #ffffff;
+        }
+
+        .glass-input:focus {
+            background: rgba(255, 255, 255, 0.15);
+            border-color: #F39C12;
+            outline: none;
+        }
+
+        /* Custom scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0a1128;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #1e293b;
+            border-radius: 4px;
+        }
+
+        /* Mobile Device Frame styling */
+        .phone-frame {
+            width: 380px;
+            height: 780px;
+            border-radius: 45px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7), 0 0 0 12px #1e293b;
+            position: relative;
+            overflow: hidden;
+            border: 4px solid #334155;
+        }
+
+        .phone-notch {
+            width: 140px;
+            height: 24px;
+            background-color: #1e293b;
+            position: absolute;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            border-bottom-left-radius: 14px;
+            border-bottom-right-radius: 14px;
+            z-index: 50;
+        }
+
+        /* Animations */
+        .fade-in {
+            animation: fadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .pulse-yellow {
+            animation: pulseYellow 2s infinite;
+        }
+
+        @keyframes pulseYellow {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.4); }
+            50% { box-shadow: 0 0 0 12px rgba(243, 156, 18, 0); }
+        }
+    </style>
+</head>
+<body class="flex flex-col min-h-screen">
+
+    <!-- Top Navigation Header -->
+    <header class="bg-slate-900 border-b border-slate-800 py-3 px-4 sm:px-8 flex justify-between items-center z-40">
+        <div class="flex items-center space-x-3">
+            <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-yellow-400 flex items-center justify-center shadow-lg shadow-amber-500/20">
+                <i class="fa-solid fa-van-shuttle text-slate-900 text-lg"></i>
+            </div>
+            <div>
+                <h1 class="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+                    TEMBA
+                </h1>
+                <p class="text-xs text-slate-400 hidden sm:block">Transport Hub with Evaluated Mobility, Boarding & Accountability</p>
+            </div>
+        </div>
+
+        <!-- Layout Controls & Actions -->
+        <div class="flex items-center space-x-3">
+            <button id="toggleViewBtn" onclick="toggleDisplayMode()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 flex items-center space-x-2 transition">
+                <i class="fa-solid fa-mobile-screen"></i>
+                <span id="viewBtnText">Switch to Desktop View</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="flex-1 flex flex-col items-center justify-center p-4 sm:p-6 relative overflow-hidden bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950">
+        
+        <!-- Background Decorative Glowing Orbs -->
+        <div class="absolute top-1/4 left-1/10 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none"></div>
+        <div class="absolute bottom-1/4 right-1/10 w-96 h-96 bg-amber-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        <!-- Container Frame Mode Switcher -->
+        <div id="appContainer" class="phone-frame bg-slate-950 relative flex flex-col transition-all duration-500">
+            <!-- Phone Notch (Visible only in Phone Frame mode) -->
+            <div id="phoneNotch" class="phone-notch flex items-center justify-center">
+                <div class="w-12 h-1 bg-slate-700 rounded-full"></div>
+            </div>
+
+            <!-- Mobile Screen Status Bar -->
+            <div id="statusBar" class="pt-2 px-6 pb-1 flex justify-between items-center text-[10px] text-slate-400 z-40 select-none">
+                <span id="liveTime" class="font-medium">09:41</span>
+                <div class="flex items-center space-x-1.5">
+                    <i class="fa-solid fa-signal"></i>
+                    <i class="fa-solid fa-wifi"></i>
+                    <i class="fa-solid fa-battery-full text-xs"></i>
+                </div>
+            </div>
+
+            <!-- SCREEN 1: SPLASH LANDING PAGE -->
+            <div id="screenSplash" class="flex-1 flex flex-col justify-between p-6 relative overflow-hidden fade-in z-20">
+                
+                <!-- South African Minibus Taxi Background Scene -->
+                <div class="absolute inset-0 z-0 opacity-35 bg-cover bg-center pointer-events-none" 
+                     style="background-image: url('Transportation.-SA-Taxi.webp');">
+                </div>
+
+                <!-- Top Branding -->
+                <div class="pt-8 relative z-10 text-center">
+                    <div class="inline-flex p-3 rounded-2xl bg-slate-900/80 border border-slate-700/50 mb-3 shadow-xl">
+                        <i class="fa-solid fa-van-shuttle text-amber-400 text-3xl"></i>
+                    </div>
+                    <h2 class="text-3xl font-extrabold text-white tracking-tight">TEMBA</h2>
+                    <p class="text-xs text-slate-300 mt-2 font-medium tracking-wide">
+                        Travel Information. Verified Trips. Safer Journeys.
+                    </p>
+                </div>
+
+                <!-- Minibus Taxi Visual Illustration -->
+                <div class="relative z-10 my-auto flex flex-col items-center justify-center">
+                    <div class="relative w-full max-w-[260px] py-4">
+                        <div class="w-full h-44 rounded-2xl bg-gradient-to-tr from-slate-900 via-slate-800 to-slate-900 border border-slate-700/60 p-4 flex flex-col justify-between shadow-2xl relative overflow-hidden group">
+                            <!-- Stripe Decal -->
+                            <div class="absolute top-1/2 left-0 right-0 h-4 bg-amber-500/80 transform -skew-y-3"></div>
+                            
+                            <div class="flex justify-between items-start z-10">
+                                <span class="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Toyota Quantum</span>
+                            </div>
+
+                            <div class="my-auto text-center z-10">
+                                <i class="fa-solid fa-van-shuttle text-amber-400 text-6xl drop-shadow-[0_10px_10px_rgba(0,0,0,0.5)]"></i>
+                            </div>
+
+                            <div class="flex justify-between items-end z-10 text-[10px] text-slate-400 font-mono">
+                                <span>ND 123-456</span>
+                                <span>EMP - DUR</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Buttons -->
+                <div class="relative z-10 space-y-3 pb-4">
+                    <button onclick="switchScreen('screenLogin')" 
+                            class="w-full py-3.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/25 transition active:scale-[0.98] flex items-center justify-center space-x-2">
+                        <span>Login</span>
+                        <i class="fa-solid fa-arrow-right text-xs"></i>
+                    </button>
+
+                    <button onclick="switchScreen('screenRegister')" 
+                            class="w-full py-3.5 px-4 rounded-xl bg-white/10 hover:bg-white/20 text-white font-semibold text-sm border border-white/30 backdrop-blur-md transition active:scale-[0.98]">
+                        Register
+                    </button>
+
+                    <button onclick="loginAsGuest()" 
+                            class="w-full text-center py-2 text-xs text-slate-400 hover:text-slate-200 transition font-medium">
+                        Continue as Guest <i class="fa-solid fa-chevron-right text-[10px] ml-1"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- SCREEN 2: LOGIN FORM PAGE -->
+            <div id="screenLogin" class="flex-1 flex flex-col justify-between p-6 relative overflow-y-auto hidden fade-in z-20">
+                
+                <div>
+                    <div class="flex items-center justify-between mb-6">
+                        <button onclick="switchScreen('screenSplash')" class="w-9 h-9 rounded-xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-300 hover:text-white transition">
+                            <i class="fa-solid fa-chevron-left text-sm"></i>
+                        </button>
+                        <span class="text-xs text-slate-400 font-semibold tracking-wider uppercase">TEMBA Access</span>
+                        <div class="w-9"></div>
+                    </div>
+
+                    <div class="mb-6">
+                        <h3 class="text-2xl font-bold text-white">Welcome Back</h3>
+                        <p class="text-xs text-slate-400 mt-1">Enter your credentials to access verified transport services</p>
+                    </div>
+
+                    <!-- Role Selector Tab Pills -->
+                    <div class="mb-5 bg-slate-900/90 p-1 rounded-xl border border-slate-800 grid grid-cols-4 gap-1 text-[11px] font-medium text-center">
+                        <button onclick="selectLoginRole('passenger')" id="loginRole-passenger" class="login-role-btn py-1.5 rounded-lg bg-amber-500 text-slate-950 font-bold transition">Passenger</button>
+                        <button onclick="selectLoginRole('driver')" id="loginRole-driver" class="login-role-btn py-1.5 rounded-lg text-slate-400 hover:text-slate-200 transition">Driver</button>
+                        <button onclick="selectLoginRole('operator')" id="loginRole-operator" class="login-role-btn py-1.5 rounded-lg text-slate-400 hover:text-slate-200 transition">Operator</button>
+                        <button onclick="selectLoginRole('admin')" id="loginRole-admin" class="login-role-btn py-1.5 rounded-lg text-slate-400 hover:text-slate-200 transition">Admin</button>
+                    </div>
+
+                    <!-- Form Inputs -->
+                    <form id="loginForm" onsubmit="handleLoginSubmit(event)" class="space-y-4">
+                        <div>
+                            <label class="block text-xs font-medium text-slate-300 mb-1">Cellphone Number or Email Address</label>
+                            <div class="relative">
+                                <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500 text-xs">
+                                    <i class="fa-solid fa-user"></i>
+                                </span>
+                                <input type="text" id="loginIdentifier" required placeholder="082 123 4567 or name@domain.co.za" 
+                                       class="w-full pl-9 pr-3 py-2.5 rounded-xl glass-input text-xs transition">
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between items-center mb-1">
+                                <label class="block text-xs font-medium text-slate-300">Password</label>
+                                <a href="#" onclick="showNotification('Password reset link sent via SMS/Email', 'info')" class="text-[11px] text-amber-400 hover:underline">Forgot?</a>
+                            </div>
+                            <div class="relative">
+                                <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-500 text-xs">
+                                    <i class="fa-solid fa-lock"></i>
+                                </span>
+                                <input type="password" id="loginPassword" required placeholder="••••••••" 
+                                       class="w-full pl-9 pr-10 py-2.5 rounded-xl glass-input text-xs transition">
+                                <button type="button" onclick="togglePasswordVisibility('loginPassword', 'loginPassIcon')" class="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-500 hover:text-slate-300">
+                                    <i id="loginPassIcon" class="fa-solid fa-eye text-xs"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center space-x-2 pt-1">
+                            <input type="checkbox" id="rememberMe" class="w-3.5 h-3.5 rounded bg-slate-800 border-slate-700 text-amber-500 focus:ring-amber-500">
+                            <label for="rememberMe" class="text-xs text-slate-400">Remember this device</label>
+                        </div>
+
+                        <button type="submit" 
+                                class="w-full py-3.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm shadow-lg shadow-amber-500/20 transition active:scale-[0.98] mt-2">
+                            Sign In
+                        </button>
+                    </form>
+
+                    <!-- Fast Demo Quick Fill -->
+                    <div class="mt-6 p-3 rounded-xl bg-slate-900/60 border border-slate-800/80">
+                        <span class="text-[10px] text-slate-400 uppercase font-bold tracking-wider block mb-2">Quick Demo Credentials:</span>
+                        <div class="grid grid-cols-2 gap-2 text-[11px]">
+                            <button onclick="fillDemo('passenger')" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-left border border-slate-700/50">
+                                <i class="fa-solid fa-user-check text-amber-400 mr-1"></i> Passenger Demo
+                            </button>
+                            <button onclick="fillDemo('driver')" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-left border border-slate-700/50">
+                                <i class="fa-solid fa-id-card text-emerald-400 mr-1"></i> Driver Demo
+                            </button>
+                            <button onclick="fillDemo('operator')" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-left border border-slate-700/50">
+                                <i class="fa-solid fa-building-user text-blue-400 mr-1"></i> Operator Demo
+                            </button>
+                            <button onclick="fillDemo('admin')" class="px-2 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-left border border-slate-700/50">
+                                <i class="fa-solid fa-shield-halved text-purple-400 mr-1"></i> Admin Demo
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Footer Switcher -->
+                <div class="text-center pt-4 border-t border-slate-800/60">
+                    <p class="text-xs text-slate-400">
+                        Don't have an account? 
+                        <button onclick="switchScreen('screenRegister')" class="text-amber-400 font-semibold hover:underline">Register now</button>
+                    </p>
+                </div>
+            </div>
+
+            <!-- SCREEN 3: REGISTER FORM PAGE -->
+            <div id="screenRegister" class="flex-1 flex flex-col justify-between p-6 relative overflow-y-auto hidden fade-in z-20">
+                <div>
+                    <!-- Navigation Bar -->
+                    <div class="flex items-center justify-between mb-3">
+                        <button onclick="switchScreen('screenSplash')" class="w-9 h-9 rounded-xl bg-slate-800/80 border border-slate-700 flex items-center justify-center text-slate-300 hover:text-white transition">
+                            <i class="fa-solid fa-chevron-left text-sm"></i>
+                        </button>
+                        <span class="text-xs text-slate-400 font-semibold tracking-wider uppercase">Create Account</span>
+                        <div class="w-9"></div>
+                    </div>
+
+                    <div class="mb-3">
+                        <h3 class="text-2xl font-bold text-white">Join TEMBA</h3>
+                        <p class="text-[11px] text-slate-400 mt-0.5">Select user role </p>
+                    </div>
+
+                    <!-- Role Selection Cards -->
+                    <div class="grid grid-cols-2 gap-2 mb-3">
+                        <div onclick="selectRegisterRole('passenger')" id="regCard-passenger" class="reg-role-card p-2.5 rounded-xl border border-amber-500 bg-amber-500/10 cursor-pointer transition flex items-center space-x-2">
+                            <div class="w-7 h-7 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-bold text-xs">
+                                <i class="fa-solid fa-user"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Passenger</h4>
+                                <p class="text-[9px] text-slate-400">Traveler</p>
+                            </div>
+                        </div>
+
+                        <div onclick="selectRegisterRole('driver')" id="regCard-driver" class="reg-role-card p-2.5 rounded-xl border border-slate-800 bg-slate-900/60 cursor-pointer transition flex items-center space-x-2">
+                            <div class="w-7 h-7 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-xs">
+                                <i class="fa-solid fa-id-card"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Driver</h4>
+                                <p class="text-[9px] text-slate-400">Taxi Driver</p>
+                            </div>
+                        </div>
+
+                        <div onclick="selectRegisterRole('operator')" id="regCard-operator" class="reg-role-card p-2.5 rounded-xl border border-slate-800 bg-slate-900/60 cursor-pointer transition flex items-center space-x-2">
+                            <div class="w-7 h-7 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-xs">
+                                <i class="fa-solid fa-building-user"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Operator</h4>
+                                <p class="text-[9px] text-slate-400">Taxi Operator</p>
+                            </div>
+                        </div>
+
+                        <div onclick="selectRegisterRole('admin')" id="regCard-admin" class="reg-role-card p-2.5 rounded-xl border border-slate-800 bg-slate-900/60 cursor-pointer transition flex items-center space-x-2">
+                            <div class="w-7 h-7 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-xs">
+                                <i class="fa-solid fa-user-shield"></i>
+                            </div>
+                            <div>
+                                <h4 class="text-xs font-bold text-white">Admin</h4>
+                                <p class="text-[9px] text-slate-400">System Inspector</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Dynamic Role-Based Form -->
+                    <form id="registerForm" onsubmit="handleRegisterSubmit(event)" class="space-y-2.5">
+                        <div id="dynamicFieldsContainer" class="space-y-2.5">
+                            <!-- Populated dynamically based on meeting rules -->
+                        </div>
+
+                        <div>
+                            <label class="block text-[11px] font-medium text-slate-300 mb-1">Password</label>
+                            <div class="relative">
+                                <input type="password" id="regPassword" required placeholder="Minimum 8 characters" class="w-full px-3 py-2 pr-10 rounded-xl glass-input text-xs">
+                                <button type="button" onclick="togglePasswordVisibility('regPassword', 'regPassIcon')" class="absolute inset-y-0 right-0 flex items-center pr-3 text-slate-500">
+                                    <i id="regPassIcon" class="fa-solid fa-eye text-xs"></i>
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Terms & POPIA Consent -->
+                        <div class="flex items-start space-x-2 pt-1">
+                            <input type="checkbox" id="popiaConsent" required class="mt-0.5 w-3.5 h-3.5 rounded bg-slate-800 border-slate-700 text-amber-500 focus:ring-amber-500">
+                            <label for="popiaConsent" class="text-[10px] text-slate-400 leading-tight">
+                                I agree to the <a href="#" class="text-amber-400 underline">Terms of Service</a> & POPIA data protection guidelines.
+                            </label>
+                        </div>
+
+                        <button type="submit" 
+                                class="w-full py-3 px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs shadow-lg shadow-amber-500/20 transition active:scale-[0.98] mt-1">
+                            Register Account
+                        </button>
+                    </form>
+                </div>
+
+                <div class="text-center pt-2 border-t border-slate-800/60 mt-2">
+                    <p class="text-xs text-slate-400">
+                        Already registered? 
+                        <button onclick="switchScreen('screenLogin')" class="text-amber-400 font-semibold hover:underline">Sign In</button>
+                    </p>
+                </div>
+            </div>
+
+            <!-- OTP VERIFICATION MODAL -->
+            <div id="otpModal" class="absolute inset-0 bg-slate-950/90 backdrop-blur-md z-50 flex items-center justify-center p-6 hidden fade-in">
+                <div class="bg-slate-900 border border-slate-800 p-5 rounded-2xl w-full text-center space-y-4">
+                    <div class="w-12 h-12 bg-amber-500/20 text-amber-400 rounded-full flex items-center justify-center mx-auto text-xl">
+                        <i class="fa-solid fa-mobile-screen-button"></i>
+                    </div>
+                    <div>
+                        <h4 class="text-base font-bold text-white">Enter OTP Verification Code</h4>
+                        <p class="text-xs text-slate-400 mt-1">We sent a 4-digit code to your cellphone number for account verification.</p>
+                    </div>
+
+                    <div class="flex justify-center space-x-2 my-2">
+                        <input type="text" maxlength="1" value="4" class="w-10 h-11 text-center font-bold text-lg rounded-lg glass-input border-amber-500">
+                        <input type="text" maxlength="1" value="8" class="w-10 h-11 text-center font-bold text-lg rounded-lg glass-input border-amber-500">
+                        <input type="text" maxlength="1" value="2" class="w-10 h-11 text-center font-bold text-lg rounded-lg glass-input border-amber-500">
+                        <input type="text" maxlength="1" value="9" class="w-10 h-11 text-center font-bold text-lg rounded-lg glass-input border-amber-500">
+                    </div>
+
+                    <button onclick="confirmOTP()" class="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition">
+                        Verify & Submit
+                    </button>
+                </div>
+            </div>
+
+            <!-- SCREEN 4: USER DASHBOARD / ADMIN SYSTEM GOVERNANCE PANEL -->
+            <div id="screenDashboard" class="flex-1 flex flex-col justify-between p-5 relative overflow-y-auto hidden fade-in z-20">
+                <div>
+                    <!-- Header -->
+                    <div class="flex items-center justify-between mb-4 pb-3 border-b border-slate-800">
+                        <div class="flex items-center space-x-3">
+                            <div id="dashAvatar" class="w-10 h-10 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center font-bold text-sm shadow-md">
+                                SD
+                            </div>
+                            <div>
+                                <h4 id="dashUserName" class="text-xs font-bold text-white">Sibusiso Dlamini</h4>
+                                <span id="dashUserRole" class="text-[9px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 font-semibold border border-amber-500/30 uppercase">
+                                    Passenger
+                                </span>
+                            </div>
+                        </div>
+                        <button onclick="logout()" class="w-8 h-8 rounded-lg bg-slate-800 hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition flex items-center justify-center">
+                            <i class="fa-solid fa-right-from-bracket text-xs"></i>
+                        </button>
+                    </div>
+
+                    <!-- Approval Pending Banner (for Driver & Operator roles) -->
+                    <div id="pendingApprovalBanner" class="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs mb-4 hidden space-y-1">
+                        <div class="flex items-center space-x-2 font-bold">
+                            <i class="fa-solid fa-clock"></i>
+                            <span>Account Pending Administrator Approval</span>
+                        </div>
+                        <p class="text-[10px] text-amber-200/80 leading-relaxed">
+                            Your account is awaiting manual review by an Administrator. Notice will be issued within 24 hours.
+                        </p>
+                    </div>
+
+                    <!-- Verified Status Card -->
+                    <div class="p-3.5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 mb-4 shadow-xl">
+                        <div class="flex items-center justify-between mb-1.5">
+                            <span class="text-xs font-semibold text-slate-300">Account Verification</span>
+                            <span id="accountStatusBadge" class="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1 font-mono">
+                                <i class="fa-solid fa-circle-check text-[8px]"></i> Active / Verified
+                            </span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">
+                            TEMBA Integrated Prototype — South African Transport Hub & Verified Feedback System.
+                        </p>
+                    </div>
+
+                    <!-- Dynamic Role Overview Info -->
+                    <div id="roleDashboardContent" class="space-y-3">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+
+                <!-- Return Button -->
+                <button onclick="switchScreen('screenSplash')" class="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition mt-4">
+                    Return to Welcome Screen
+                </button>
+            </div>
+
+            <!-- Inline Toast Notification -->
+            <div id="toastNotification" class="absolute bottom-4 left-4 right-4 p-3 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs shadow-2xl flex items-center space-x-3 transition-all duration-300 transform translate-y-20 opacity-0 pointer-events-none z-50">
+                <div id="toastIcon" class="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
+                    <i class="fa-solid fa-circle-info"></i>
+                </div>
+                <div class="flex-1">
+                    <p id="toastMessage" class="text-xs font-medium leading-tight">Notification message</p>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <!-- Application JavaScript Logic -->
+    <script>
+        // Global Application State
+        let currentRole = 'passenger';
+        let currentRegRole = 'passenger';
+        let isPhoneFrameView = true;
+        let pendingAccountType = null;
+
+        // Pending Approval Mock Queue for Admin
+        let pendingApprovalsList = [
+            { id: 101, type: 'Driver', identifier: 'DL-89012345', rankCode: 'PMB-RANK-01', phone: '073 987 6543', date: '25 Aug 2026' },
+            { id: 102, type: 'Operator', identifier: 'OP-KZN-004', rankCode: 'EMP-RANK-02', phone: '081 555 9922', date: '25 Aug 2026' }
+        ];
+
+        document.addEventListener('DOMContentLoaded', () => {
+            updateLiveTime();
+            setInterval(updateLiveTime, 30000);
+            renderDynamicRegFields('passenger');
+        });
+
+        function updateLiveTime() {
+            const now = new Date();
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const timeElem = document.getElementById('liveTime');
+            if (timeElem) timeElem.textContent = `${hours}:${minutes}`;
+        }
+
+        function switchScreen(screenId) {
+            const screens = ['screenSplash', 'screenLogin', 'screenRegister', 'screenDashboard'];
+            screens.forEach(id => {
+                const elem = document.getElementById(id);
+                if (elem) {
+                    if (id === screenId) {
+                        elem.classList.remove('hidden');
+                        elem.classList.add('fade-in');
+                    } else {
+                        elem.classList.add('hidden');
+                        elem.classList.remove('fade-in');
+                    }
+                }
+            });
+        }
+
+        function toggleDisplayMode() {
+            const container = document.getElementById('appContainer');
+            const notch = document.getElementById('phoneNotch');
+            const btnText = document.getElementById('viewBtnText');
+
+            if (isPhoneFrameView) {
+                container.classList.remove('phone-frame');
+                container.classList.add('w-full', 'max-w-xl', 'h-[780px]', 'rounded-3xl', 'border-slate-800', 'shadow-2xl');
+                notch.classList.add('hidden');
+                btnText.textContent = "Switch to Mobile Frame Mode";
+                isPhoneFrameView = false;
+            } else {
+                container.classList.add('phone-frame');
+                container.classList.remove('w-full', 'max-w-xl', 'rounded-3xl', 'shadow-2xl');
+                notch.classList.remove('hidden');
+                btnText.textContent = "Switch to Desktop View";
+                isPhoneFrameView = true;
+            }
+        }
+
+        function selectLoginRole(role) {
+            currentRole = role;
+            const roles = ['passenger', 'driver', 'operator', 'admin'];
+            
+            roles.forEach(r => {
+                const btn = document.getElementById(`loginRole-${r}`);
+                if (r === role) {
+                    btn.className = "login-role-btn py-1.5 rounded-lg bg-amber-500 text-slate-950 font-bold transition";
+                } else {
+                    btn.className = "login-role-btn py-1.5 rounded-lg text-slate-400 hover:text-slate-200 transition";
+                }
+            });
+        }
+
+        function selectRegisterRole(role) {
+            currentRegRole = role;
+            const roles = ['passenger', 'driver', 'operator', 'admin'];
+
+            roles.forEach(r => {
+                const card = document.getElementById(`regCard-${r}`);
+                if (r === role) {
+                    card.className = "reg-role-card p-2.5 rounded-xl border border-amber-500 bg-amber-500/10 cursor-pointer transition flex items-center space-x-2";
+                    card.querySelector('div').className = "w-7 h-7 rounded-lg bg-amber-500 text-slate-950 flex items-center justify-center font-bold text-xs";
+                } else {
+                    card.className = "reg-role-card p-2.5 rounded-xl border border-slate-800 bg-slate-900/60 cursor-pointer transition flex items-center space-x-2";
+                    card.querySelector('div').className = "w-7 h-7 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-xs";
+                }
+            });
+
+            renderDynamicRegFields(role);
+        }
+
+        function renderDynamicRegFields(role) {
+            const container = document.getElementById('dynamicFieldsContainer');
+            let html = '';
+
+            if (role === 'passenger') {
+                // Meeting agreed: Name, Surname, Cellphone (Req), Alt Cellphone (Optional), Email (Optional)
+                html = `
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[10px] font-medium text-slate-300 mb-1">First Name *</label>
+                            <input type="text" id="regFName" required placeholder="Sibusiso" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-medium text-slate-300 mb-1">Surname *</label>
+                            <input type="text" id="regLName" required placeholder="Dlamini" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Cellphone Number *</label>
+                        <input type="tel" id="regPhone" required placeholder="082 123 4567" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                    </div>
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[10px] font-medium text-slate-300 mb-1">Alt Phone (Optional)</label>
+                            <input type="tel" placeholder="071 000 0000" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-medium text-slate-300 mb-1">Email (Optional)</label>
+                            <input type="email" placeholder="name@domain.co.za" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                        </div>
+                    </div>
+                `;
+            } else if (role === 'driver') {
+                // Meeting agreed: Cellphone, Email, License Number (PDP), Assigned Rank Code. Vehicle plate removed.
+                html = `
+                    <div class="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[10px] text-amber-300 mb-1">
+                        <i class="fa-solid fa-circle-info mr-1"></i> Drivers are linked to vehicles per-trip by operators.
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Cellphone Number *</label>
+                        <input type="tel" id="regPhone" required placeholder="073 987 6543" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Email Address *</label>
+                        <input type="email" required placeholder="driver@transport.co.za" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Driver License Number (PDP) *</label>
+                        <input type="text" required placeholder="DL-89012345" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Assigned Taxi Association / Rank Code *</label>
+                        <input type="text" required placeholder="e.g. PMB-RANK-01" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs uppercase">
+                    </div>
+                `;
+            } else if (role === 'operator') {
+                // Meeting agreed: Cellphone, Email, Admin-issued unique Rank Code.
+                html = `
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Cellphone Number *</label>
+                        <input type="tel" id="regPhone" required placeholder="081 555 9922" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Email Address *</label>
+                        <input type="email" required placeholder="operator@association.co.za" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Admin-Issued Operator Rank Code *</label>
+                        <input type="text" required placeholder="e.g. OP-KZN-004" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs font-mono uppercase">
+                        <p class="text-[9px] text-slate-400 mt-0.5">Unique rank code issued by system administrator.</p>
+                    </div>
+                `;
+            } else if (role === 'admin') {
+                // Meeting agreed: Admin registration with passcode
+                html = `
+                    <div class="grid grid-cols-2 gap-2">
+                        <div>
+                            <label class="block text-[10px] font-medium text-slate-300 mb-1">First Name *</label>
+                            <input type="text" id="regFName" required placeholder="Admin Name" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                        </div>
+                        <div>
+                            <label class="block text-[10px] font-medium text-slate-300 mb-1">Surname *</label>
+                            <input type="text" id="regLName" required placeholder="Admin Surname" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Cellphone Number *</label>
+                        <input type="tel" id="regPhone" required placeholder="082 123 4567" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Oversight Institution / University *</label>
+                        <input type="text" required placeholder="e.g. UNIZULU Inspectorate" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                    </div>
+                    <div>
+                        <label class="block text-[10px] font-medium text-slate-300 mb-1">Admin Authorization Passcode *</label>
+                        <input type="password" required placeholder="Enter secret passcode" class="w-full px-2.5 py-1.5 rounded-xl glass-input text-xs">
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+        }
+
+        function handleRegisterSubmit(e) {
+            e.preventDefault();
+            
+            if (currentRegRole === 'driver' || currentRegRole === 'operator') {
+                pendingAccountType = currentRegRole;
+                document.getElementById('otpModal').classList.remove('hidden');
+            } else {
+                showNotification(`Account registered for ${currentRegRole.toUpperCase()}!`, 'success');
+                setTimeout(() => {
+                    setupDashboardView(currentRegRole, 'Verified User', false);
+                    switchScreen('screenDashboard');
+                }, 800);
+            }
+        }
+
+        function confirmOTP() {
+            document.getElementById('otpModal').classList.add('hidden');
+            showNotification(`OTP Verified! Sent to Administrator for approval within 24h.`, 'info');
+            setTimeout(() => {
+                setupDashboardView(pendingAccountType, `${pendingAccountType.toUpperCase()} (Pending)`, true);
+                switchScreen('screenDashboard');
+            }, 800);
+        }
+
+        function fillDemo(role) {
+            selectLoginRole(role);
+            const idInput = document.getElementById('loginIdentifier');
+            const passInput = document.getElementById('loginPassword');
+
+            if (role === 'passenger') {
+                idInput.value = '0821234567';
+                passInput.value = 'passenger123';
+            } else if (role === 'driver') {
+                idInput.value = '0691234567';
+                passInput.value = 'driver123';
+            } else if (role === 'operator') {
+                idInput.value = '0789871234';
+                passInput.value = 'operator123';
+            } else if (role === 'admin') {
+                idInput.value = 'admin@temba.ac.za';
+                passInput.value = 'admin123';
+            }
+
+            showNotification(`Filled Demo Credentials for ${role.toUpperCase()}`, 'info');
+        }
+
+        function handleLoginSubmit(e) {
+            e.preventDefault();
+            const id = document.getElementById('loginIdentifier').value;
+            showNotification(`Signing in as ${currentRole.toUpperCase()}...`, 'success');
+
+            setTimeout(() => {
+                const isPending = (currentRole === 'driver' || currentRole === 'operator') && id.includes('PENDING');
+                setupDashboardView(currentRole, id, isPending);
+                switchScreen('screenDashboard');
+            }, 600);
+        }
+
+        function loginAsGuest() {
+            showNotification('Continuing in Guest Mode (Read-Only Information)', 'info');
+            setTimeout(() => {
+                setupDashboardView('passenger', 'Guest Commuter', false);
+                switchScreen('screenDashboard');
+            }, 500);
+        }
+
+        function setupDashboardView(role, userLabel, isPending = false) {
+            const avatar = document.getElementById('dashAvatar');
+            const nameElem = document.getElementById('dashUserName');
+            const roleElem = document.getElementById('dashUserRole');
+            const container = document.getElementById('roleDashboardContent');
+            const pendingBanner = document.getElementById('pendingApprovalBanner');
+            const statusBadge = document.getElementById('accountStatusBadge');
+
+            nameElem.textContent = userLabel || 'Verified User';
+            roleElem.textContent = role.toUpperCase();
+            avatar.textContent = userLabel.substring(0, 2).toUpperCase();
+
+            if (isPending) {
+                pendingBanner.classList.remove('hidden');
+                statusBadge.className = "text-[9px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center gap-1 font-mono";
+                statusBadge.innerHTML = `<i class="fa-solid fa-clock"></i> Pending Approval`;
+            } else {
+                pendingBanner.classList.add('hidden');
+                statusBadge.className = "text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center gap-1 font-mono";
+                statusBadge.innerHTML = `<i class="fa-solid fa-circle-check"></i> Active / Verified`;
+            }
+
+            let html = '';
+
+            if (role === 'passenger') {
+                html = `
+                    <div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                        <div class="flex items-center space-x-2 text-amber-400 font-bold text-xs">
+                            <i class="fa-solid fa-magnifying-glass"></i>
+                            <span>Search Fares & Schedules</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">View verified fares for PMB, Durban, Richards Bay, and KwaDlangezwa routes.</p>
+                    </div>
+                    <div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                        <div class="flex items-center space-x-2 text-emerald-400 font-bold text-xs">
+                            <i class="fa-solid fa-qrcode"></i>
+                            <span>Trip Verification Codes</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Single-use boarding code (e.g., 7F3Q 9K2L) confirms participation for trusted feedback.</p>
+                    </div>
+                `;
+            } else if (role === 'driver') {
+                html = `
+                    <div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+                        <div class="flex items-center justify-between text-emerald-400 font-bold text-xs">
+                            <span class="flex items-center gap-2"><i class="fa-solid fa-van-shuttle"></i> Active Trip Manifest</span>
+                            <span class="text-[10px] text-slate-400 font-mono">Assigned per trip</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Vehicle: Toyota Quantum (ND 123-456) matched to driver for PMB ➔ Durban trip.</p>
+                    </div>
+                `;
+            } else if (role === 'operator') {
+                html = `
+                    <div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+                        <div class="flex items-center justify-between text-blue-400 font-bold text-xs">
+                            <span><i class="fa-solid fa-building-user mr-1"></i> Operator Trip & Vehicle Linkage</span>
+                        </div>
+                        <p class="text-[11px] text-slate-400">Assign verified drivers to cleared vehicles per-trip to prevent unauthorized vehicle swapping.</p>
+                    </div>
+                `;
+            } else if (role === 'admin') {
+                // Meeting agreed: Admin oversees approvals, elevates complaints, archives/disables users (no deletion)
+                html = `
+                    <!-- Pending Approvals Module -->
+                    <div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+                        <div class="flex items-center justify-between text-amber-400 font-bold text-xs">
+                            <span><i class="fa-solid fa-user-clock mr-1"></i> Driver & Operator Approvals</span>
+                            <span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-[10px] font-mono">${pendingApprovalsList.length} Pending</span>
+                        </div>
+                        <div id="adminApprovalContainer" class="space-y-1.5 text-[11px]">
+                            ${renderAdminApprovalList()}
+                        </div>
+                    </div>
+
+                    <!-- Complaint Escalation Module -->
+                    <div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+                        <div class="flex items-center space-x-2 text-purple-400 font-bold text-xs">
+                            <i class="fa-solid fa-scale-balanced"></i>
+                            <span>Complaint Review</span>
+                        </div>
+                        <div class="p-2 rounded bg-slate-950 border border-slate-800 text-[10px] text-slate-300 flex justify-between items-center">
+                            <div>
+                                <span class="font-bold text-amber-400 block">Report #8802 - Reckless Overtaking</span>
+                            </div>
+                            <button onclick="showNotification('Complaint marked as Confirmed Safety Incident', 'success')" class="px-2 py-1 bg-purple-600 hover:bg-purple-500 rounded text-white text-[9px] font-bold">
+                                Review
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Governance Module: Archive/Disable User -->
+                    <div class="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-2">
+                        <div class="flex items-center text-rose-400 font-bold text-xs">
+                            <span><i class="fa-solid fa-user-slash mr-1"></i> Account Governance </span>
+                        </div>
+                        <p class="text-[10px] text-slate-400">Archive or disable problematic accounts.</p>
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+        }
+
+        function renderAdminApprovalList() {
+            if (pendingApprovalsList.length === 0) {
+                return `<p class="text-slate-500 text-[10px] text-center py-1">No pending accounts awaiting approval.</p>`;
+            }
+
+            return pendingApprovalsList.map(item => `
+                <div class="p-2 rounded bg-slate-950 border border-slate-800 flex justify-between items-center">
+                    <div>
+                        <span class="font-bold text-white block">${item.type}: ${item.identifier}</span>
+                        <span class="text-slate-400 text-[9px]">Rank: ${item.rankCode} | Tel: ${item.phone}</span>
+                    </div>
+                    <div class="flex space-x-1">
+                        <button onclick="approveAccount(${item.id})" class="px-2 py-1 rounded bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-[9px] font-bold">Approve</button>
+                        <button onclick="rejectAccount(${item.id})" class="px-2 py-1 rounded bg-rose-500 hover:bg-rose-400 text-white text-[9px] font-bold">Reject</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function approveAccount(id) {
+            pendingApprovalsList = pendingApprovalsList.filter(item => item.id !== id);
+            showNotification('Account approved successfully!', 'success');
+            document.getElementById('adminApprovalContainer').innerHTML = renderAdminApprovalList();
+        }
+
+        function rejectAccount(id) {
+            pendingApprovalsList = pendingApprovalsList.filter(item => item.id !== id);
+            showNotification('Account rejected and notified.', 'error');
+            document.getElementById('adminApprovalContainer').innerHTML = renderAdminApprovalList();
+        }
+
+        function togglePasswordVisibility(inputId, iconId) {
+            const input = document.getElementById(inputId);
+            const icon = document.getElementById(iconId);
+
+            if (input.type === 'password') {
+                input.type = 'text';
+                icon.className = 'fa-solid fa-eye-slash text-xs';
+            } else {
+                input.type = 'password';
+                icon.className = 'fa-solid fa-eye text-xs';
+            }
+        }
+
+        function logout() {
+            showNotification('Logged out successfully', 'info');
+            switchScreen('screenSplash');
+        }
+
+        function showNotification(msg, type = 'info') {
+            const toast = document.getElementById('toastNotification');
+            const toastMsg = document.getElementById('toastMessage');
+            const toastIcon = document.getElementById('toastIcon');
+
+            toastMsg.textContent = msg;
+
+            if (type === 'success') {
+                toastIcon.className = "w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0";
+                toastIcon.innerHTML = `<i class="fa-solid fa-circle-check"></i>`;
+            } else if (type === 'error') {
+                toastIcon.className = "w-7 h-7 rounded-lg bg-rose-500/20 text-rose-400 flex items-center justify-center shrink-0";
+                toastIcon.innerHTML = `<i class="fa-solid fa-circle-exclamation"></i>`;
+            } else {
+                toastIcon.className = "w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0";
+                toastIcon.innerHTML = `<i class="fa-solid fa-circle-info"></i>`;
+            }
+
+            toast.classList.remove('translate-y-20', 'opacity-0', 'pointer-events-none');
+
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0', 'pointer-events-none');
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
