@@ -1,4 +1,4 @@
-# THEMBA
+# THEMBA.
 
 **T**ransport **H**ub with **E**valuated **M**obility, **B**oarding and **A**ccountability
 
