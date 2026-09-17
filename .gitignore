@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ============ Python / Django ============
 __pycache__/
 *.py[cod]
@@ -17,6 +18,18 @@ staticfiles/
 *.log
 
 # ============ Secrets ============
+=======
+# --- OS files ---
+.DS_Store
+Thumbs.db
+
+# --- IDE / editor ---
+.vscode/
+.idea/
+*.swp
+
+# --- Environment / secrets ---
+>>>>>>> origin/develop
 .env
 .env.local
 *.pem
