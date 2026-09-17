@@ -1,0 +1,49 @@
+# ============ Python / Django ============
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+*.egg-info/
+.pytest_cache/
+db.sqlite3
+db.sqlite3-journal
+media/
+staticfiles/
+*.log
+
+# ============ Secrets ============
+.env
+.env.local
+*.pem
+*.key
+
+# ============ Node / Vite ============
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dist/
+build/
+.vite/
+
+# ============ Editor / OS ============
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============ Local-only folders (not part of the repo) ============
+themba/
+themba_reference/
+
+# ============ DOT registry — schema yes, db file no ============
+dot_registry/*.db
+dot_registry/*.sqlite*
