@@ -3,7 +3,6 @@ from accounts.models import OperatorProfile
 
 
 class Destination(models.Model):
-    """A place you can travel to. Global — not owned by an operator."""
     name = models.CharField(max_length=150)
     area = models.CharField(max_length=150, blank=True)
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
@@ -16,11 +15,8 @@ class Destination(models.Model):
         return self.name
 
 
-class DeparturePoint(models.Model):
-    """A place an operator's vehicles leave from. Owned by one operator."""
-    operator = models.ForeignKey(
-        OperatorProfile, on_delete=models.CASCADE, related_name="departure_points"
-    )
+class Rank(models.Model):
+    """A physical place where taxis load. Multiple operators can use one Rank."""
     name = models.CharField(max_length=150)
     area = models.CharField(max_length=150, blank=True)
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
@@ -30,12 +26,34 @@ class DeparturePoint(models.Model):
         ordering = ["name"]
 
     def __str__(self):
-        return f"{self.name} — {self.operator.association.association_name}"
+        return f"{self.name} ({self.area})" if self.area else self.name
+
+
+class DeparturePoint(models.Model):
+    """An operator's presence at a Rank. Multiple operators can share a Rank."""
+    operator = models.ForeignKey(
+        OperatorProfile, on_delete=models.CASCADE, related_name="departure_points"
+    )
+    rank = models.ForeignKey(
+        Rank, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="departure_points",
+    )
+
+    # Legacy fields — kept for backward compat with existing seed. Will be dropped later.
+    name = models.CharField(max_length=150, blank=True)
+    area = models.CharField(max_length=150, blank=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        label = self.rank.name if self.rank else (self.name or "Departure point")
+        return f"{label} — {self.operator.association.association_name}"
 
 
 class Route(models.Model):
-    """A specific operator service between a departure point and a destination."""
-
     class ServiceCategory(models.TextChoices):
         UNSTRUCTURED = "unstructured", "Unstructured"
         STRUCTURED = "structured", "Structured"
@@ -61,4 +79,4 @@ class Route(models.Model):
         ordering = ["departure_point__name", "destination__name"]
 
     def __str__(self):
-        return f"{self.departure_point.name} → {self.destination.name} (R{self.fare})"
+        return f"{self.departure_point} → {self.destination.name} (R{self.fare})"

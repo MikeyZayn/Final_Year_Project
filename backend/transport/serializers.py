@@ -1,5 +1,10 @@
 from rest_framework import serializers
-from .models import Destination, DeparturePoint, Route
+from .models import Rank, Destination, DeparturePoint, Route
+
+class RankSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Rank
+        fields = ["id", "name", "area", "latitude", "longitude"]
 
 
 class DestinationSerializer(serializers.ModelSerializer):
@@ -9,10 +14,11 @@ class DestinationSerializer(serializers.ModelSerializer):
 
 
 class DeparturePointSerializer(serializers.ModelSerializer):
+    rank = RankSerializer(read_only=True)
+
     class Meta:
         model = DeparturePoint
-        fields = ["id", "name", "area", "latitude", "longitude"]
-
+        fields = ["id", "name", "area", "latitude", "longitude", "rank"]
 
 class RouteSerializer(serializers.ModelSerializer):
     departure_point = DeparturePointSerializer(read_only=True)
