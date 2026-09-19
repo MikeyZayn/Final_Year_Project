@@ -60,3 +60,9 @@ themba_reference/
 # ============ DOT registry — schema yes, db file no ============
 dot_registry/*.db
 dot_registry/*.sqlite*
+
+# --- ML artifacts (scaffold parity) ---
+*.csv.bak
+/data/raw/
+/models/*.pkl
+/models/*.h5
