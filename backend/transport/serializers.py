@@ -15,11 +15,14 @@ class DestinationSerializer(serializers.ModelSerializer):
 
 class DeparturePointSerializer(serializers.ModelSerializer):
     rank = RankSerializer(read_only=True)
+    operator_id = serializers.IntegerField(source="operator.id", read_only=True)
+    operator_name = serializers.CharField(
+        source="operator.association.association_name", read_only=True
+    )
 
     class Meta:
         model = DeparturePoint
-        fields = ["id", "name", "area", "latitude", "longitude", "rank"]
-
+        fields = ["id", "operator_id", "operator_name", "rank", "status"]
 class RouteSerializer(serializers.ModelSerializer):
     departure_point = DeparturePointSerializer(read_only=True)
     destination = DestinationSerializer(read_only=True)
