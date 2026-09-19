@@ -1,4 +1,5 @@
-from accounts.models import User, OperatorProfile, RankCode
+from django.utils import timezone
+from accounts.models import User, OperatorProfile, RankCode, AdminProfile
 from transport.models import Rank, DeparturePoint, Destination, Route
 
 # ---- Clear transport data ----
@@ -37,7 +38,35 @@ for name, area, lat, lng in RANK_SPECS:
     ranks_by_name[name] = r
 print(f"ranks ready: {len(ranks_by_name)}")
 
-# ---- Operators (phone, first, last, rank code, assigned rank name) ----
+# ---- Admins (one per rank, strictly) ----
+ADMIN_SPECS = [
+    ("0700000001", "Sizwe",  "Nkosi",   "Ongoye Main Rank",       "Kwa-Dlangezwa Taxi Association"),
+    ("0700000002", "Andile", "Mabaso",  "eSikhawini Main Rank",   "eSikhawini Taxi Association"),
+    ("0700000003", "Lerato", "Molefe",  "Richards Bay Main Rank", "Richards Bay Taxi Association"),
+    ("0700000004", "Dumi",   "Cele",    "Empangeni Rank 1",       "Empangeni Taxi Association"),
+    ("0700000005", "Nandi",  "Zulu",    "Empangeni Rank 2",       "Empangeni Taxi Association"),
+    ("0700000006", "Pieter", "van Wyk", "Empangeni Rank 3",       "Empangeni Taxi Association"),
+    ("0700000007", "Grace",  "Mthembu", "Empangeni Rank 4",       "Empangeni Taxi Association"),
+]
+admins_by_rank = {}
+for phone, first, last, rank_name, institution in ADMIN_SPECS:
+    user, created = User.objects.get_or_create(
+        phone=phone,
+        defaults={"role": "admin", "username": phone},
+    )
+    user.first_name, user.last_name, user.role = first, last, "admin"
+    if created or not user.has_usable_password():
+        user.set_password("Passw0rd!")
+    user.save()
+
+    admin_profile, _ = AdminProfile.objects.update_or_create(
+        user=user,
+        defaults={"institution_name": institution, "rank": ranks_by_name[rank_name]},
+    )
+    admins_by_rank[rank_name] = admin_profile
+print(f"admins ready: {len(admins_by_rank)}")
+
+# ---- Operators + DeparturePoints (active at their assigned rank) ----
 OPERATOR_SPECS = [
     ("0820000003", "Nqobile", "Zondi",    "KDL001", "Ongoye Main Rank"),
     ("0820000004", "Sipho",   "Ndlovu",   "ESK001", "eSikhawini Main Rank"),
@@ -46,12 +75,9 @@ OPERATOR_SPECS = [
     ("0820000007", "Bheki",   "Mahlangu", "EMP001", "Empangeni Rank 2"),
     ("0820000008", "Lindiwe", "Ncube",    "EMP001", "Empangeni Rank 3"),
     ("0820000009", "Musa",    "Dube",     "EMP001", "Empangeni Rank 4"),
-    # second operator at Empangeni Rank 1
     ("0820000010", "Mpho",    "Radebe",   "EMP001", "Empangeni Rank 1"),
-    # second operator at Empangeni Rank 3
     ("0820000011", "Zanele",  "Mkhize",   "EMP001", "Empangeni Rank 3"),
 ]
-
 operators_by_phone = {}
 departure_by_phone = {}
 for phone, first, last, code, rank_name in OPERATOR_SPECS:
@@ -74,13 +100,11 @@ for phone, first, last, code, rank_name in OPERATOR_SPECS:
     dp = DeparturePoint.objects.create(
         operator=profile,
         rank=rank,
-        name=rank.name,      # legacy mirror for backward compat
-        area=rank.area,
-        latitude=rank.latitude,
-        longitude=rank.longitude,
+        status=DeparturePoint.Status.ACTIVE,
+        approved_by=admins_by_rank[rank_name],
+        approved_at=timezone.now(),
     )
     departure_by_phone[phone] = dp
-
 print(f"operators + departure points ready: {len(operators_by_phone)}")
 
 # ---- Destinations ----
@@ -96,25 +120,18 @@ print(f"destinations ready: {len(destinations)}")
 
 # ---- Routes ----
 ROUTE_SPECS = [
-    # Ongoye Main Rank operator
     ("0820000003", "Empangeni",     24),
     ("0820000003", "eSikhawini",    16),
-    # eSikhawini Main Rank operator
     ("0820000004", "Empangeni",     24),
     ("0820000004", "Kwa-Dlangezwa", 16),
-    # Richards Bay Main Rank operator
     ("0820000006", "Empangeni",     24),
     ("0820000006", "Kwa-Dlangezwa", 34),
-    # Empangeni Rank 1 operators (two of them)
     ("0820000005", "Kwa-Dlangezwa", 24),
     ("0820000010", "eSikhawini",    24),
-    # Empangeni Rank 2
     ("0820000007", "Kwa-Dlangezwa", 24),
-    # Empangeni Rank 3 operators (two of them)
     ("0820000008", "eSikhawini",    24),
     ("0820000008", "Richards Bay",  24),
     ("0820000011", "Kwa-Dlangezwa", 24),
-    # Empangeni Rank 4
     ("0820000009", "eSikhawini",    24),
     ("0820000009", "Richards Bay",  24),
 ]
@@ -130,6 +147,7 @@ for phone, dest_name, fare in ROUTE_SPECS:
 
 print("\n=== FINAL STATE ===")
 print("Ranks:           ", Rank.objects.count())
+print("Admins:          ", AdminProfile.objects.count())
 print("Operators:       ", OperatorProfile.objects.count())
 print("Departure points:", DeparturePoint.objects.count())
 print("Destinations:    ", Destination.objects.count())

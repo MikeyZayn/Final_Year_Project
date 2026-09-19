@@ -90,6 +90,13 @@ class OperatorProfile(models.Model):
 class AdminProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="admin_profile")
     institution_name = models.CharField(max_length=150)
+    rank = models.ForeignKey(
+        "transport.Rank",
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="admins",
+    )
 
     def __str__(self):
-        return f"Admin: {self.user} ({self.institution_name})"
+        rank_label = self.rank.name if self.rank else "unassigned"
+        return f"Admin: {self.user} ({self.institution_name}) @ {rank_label}"

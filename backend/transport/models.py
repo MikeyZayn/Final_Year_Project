@@ -30,28 +30,44 @@ class Rank(models.Model):
 
 
 class DeparturePoint(models.Model):
-    """An operator's presence at a Rank. Multiple operators can share a Rank."""
+    """An operator's approved presence at a Rank.
+
+    Multiple operators can share a rank. Each operator-rank pairing exists
+    as one DeparturePoint row with a status that reflects whether the
+    assignment has been approved by the rank's admin.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending approval"
+        ACTIVE = "active", "Active"
+        REJECTED = "rejected", "Rejected"
+        INACTIVE = "inactive", "Inactive (transferred or removed)"
+
     operator = models.ForeignKey(
         OperatorProfile, on_delete=models.CASCADE, related_name="departure_points"
     )
     rank = models.ForeignKey(
-        Rank, on_delete=models.PROTECT, null=True, blank=True,
-        related_name="departure_points",
+        Rank, on_delete=models.PROTECT, related_name="departure_points"
     )
-
-    # Legacy fields — kept for backward compat with existing seed. Will be dropped later.
-    name = models.CharField(max_length=150, blank=True)
-    area = models.CharField(max_length=150, blank=True)
-    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
-    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING
+    )
+    approved_by = models.ForeignKey(
+        "accounts.AdminProfile",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="approved_departure_points",
+    )
+    requested_at = models.DateTimeField(auto_now_add=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True)
 
     class Meta:
-        ordering = ["name"]
+        ordering = ["rank__name"]
+        unique_together = [("operator", "rank")]
 
     def __str__(self):
-        label = self.rank.name if self.rank else (self.name or "Departure point")
-        return f"{label} — {self.operator.association.association_name}"
-
+        return f"{self.rank} — {self.operator.association.association_name} ({self.status})"
 
 class Route(models.Model):
     class ServiceCategory(models.TextChoices):
@@ -76,7 +92,7 @@ class Route(models.Model):
     active = models.BooleanField(default=True)
 
     class Meta:
-        ordering = ["departure_point__name", "destination__name"]
-
+        ordering = ["departure_point__rank__name", "destination__name"]
+        
     def __str__(self):
         return f"{self.departure_point} → {self.destination.name} (R{self.fare})"
