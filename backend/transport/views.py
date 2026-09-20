@@ -154,24 +154,32 @@ def api_trip_manifest(request, trip_id):
 
     data = TripSerializer(trip).data
     bookings = trip.bookings.select_related("passenger", "verification_code")
-    manifest = []
+
+    booked = []
+    walk_ins = []
     for b in bookings:
+        vc = getattr(b, "verification_code", None)
         entry = {
             "booking_id": b.id,
             "name": b.display_name(),
             "phone": b.passenger.phone if b.passenger else b.walk_in_phone,
+            "next_of_kin_name": b.walk_in_next_of_kin_name if not b.passenger else None,
+            "next_of_kin_phone": b.walk_in_next_of_kin_phone if not b.passenger else None,
             "status": b.status,
             "booked_at": b.booked_at,
             "walk_in": b.passenger is None,
+            "verification_code": vc.code if vc else None,
+            "code_verified": bool(vc and vc.verified_at),
         }
-        vc = getattr(b, "verification_code", None)
-        entry["verification_code"] = vc.code if vc else None
-        entry["code_verified"] = bool(vc and vc.verified_at)
-        manifest.append(entry)
-    data["manifest"] = manifest
+        if b.passenger is None:
+            walk_ins.append(entry)
+        else:
+            booked.append(entry)
+
+    data["booked_passengers"] = booked
+    data["walk_in_passengers"] = walk_ins
+    data["manifest"] = booked + walk_ins
     return Response(data)
-
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_register_walk_in(request, trip_id):
@@ -411,3 +419,108 @@ def api_trip_asset_changes(request, trip_id):
         "old_vehicle", "new_vehicle", "changed_by",
     )
     return Response(TripAssetChangeSerializer(changes, many=True).data)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_engage_trip(request, trip_id):
+    """Operator engages a trip — locks them to it until release."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+
+    # one engagement at a time
+    existing = Trip.objects.filter(engaged_by=op).exclude(pk=trip_id).first()
+    if existing:
+        return Response(
+            {"detail": f"You are already engaged to trip {existing.trip_code}. Release it first."},
+            status=400,
+        )
+
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+
+    if trip.status in [Trip.Status.COMPLETED, Trip.Status.CANCELLED]:
+        return Response({"detail": "Cannot engage a completed or cancelled trip."}, status=400)
+
+    trip.engaged_by = op
+    trip.engaged_at = timezone.now()
+    trip.status = Trip.Status.BOARDING
+    trip.save()
+
+    return Response(TripSerializer(trip).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_release_trip(request, trip_id):
+    """Release the trip. Remaining unverified reservations become NO_SHOW."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op, engaged_by=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "You are not engaged to this trip."}, status=404)
+
+    # bump unverified reservations
+    bumped = trip.bookings.filter(status=Booking.Status.RESERVED).update(
+        status=Booking.Status.NO_SHOW
+    )
+
+    trip.engaged_by = None
+    trip.engaged_at = None
+    if trip.status == Trip.Status.BOARDING:
+        trip.status = Trip.Status.IN_PROGRESS
+    trip.save()
+
+    return Response({
+        "trip": TripSerializer(trip).data,
+        "bumped": bumped,
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_verify_booking(request, trip_id, booking_id):
+    """Operator confirms a booked passenger boarded. Issues a verification code."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op, engaged_by=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "You are not engaged to this trip."}, status=404)
+
+    try:
+        booking = Booking.objects.get(pk=booking_id, trip=trip)
+    except Booking.DoesNotExist:
+        return Response({"detail": "Booking not found on this trip."}, status=404)
+
+    if booking.status != Booking.Status.RESERVED:
+        return Response({"detail": f"Booking is already {booking.status}."}, status=400)
+
+    booking.status = Booking.Status.BOARDED
+    booking.boarded_at = timezone.now()
+    booking.boarded_by = request.user
+    booking.save()
+
+    code = get_random_string(6).upper()
+    while VerificationCode.objects.filter(code=code).exists():
+        code = get_random_string(6).upper()
+    VerificationCode.objects.create(booking=booking, code=code, issued_by=request.user)
+
+    # if trip is full, bump remaining unverified reservations
+    bumped = 0
+    if trip.seats_taken >= trip.seat_capacity:
+        bumped = trip.bookings.filter(status=Booking.Status.RESERVED).update(
+            status=Booking.Status.NO_SHOW
+        )
+
+    return Response({
+        "booking": BookingSerializer(booking).data,
+        "verification_code": code,
+        "bumped": bumped,
+        "trip_full": trip.seats_taken >= trip.seat_capacity,
+    })

@@ -1396,12 +1396,18 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   const [trip, setTrip] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [showEngagePrompt, setShowEngagePrompt] = useState(false);
+
+  // Walk-in form
   const [walkInName, setWalkInName] = useState('');
   const [walkInPhone, setWalkInPhone] = useState('');
-  const [lastCode, setLastCode] = useState(null);
-  const [flagCategory, setFlagCategory] = useState('vehicle_condition');
-  const [flagNotes, setFlagNotes] = useState('');
-  const [flagOpen, setFlagOpen] = useState(false);
+  const [walkInNokName, setWalkInNokName] = useState('');
+  const [walkInNokPhone, setWalkInNokPhone] = useState('');
+  const [lastWalkInCode, setLastWalkInCode] = useState(null);
+
+  // Verify
+  const [verifyingId, setVerifyingId] = useState(null);
+  const [lastVerifiedCode, setLastVerifiedCode] = useState(null);
 
   async function load() {
     setLoading(true);
@@ -1418,16 +1424,65 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
 
   useEffect(() => { load(); }, [tripId]);
 
+  async function engage() {
+    try {
+      await api.post(`/transport/api/my-trips/${tripId}/engage/`);
+      setShowEngagePrompt(false);
+      notify('You are now working this trip.');
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Could not engage trip.');
+    }
+  }
+
+  async function release() {
+    if (!window.confirm('Release this trip? Remaining unverified passengers will be marked no-show.')) return;
+    try {
+      const { data } = await api.post(`/transport/api/my-trips/${tripId}/release/`);
+      notify(`Trip released. ${data.bumped} unverified passenger(s) bumped.`);
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Could not release.');
+    }
+  }
+
+  async function verifyBooking(bookingId) {
+    setVerifyingId(bookingId);
+    try {
+      const { data } = await api.post(
+        `/transport/api/my-trips/${tripId}/bookings/${bookingId}/verify/`
+      );
+      setLastVerifiedCode({ bookingId, code: data.verification_code });
+      notify(`Verified. Code: ${data.verification_code}`);
+      if (data.bumped > 0) {
+        notify(`Trip full — ${data.bumped} unverified passenger(s) bumped.`);
+      }
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Verification failed.');
+    } finally {
+      setVerifyingId(null);
+    }
+  }
+
   async function registerWalkIn() {
     if (!walkInName.trim()) { notify('Name is required.'); return; }
+    if (!walkInNokName.trim() || !walkInNokPhone.trim()) {
+      notify('Next-of-kin name and phone are required.');
+      return;
+    }
     try {
       const { data } = await api.post(`/transport/api/my-trips/${tripId}/walk-in/`, {
         name: walkInName,
         phone: walkInPhone,
+        next_of_kin_name: walkInNokName,
+        next_of_kin_phone: walkInNokPhone,
       });
-      setLastCode(data.verification_code);
+      setLastWalkInCode({ name: walkInName, code: data.verification_code });
       setWalkInName('');
       setWalkInPhone('');
+      setWalkInNokName('');
+      setWalkInNokPhone('');
       notify('Walk-in registered. Code issued.');
       load();
     } catch (err) {
@@ -1435,35 +1490,69 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     }
   }
 
-  async function submitFlag() {
-    if (!flagNotes.trim()) { notify('Notes are required.'); return; }
-    try {
-      await api.post(`/transport/api/my-trips/${tripId}/flag/`, {
-        category: flagCategory,
-        notes: flagNotes,
-      });
-      setFlagNotes('');
-      setFlagOpen(false);
-      notify('Trip flagged for admin review.');
-      load();
-    } catch (err) {
-      notify(err.response?.data?.detail || 'Flag failed.');
-    }
+  if (loading) return <article className="module module-wide"><p className="muted">Loading…</p></article>;
+  if (error) return (
+    <article className="module module-wide">
+      <p className="danger-button" style={{ display: 'block' }}>{error}</p>
+      <button className="secondary-button" onClick={onBack} type="button">← Back</button>
+    </article>
+  );
+  if (!trip) return null;
+
+  const engaged = trip.is_engaged;
+
+  // Engage prompt before anything else
+  if (!engaged) {
+    return (
+      <>
+        <article className="module module-wide">
+          <div className="module-heading">
+            <span>{trip.trip_code}</span>
+            <button className="text-button" onClick={onBack} type="button">← Back</button>
+          </div>
+          <h3 style={{ margin: '8px 0' }}>
+            {trip.route.departure.name} → {trip.route.destination.name}
+          </h3>
+          <div className="route-summary">
+            <div><span className="route-label">Date</span><strong>{trip.departure_date}</strong></div>
+            <div><span className="route-label">Time</span><strong>{trip.expected_departure_time?.slice(0, 5) || '—'}</strong></div>
+            <div><span className="route-label">Driver</span><strong>{trip.driver_name || 'Unassigned'}</strong></div>
+            <div><span className="route-label">Vehicle</span><strong>{trip.vehicle_plate || 'Unassigned'}</strong></div>
+            <div><span className="route-label">Seats</span><strong>{trip.seats_taken}/{trip.seat_capacity}</strong></div>
+            <div><span className="route-label">Status</span><strong>{trip.status}</strong></div>
+          </div>
+        </article>
+
+        <article className="module module-wide">
+          <div className="module-heading"><span>Work this trip?</span></div>
+          <p className="muted">
+            Engaging locks you to this trip until you release it. You cannot work another
+            trip at the same time.
+          </p>
+          <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
+            <button className="secondary-button" onClick={onBack} type="button">Not now</button>
+            <button className="primary-button" onClick={engage} type="button">
+              Yes, work this trip
+            </button>
+          </div>
+        </article>
+      </>
+    );
   }
 
-  if (loading) return <article className="module module-wide"><p className="muted">Loading…</p></article>;
-  if (error) return <article className="module module-wide">
-    <p className="danger-button" style={{ display: 'block' }}>{error}</p>
-    <button className="secondary-button" onClick={onBack} type="button">← Back</button>
-  </article>;
-  if (!trip) return null;
+  const booked = trip.booked_passengers || [];
+  const walkIns = trip.walk_in_passengers || [];
+  const isFull = trip.seats_taken >= trip.seat_capacity;
 
   return (
     <>
       <article className="module module-wide">
         <div className="module-heading">
-          <span>{trip.trip_code}</span>
-          <button className="text-button" onClick={onBack} type="button">← Back</button>
+          <span>{trip.trip_code} · BOARDING</span>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="secondary-button" onClick={onBack} type="button">← Back</button>
+            <button className="danger-button" onClick={release} type="button">Release trip</button>
+          </div>
         </div>
         <h3 style={{ margin: '8px 0' }}>
           {trip.route.departure.name} → {trip.route.destination.name}
@@ -1473,91 +1562,102 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
           <div><span className="route-label">Time</span><strong>{trip.expected_departure_time?.slice(0, 5) || '—'}</strong></div>
           <div><span className="route-label">Driver</span><strong>{trip.driver_name || 'Unassigned'}</strong></div>
           <div><span className="route-label">Vehicle</span><strong>{trip.vehicle_plate || 'Unassigned'}</strong></div>
-          <div><span className="route-label">Seats</span><strong>{trip.seats_taken}/{trip.seat_capacity}</strong></div>
+          <div><span className="route-label">Seats</span><strong style={{ color: isFull ? 'var(--danger)' : undefined }}>{trip.seats_taken}/{trip.seat_capacity}</strong></div>
           <div><span className="route-label">Status</span><strong>{trip.status}</strong></div>
         </div>
       </article>
 
+      {/* Panel 1 — Booked app users */}
       <article className="module module-wide">
         <div className="module-heading">
-          <span>Manifest</span>
-          <span className="module-number">{trip.manifest?.length || 0}</span>
+          <span>Booked passengers (app users)</span>
+          <span className="module-number">{booked.length}</span>
         </div>
-        {(!trip.manifest || trip.manifest.length === 0) && (
-          <p className="muted">No passengers registered yet.</p>
-        )}
-        {trip.manifest?.map((m) => (
-          <div className="trip-row" key={m.booking_id}>
+        {booked.length === 0 && <p className="muted">No bookings yet.</p>}
+        {booked.map((b) => (
+          <div className="trip-row" key={b.booking_id}>
             <span>
-              <strong>{m.name}{m.walk_in ? ' · walk-in' : ''}</strong>
+              <strong>{b.name}</strong>
               <small>
-                {m.phone || 'no phone'}
-                {m.verification_code ? ` · code ${m.verification_code}` : ''}
-                {m.code_verified ? ' ✓' : ''}
+                {b.phone}
+                {b.verification_code ? ` · code ${b.verification_code}` : ''}
+                {b.code_verified ? ' ✓' : ''}
               </small>
             </span>
-            <span className="status-pill">{m.status}</span>
+            {b.status === 'reserved' ? (
+              <button
+                className="primary-button"
+                onClick={() => verifyBooking(b.booking_id)}
+                disabled={verifyingId === b.booking_id}
+                type="button"
+              >
+                {verifyingId === b.booking_id ? 'Verifying…' : 'Verify + issue code'}
+              </button>
+            ) : (
+              <span className="status-pill">{b.status}</span>
+            )}
           </div>
         ))}
-      </article>
-
-      <article className="module">
-        <div className="module-heading">
-          <span>Register walk-in</span>
-          <span className="module-number">Code issued</span>
-        </div>
-        <p className="muted">Register a passenger without an app account and issue them a code.</p>
-        <label>
-          Name
-          <input value={walkInName} onChange={(e) => setWalkInName(e.target.value)} />
-        </label>
-        <label>
-          Phone (optional)
-          <input value={walkInPhone} onChange={(e) => setWalkInPhone(e.target.value)} />
-        </label>
-        <button className="primary-button" onClick={registerWalkIn} type="button">
-          Register + issue code
-        </button>
-        {lastCode && (
+        {lastVerifiedCode && (
           <p className="muted" style={{ marginTop: 12 }}>
-            Latest code: <strong>{lastCode}</strong> — give this to the passenger.
+            Latest code: <strong>{lastVerifiedCode.code}</strong> — call out the passenger and give it to them.
           </p>
         )}
       </article>
 
-      <article className="module">
+      {/* Panel 2 — Walk-ins */}
+      <article className="module module-wide">
         <div className="module-heading">
-          <span>Flag trip</span>
-          <span className="module-number">Sends to admin</span>
+          <span>Walk-ins (no app)</span>
+          <span className="module-number">{walkIns.length}</span>
         </div>
         <p className="muted">
-          Report an issue with the assigned driver or vehicle. Admin will review.
+          Passengers without the app — added directly to the manifest with a next-of-kin record.
         </p>
-        {!flagOpen && (
-          <button className="danger-button" onClick={() => setFlagOpen(true)} type="button">
-            Flag this trip
-          </button>
+
+        <div className="form-grid">
+          <label>
+            Name
+            <input value={walkInName} onChange={(e) => setWalkInName(e.target.value)} />
+          </label>
+          <label>
+            Phone (optional)
+            <input value={walkInPhone} onChange={(e) => setWalkInPhone(e.target.value)} />
+          </label>
+          <label>
+            Next of kin — name
+            <input value={walkInNokName} onChange={(e) => setWalkInNokName(e.target.value)} />
+          </label>
+          <label>
+            Next of kin — phone
+            <input value={walkInNokPhone} onChange={(e) => setWalkInNokPhone(e.target.value)} />
+          </label>
+        </div>
+        <button className="primary-button" onClick={registerWalkIn} disabled={isFull} type="button">
+          {isFull ? 'Trip is full' : 'Register + issue code'}
+        </button>
+
+        {lastWalkInCode && (
+          <p className="muted" style={{ marginTop: 12 }}>
+            Latest walk-in code for <strong>{lastWalkInCode.name}</strong>: <strong>{lastWalkInCode.code}</strong>
+          </p>
         )}
-        {flagOpen && (
+
+        {walkIns.length > 0 && (
           <>
-            <label>
-              Category
-              <select value={flagCategory} onChange={(e) => setFlagCategory(e.target.value)}>
-                <option value="vehicle_condition">Vehicle condition</option>
-                <option value="unverified_driver">Driver not verified</option>
-                <option value="missing_assets">Driver or vehicle missing</option>
-                <option value="documentation">Documentation issue</option>
-                <option value="other">Other</option>
-              </select>
-            </label>
-            <label>
-              Notes
-              <input value={flagNotes} onChange={(e) => setFlagNotes(e.target.value)} />
-            </label>
-            <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
-              <button className="secondary-button" onClick={() => setFlagOpen(false)} type="button">Cancel</button>
-              <button className="danger-button" onClick={submitFlag} type="button">Submit flag</button>
-            </div>
+            <div className="section-title" style={{ marginTop: 20 }}>Registered walk-ins</div>
+            {walkIns.map((b) => (
+              <div className="trip-row" key={b.booking_id}>
+                <span>
+                  <strong>{b.name}</strong>
+                  <small>
+                    NOK: {b.next_of_kin_name} ({b.next_of_kin_phone})
+                    {b.verification_code ? ` · code ${b.verification_code}` : ''}
+                  </small>
+                </span>
+                <span className="status-pill">{b.status}</span>
+              </div>
+            ))}
           </>
         )}
       </article>

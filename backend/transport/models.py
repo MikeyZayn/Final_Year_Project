@@ -147,6 +147,11 @@ class Trip(models.Model):
     notes = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    engaged_by = models.ForeignKey(
+        OperatorProfile, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="engaged_trips",
+    )
+    engaged_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["departure_date", "expected_departure_time", "id"]
@@ -164,6 +169,11 @@ class Trip(models.Model):
     def __str__(self):
         return f"{self.trip_code} {self.route} @ {self.departure_date}"
 
+    engaged_by = models.ForeignKey(
+        OperatorProfile, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="engaged_trips",
+    )
+    engaged_at = models.DateTimeField(null=True, blank=True)
 
 class Booking(models.Model):
     """A passenger on a trip. Registered user (passenger FK) or walk-in."""
@@ -184,6 +194,8 @@ class Booking(models.Model):
     walk_in_name = models.CharField(max_length=150, blank=True)
     walk_in_phone = models.CharField(max_length=15, blank=True)
     walk_in_id_number = models.CharField(max_length=13, blank=True)
+    walk_in_next_of_kin_name = models.CharField(max_length=150, blank=True)
+    walk_in_next_of_kin_phone = models.CharField(max_length=15, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.RESERVED)
     booked_at = models.DateTimeField(auto_now_add=True)
     boarded_at = models.DateTimeField(null=True, blank=True)
@@ -204,6 +216,8 @@ class Booking(models.Model):
     def __str__(self):
         return f"{self.display_name()} → {self.trip.trip_code} ({self.status})"
 
+    walk_in_next_of_kin_name = models.CharField(max_length=150, blank=True)
+    walk_in_next_of_kin_phone = models.CharField(max_length=15, blank=True)
 
 class VerificationCode(models.Model):
     booking = models.OneToOneField(Booking, on_delete=models.CASCADE, related_name="verification_code")

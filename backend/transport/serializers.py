@@ -66,6 +66,7 @@ class VehicleSerializer(serializers.ModelSerializer):
 
 
 class TripSerializer(serializers.ModelSerializer):
+    
     route = RouteSerializer(read_only=True)
     operator_name = serializers.CharField(
         source="operator.association.association_name", read_only=True
@@ -82,15 +83,26 @@ class TripSerializer(serializers.ModelSerializer):
             "route", "departure_date", "expected_departure_time",
             "actual_departure_time", "seat_capacity", "seats_taken",
             "seats_available", "status", "driver_name", "vehicle_plate",
+            "engaged_by_name", "is_engaged",
             "notes", "created_at",
         ]
-
     def get_driver_name(self, obj):
         if not obj.driver:
             return None
         u = obj.driver.user
         return f"{u.first_name} {u.last_name}".strip() or u.phone
 
+    engaged_by_name = serializers.SerializerMethodField()
+    is_engaged = serializers.SerializerMethodField()
+
+    def get_engaged_by_name(self, obj):
+        if not obj.engaged_by:
+            return None
+        u = obj.engaged_by.user
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def get_is_engaged(self, obj):
+        return obj.engaged_by is not None
 
 class TripWriteSerializer(serializers.ModelSerializer):
     route_id = serializers.PrimaryKeyRelatedField(
@@ -136,7 +148,9 @@ class BookingSerializer(serializers.ModelSerializer):
             "id", "trip", "trip_code", "route_label",
             "departure_date", "status", "booked_at",
             "passenger_name", "walk_in_name", "walk_in_phone",
+            "walk_in_next_of_kin_name", "walk_in_next_of_kin_phone",
         ]
+
         read_only_fields = ["status", "booked_at"]
 
     def get_route_label(self, obj):
