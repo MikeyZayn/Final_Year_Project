@@ -14,14 +14,14 @@ export function AuthProvider({ children }) {
       return;
     }
     api
-      .get("/me/")
+      .get("/accounts/api/me/")
       .then((r) => setUser(r.data))
       .catch(() => localStorage.removeItem("token"))
       .finally(() => setLoading(false));
   }, []);
 
   const login = async (phone, password) => {
-    const { data } = await api.post("/login/", { phone, password });
+    const { data } = await api.post("/accounts/api/login/", { phone, password });
     localStorage.setItem("token", data.token);
     setUser(data.user);
     return data.user;
@@ -36,7 +36,7 @@ export function AuthProvider({ children }) {
 
   const logout = async () => {
     try {
-      await api.post("/logout/");
+      await api.post("/accounts/api/logout/");
     } catch {
       /* ignore */
     }

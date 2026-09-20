@@ -345,6 +345,24 @@ input:focus {
   box-shadow: 0 0 0 3px rgba(227, 164, 65, 0.12);
 }
 
+select {
+  display: block;
+  width: 100%;
+  margin-top: 7px;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  outline: none;
+  appearance: none;
+}
+
+select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(227, 164, 65, 0.12);
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

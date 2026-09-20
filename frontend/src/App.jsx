@@ -3,6 +3,7 @@ import { CircleMarker, MapContainer, Polyline, TileLayer, useMap } from 'react-l
 import 'leaflet/dist/leaflet.css';
 import { useAuth } from './auth';
 const roles = ['passenger', 'driver', 'operator', 'administrator'];
+import api from './api';
 
 const demoUsers = {
   passenger: 'Sibusiso Dlamini',
@@ -578,7 +579,7 @@ function Register({ role, setRole, onBack, onAuthed }) {
     try {
       let user;
       if (role === 'passenger') {
-        user = await register('/register/passenger/', {
+        user = await register('/accounts/api/register/passenger/', {
           first_name: form.first_name,
           last_name: form.last_name,
           phone: form.phone,
@@ -602,9 +603,9 @@ function Register({ role, setRole, onBack, onAuthed }) {
         fd.append('license_number', form.license_number);
         fd.append('rank_code', form.rank_code);
         fd.append('photo', photo);
-        user = await register('/register/driver/', fd);
+        user = await register('/accounts/api/register/driver/', fd);
       } else if (role === 'operator') {
-        user = await register('/register/operator/', {
+        user = await register('/accounts/api/register/operator/', {
           phone: form.phone,
           email: form.email,
           password: form.password,
@@ -795,7 +796,7 @@ function Dashboard({ role, activeTrip, setActiveTrip, notify, issuedVerification
 
       {role === 'passenger' && <Passenger activeTrip={activeTrip} setActiveTrip={setActiveTrip} notify={notify} issuedVerificationCodes={issuedVerificationCodes} />}
       {role === 'driver' && <Driver notify={notify} />}
-      {role === 'operator' && <Operator notify={notify} issuedVerificationCodes={issuedVerificationCodes} issueVerificationCode={issueVerificationCode} />}
+      {role === 'operator' && <Operator notify={notify} />}
       {role === 'administrator' && <Administrator notify={notify} />}
     </section>
   );
@@ -1127,56 +1128,394 @@ function Driver({ notify }) {
   );
 }
 
-function Operator({ notify, issuedVerificationCodes, issueVerificationCode }) {
-  const [complaintFlagged, setComplaintFlagged] = useState(false);
-
+function Operator({ notify }) {
   return (
     <div className="dashboard-grid">
-      <article className="module module-wide">
+      <OperatorRoutes notify={notify} />
+      <OperatorDeparturePoints />
+      <OperatorRequestRank notify={notify} />
+
+      {/* -------------------------------------------------------------
+          Placeholder modules kept as UI design references for the SDD.
+          Not wired to anything — visual mockups only.
+          ------------------------------------------------------------- */}
+      <article className="module module-wide" style={{ opacity: 0.55 }}>
         <div className="module-heading">
           <span>Active trip engagement</span>
-          <span className="module-number">One at a time</span>
+          <span className="module-number">UI preview</span>
         </div>
         <p className="muted">
-          Search active trips, claim one engagement, verify its driver and vehicle, then register passengers.
+          Operational tier — see Section 5.2.2 of the proposal. Operator will claim a trip
+          instance, verify its driver and vehicle, and register passengers.
         </p>
-        <button className="primary-button" onClick={() => notify('Trip TH-EMP-002 is now assigned to your active operator session.')} type="button">
-          Engage trip TH-EMP-002 <span>→</span>
-        </button>
       </article>
 
-      <article className="module module-wide">
+      <article className="module" style={{ opacity: 0.55 }}>
         <div className="module-heading">
           <span>Complaints</span>
-          <span className="module-number">Flag only</span>
-        </div>
-        <p className="muted">Flag a passenger complaint for administrator review. Complaint investigation and escalation are restricted to the administrator.</p>
-        <button className="secondary-button" onClick={() => { setComplaintFlagged(true); notify('Complaint flagged for administrator review.'); }} type="button">
-          {complaintFlagged ? 'Complaint flagged' : 'Flag complaint'}
-        </button>
-      </article>
-
-      <article className="module">
-        <div className="module-heading">
-          <span>Verification</span>
-          <span className="module-number">Operator issued</span>
+          <span className="module-number">UI preview</span>
         </div>
         <p className="muted">
-          Assigned driver: Bongani Mthembu
-          <br />
-          Vehicle: Toyota Quantum ND 123-456
+          Central contribution tier — see Section 5.2.3. Flag passenger complaints for admin
+          review; escalation handled by the rank admin.
         </p>
-        <button className="secondary-button" onClick={() => notify('Passenger registration opened.')} type="button">
-          Register passenger
-        </button>
-        <button className="primary-button" onClick={() => issueVerificationCode('TH-EMP-002')} type="button">
-          {issuedVerificationCodes['TH-EMP-002'] ? 'Issue new code' : 'Give passenger code'}
-        </button>
-        {issuedVerificationCodes['TH-EMP-002'] && (
-          <p className="muted">Current code to give the passenger: <strong>{issuedVerificationCodes['TH-EMP-002']}</strong></p>
-        )}
+      </article>
+
+      <article className="module" style={{ opacity: 0.55 }}>
+        <div className="module-heading">
+          <span>Verification</span>
+          <span className="module-number">UI preview</span>
+        </div>
+        <p className="muted">
+          Trip-verification tier — issue a single-use code to a passenger for a specific trip.
+        </p>
       </article>
     </div>
+  );
+}
+
+function OperatorRoutes({ notify }) {
+  const [routes, setRoutes] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    setError('');
+    try {
+      const { data } = await api.get('/transport/api/my-routes/');
+      setRoutes(data);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not load routes.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function handleDelete(id) {
+    if (!window.confirm('Deactivate this route?')) return;
+    try {
+      await api.delete(`/transport/api/my-routes/${id}/`);
+      notify('Route deactivated.');
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Failed to deactivate.');
+    }
+  }
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>My routes</span>
+        <span className="module-number">{routes.length}</span>
+      </div>
+
+      {loading && <p className="muted">Loading…</p>}
+      {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+
+      {!loading && routes.length === 0 && !showForm && (
+        <p className="muted">You have no routes yet. Add one below.</p>
+      )}
+
+      {routes.map((r) => (
+        <div className="trip-row" key={r.id}>
+          <span>
+            <strong>
+              {r.departure_point.rank.name} → {r.destination.name}
+            </strong>
+            <small>
+              {r.service_category} · R{r.fare}
+              {r.typical_duration_minutes ? ` · ~${r.typical_duration_minutes} min` : ''}
+            </small>
+          </span>
+          <button className="danger-button" onClick={() => handleDelete(r.id)} type="button">
+            Deactivate
+          </button>
+        </div>
+      ))}
+
+      {showForm ? (
+        <OperatorAddRouteForm
+          onDone={() => { setShowForm(false); load(); }}
+          onCancel={() => setShowForm(false)}
+          notify={notify}
+        />
+      ) : (
+        <button
+          className="primary-button"
+          onClick={() => setShowForm(true)}
+          type="button"
+          style={{ marginTop: 12 }}
+        >
+          Add route <span>→</span>
+        </button>
+      )}
+    </article>
+  );
+}
+
+function OperatorAddRouteForm({ onDone, onCancel, notify }) {
+  const [departurePoints, setDeparturePoints] = useState([]);
+  const [destinations, setDestinations] = useState([]);
+  const [dpId, setDpId] = useState('');
+  const [destId, setDestId] = useState('');
+  const [fare, setFare] = useState('');
+  const [category, setCategory] = useState('structured');
+  const [duration, setDuration] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [dpRes, destRes] = await Promise.all([
+          api.get('/transport/api/my-departure-points/'),
+          api.get('/transport/api/destinations/'),
+        ]);
+        const activeDPs = dpRes.data.filter((d) => d.status === 'active');
+        setDeparturePoints(activeDPs);
+        setDestinations(destRes.data);
+        if (activeDPs[0]) setDpId(activeDPs[0].id);
+        if (destRes.data[0]) setDestId(destRes.data[0].id);
+      } catch {
+        setError('Could not load form options.');
+      }
+    })();
+  }, []);
+
+  async function submit() {
+    setError('');
+    if (!dpId || !destId || !fare) {
+      setError('Departure point, destination and fare are required.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post('/transport/api/my-routes/', {
+        departure_point_id: Number(dpId),
+        destination_id: Number(destId),
+        fare,
+        service_category: category,
+        typical_duration_minutes: duration ? Number(duration) : null,
+      });
+      notify('Route created.');
+      onDone();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to create route.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (departurePoints.length === 0) {
+    return (
+      <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+        <p className="muted">
+          You have no approved departure points yet. Request a rank first.
+        </p>
+        <button className="secondary-button" onClick={onCancel} type="button">Cancel</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+      <div className="form-grid">
+        <label>
+          Departure point
+          <select value={dpId} onChange={(e) => setDpId(e.target.value)}>
+            {departurePoints.map((d) => (
+              <option key={d.id} value={d.id}>{d.rank.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Destination
+          <select value={destId} onChange={(e) => setDestId(e.target.value)}>
+            {destinations.map((d) => (
+              <option key={d.id} value={d.id}>{d.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Fare (R)
+          <input value={fare} onChange={(e) => setFare(e.target.value)} placeholder="24.00" />
+        </label>
+        <label>
+          Service category
+          <select value={category} onChange={(e) => setCategory(e.target.value)}>
+            <option value="structured">Structured</option>
+            <option value="unstructured">Unstructured</option>
+          </select>
+        </label>
+        <label>
+          Typical duration (min, optional)
+          <input value={duration} onChange={(e) => setDuration(e.target.value)} placeholder="45" />
+        </label>
+      </div>
+      {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+      <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
+        <button className="secondary-button" onClick={onCancel} type="button">Cancel</button>
+        <button className="primary-button" onClick={submit} disabled={busy} type="button">
+          {busy ? 'Creating…' : 'Create route'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function OperatorDeparturePoints() {
+  const [points, setPoints] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get('/transport/api/my-departure-points/');
+        setPoints(data);
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Could not load departure points.');
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  return (
+    <article className="module">
+      <div className="module-heading">
+        <span>My departure points</span>
+        <span className="module-number">{points.length}</span>
+      </div>
+      {loading && <p className="muted">Loading…</p>}
+      {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+      {!loading && points.length === 0 && (
+        <p className="muted">No departure points yet. Request a rank.</p>
+      )}
+      {points.map((p) => (
+        <div className="trip-row" key={p.id}>
+          <span>
+            <strong>{p.rank.name}</strong>
+            <small>{p.rank.area}</small>
+          </span>
+          <span
+            className="status-pill"
+            style={{
+              borderColor: p.status === 'active' ? 'var(--success)' : 'var(--accent)',
+              color: p.status === 'active' ? 'var(--success)' : 'var(--accent)',
+            }}
+          >
+            {p.status}
+          </span>
+        </div>
+      ))}
+    </article>
+  );
+}
+
+function OperatorRequestRank({ notify }) {
+  const [ranks, setRanks] = useState([]);
+  const [myRankIds, setMyRankIds] = useState([]);
+  const [rankId, setRankId] = useState('');
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [showForm, setShowForm] = useState(false);
+
+  async function loadOptions() {
+    try {
+      const [rankRes, myRes] = await Promise.all([
+        api.get('/transport/api/ranks/'),
+        api.get('/transport/api/my-departure-points/'),
+      ]);
+      setRanks(rankRes.data);
+      const mine = myRes.data.map((d) => d.rank.id);
+      setMyRankIds(mine);
+      const available = rankRes.data.filter((r) => !mine.includes(r.id));
+      if (available[0]) setRankId(available[0].id);
+    } catch {
+      setError('Could not load ranks.');
+    }
+  }
+
+  useEffect(() => { loadOptions(); }, []);
+
+  async function submit() {
+    setError('');
+    if (!rankId) { setError('Pick a rank.'); return; }
+    setBusy(true);
+    try {
+      await api.post('/transport/api/request-rank/', {
+        rank_id: Number(rankId),
+        notes,
+      });
+      notify('Rank request submitted for approval.');
+      setNotes('');
+      setShowForm(false);
+      loadOptions();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to submit request.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const availableRanks = ranks.filter((r) => !myRankIds.includes(r.id));
+
+  return (
+    <article className="module">
+      <div className="module-heading">
+        <span>Request a rank</span>
+        <span className="module-number">Approval required</span>
+      </div>
+      <p className="muted">
+        Want to load from another rank? Request it here — the rank&apos;s admin will review.
+      </p>
+
+      {!showForm && (
+        <button className="secondary-button" onClick={() => setShowForm(true)} type="button">
+          Request rank
+        </button>
+      )}
+
+      {showForm && (
+        availableRanks.length === 0 ? (
+          <p className="muted">You already have a departure point at every rank.</p>
+        ) : (
+          <>
+            <label>
+              Rank
+              <select value={rankId} onChange={(e) => setRankId(e.target.value)}>
+                {availableRanks.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name} ({r.area})</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Reason (optional)
+              <input
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="e.g. festive season extra trips"
+              />
+            </label>
+            {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+            <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
+              <button className="secondary-button" onClick={() => setShowForm(false)} type="button">
+                Cancel
+              </button>
+              <button className="primary-button" onClick={submit} disabled={busy} type="button">
+                {busy ? 'Submitting…' : 'Submit request'}
+              </button>
+            </div>
+          </>
+        )
+      )}
+    </article>
   );
 }
 
