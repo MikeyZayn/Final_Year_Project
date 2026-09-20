@@ -1396,7 +1396,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   const [trip, setTrip] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [showEngagePrompt, setShowEngagePrompt] = useState(false);
 
   // Walk-in form
   const [walkInName, setWalkInName] = useState('');
@@ -1427,7 +1426,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   async function engage() {
     try {
       await api.post(`/transport/api/my-trips/${tripId}/engage/`);
-      setShowEngagePrompt(false);
       notify('You are now working this trip.');
       load();
     } catch (err) {
@@ -1501,7 +1499,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
 
   const engaged = trip.is_engaged;
 
-  // Engage prompt before anything else
+  // -------- Engage prompt --------
   if (!engaged) {
     return (
       <>
@@ -1540,6 +1538,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     );
   }
 
+  // -------- Engaged view --------
   const booked = trip.booked_passengers || [];
   const walkIns = trip.walk_in_passengers || [];
   const isFull = trip.seats_taken >= trip.seat_capacity;
@@ -1567,7 +1566,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
         </div>
       </article>
 
-      {/* Panel 1 — Booked app users */}
       <article className="module module-wide">
         <div className="module-heading">
           <span>Booked passengers (app users)</span>
@@ -1605,14 +1603,13 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
         )}
       </article>
 
-      {/* Panel 2 — Walk-ins */}
       <article className="module module-wide">
         <div className="module-heading">
           <span>Walk-ins (no app)</span>
           <span className="module-number">{walkIns.length}</span>
         </div>
         <p className="muted">
-          Passengers without the app — added directly to the manifest with a next-of-kin record.
+          Passengers without the app — added to the manifest with a next-of-kin record.
         </p>
 
         <div className="form-grid">
