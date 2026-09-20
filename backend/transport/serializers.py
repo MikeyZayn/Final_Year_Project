@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
-    Vehicle, DriverVehicle, Trip, Booking, VerificationCode, TripFlag,
+    Vehicle, DriverVehicle, Trip, Booking, VerificationCode, TripFlag, TripAssetChange,
 )
 
 
@@ -169,4 +169,40 @@ class TripFlagSerializer(serializers.ModelSerializer):
         if not obj.flagged_by:
             return "Unknown"
         u = obj.flagged_by
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+
+class TripAssetChangeSerializer(serializers.ModelSerializer):
+    reason_label = serializers.CharField(source="get_reason_display", read_only=True)
+    old_driver_name = serializers.SerializerMethodField()
+    new_driver_name = serializers.SerializerMethodField()
+    old_vehicle_plate = serializers.CharField(source="old_vehicle.plate_number", read_only=True)
+    new_vehicle_plate = serializers.CharField(source="new_vehicle.plate_number", read_only=True)
+    changed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TripAssetChange
+        fields = [
+            "id", "reason", "reason_label", "notes", "changed_at",
+            "old_driver_name", "new_driver_name",
+            "old_vehicle_plate", "new_vehicle_plate",
+            "changed_by_name",
+        ]
+
+    def _driver_name(self, dp):
+        if not dp:
+            return None
+        u = dp.user
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def get_old_driver_name(self, obj):
+        return self._driver_name(obj.old_driver)
+
+    def get_new_driver_name(self, obj):
+        return self._driver_name(obj.new_driver)
+
+    def get_changed_by_name(self, obj):
+        if not obj.changed_by:
+            return "Unknown"
+        u = obj.changed_by
         return f"{u.first_name} {u.last_name}".strip() or u.phone

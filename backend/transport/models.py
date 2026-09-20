@@ -219,7 +219,6 @@ class VerificationCode(models.Model):
     def __str__(self):
         return f"{self.code} ({'used' if self.verified_at else 'unused'})"
 
-
 class TripFlag(models.Model):
     """An operator flags a trip for admin attention."""
 
@@ -257,3 +256,46 @@ class TripFlag(models.Model):
 
     def __str__(self):
         return f"{self.trip.trip_code} — {self.get_category_display()} ({self.status})"
+
+class TripAssetChange(models.Model):
+    """Audit log of any driver or vehicle reassignment on a trip."""
+
+    class Reason(models.TextChoices):
+        DRIVER_NOT_FIT = "driver_not_fit", "Driver not fit to drive"
+        DRIVER_RESPONSIBILITIES = "driver_responsibilities", "Driver has other responsibilities"
+        DRIVER_ROTATION = "driver_rotation", "Driver rotation change"
+        VEHICLE_NOT_FIT = "vehicle_not_fit", "Vehicle not fit for travel"
+        VEHICLE_FORFEIT = "vehicle_forfeit", "Vehicle voluntary forfeit"
+        VEHICLE_SWAP = "vehicle_swap", "Vehicle swapped in queue"
+        OTHER = "other", "Other"
+
+    trip = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name="asset_changes")
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name="asset_changes_made",
+    )
+    changed_at = models.DateTimeField(auto_now_add=True)
+    old_driver = models.ForeignKey(
+        "accounts.DriverProfile", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="replaced_from",
+    )
+    new_driver = models.ForeignKey(
+        "accounts.DriverProfile", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="replaced_to",
+    )
+    old_vehicle = models.ForeignKey(
+        Vehicle, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="replaced_from",
+    )
+    new_vehicle = models.ForeignKey(
+        Vehicle, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="replaced_to",
+    )
+    reason = models.CharField(max_length=30, choices=Reason.choices)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-changed_at"]
+
+    def __str__(self):
+        return f"{self.trip.trip_code} — {self.get_reason_display()}"

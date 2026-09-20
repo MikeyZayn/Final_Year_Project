@@ -9,13 +9,13 @@ from rest_framework import status
 from accounts.models import OperatorProfile
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
-    Vehicle, Trip, Booking, VerificationCode, TripFlag,
+    Vehicle, Trip, Booking, VerificationCode, TripFlag, TripAssetChange,
 )
 from .serializers import (
     RankSerializer, DestinationSerializer, OperatorAtRankSerializer,
     RouteSerializer, RouteWriteSerializer, VehicleSerializer,
     TripSerializer, TripWriteSerializer, BookingSerializer,
-    VerificationCodeSerializer, TripFlagSerializer,
+    VerificationCodeSerializer, TripFlagSerializer, TripAssetChangeSerializer,
 )
 
 
@@ -287,3 +287,127 @@ def api_admin_flags(request):
         return Response({"detail": "Not an admin account."}, status=403)
     qs = TripFlag.objects.filter(status=TripFlag.Status.OPEN).select_related("trip")
     return Response(TripFlagSerializer(qs, many=True).data)
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_available_drivers_vehicles(request):
+    """Operator sees which drivers and vehicles can be assigned."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+
+    from accounts.models import DriverProfile
+    drivers = DriverProfile.objects.filter(
+        status=DriverProfile.VerificationStatus.VERIFIED
+    ).select_related("user")
+
+    driver_list = [
+        {
+            "id": d.id,
+            "name": f"{d.user.first_name} {d.user.last_name}".strip() or d.user.phone,
+            "phone": d.user.phone,
+            "license_number": d.license_number,
+        }
+        for d in drivers
+    ]
+
+    vehicles = Vehicle.objects.filter(roadworthy=True)
+    vehicle_list = VehicleSerializer(vehicles, many=True).data
+
+    return Response({"drivers": driver_list, "vehicles": vehicle_list})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_reassign_trip(request, trip_id):
+    """Operator swaps driver and/or vehicle on their own trip."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+
+    if trip.status in [Trip.Status.COMPLETED, Trip.Status.CANCELLED]:
+        return Response(
+            {"detail": "Cannot reassign assets on a completed or cancelled trip."},
+            status=400,
+        )
+
+    reason = request.data.get("reason")
+    notes = request.data.get("notes", "").strip()
+    valid_reasons = [c[0] for c in TripAssetChange.Reason.choices]
+    if reason not in valid_reasons:
+        return Response({"detail": "Invalid or missing reason."}, status=400)
+
+    new_driver_id = request.data.get("driver_id")
+    new_vehicle_id = request.data.get("vehicle_id")
+
+    old_driver = trip.driver
+    old_vehicle = trip.vehicle
+    new_driver = None
+    new_vehicle = None
+
+    if new_driver_id:
+        from accounts.models import DriverProfile
+        try:
+            new_driver = DriverProfile.objects.get(pk=new_driver_id)
+        except DriverProfile.DoesNotExist:
+            return Response({"detail": "Driver not found."}, status=404)
+        if new_driver.status != DriverProfile.VerificationStatus.VERIFIED:
+            return Response({"detail": "Driver is not verified."}, status=400)
+
+    if new_vehicle_id:
+        try:
+            new_vehicle = Vehicle.objects.get(pk=new_vehicle_id)
+        except Vehicle.DoesNotExist:
+            return Response({"detail": "Vehicle not found."}, status=404)
+        if not new_vehicle.roadworthy:
+            return Response({"detail": "Vehicle is not roadworthy."}, status=400)
+
+    if new_driver is None and new_vehicle is None:
+        return Response(
+            {"detail": "Supply driver_id and/or vehicle_id to reassign."}, status=400
+        )
+
+    change = TripAssetChange.objects.create(
+        trip=trip,
+        changed_by=request.user,
+        old_driver=old_driver,
+        new_driver=new_driver or old_driver,
+        old_vehicle=old_vehicle,
+        new_vehicle=new_vehicle or old_vehicle,
+        reason=reason,
+        notes=notes,
+    )
+
+    if new_driver:
+        trip.driver = new_driver
+    if new_vehicle:
+        trip.vehicle = new_vehicle
+        trip.seat_capacity = new_vehicle.seat_capacity
+    trip.save()
+
+    return Response({
+        "trip": TripSerializer(trip).data,
+        "change": TripAssetChangeSerializer(change).data,
+    }, status=200)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_trip_asset_changes(request, trip_id):
+    """Audit trail of driver/vehicle changes on a trip."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+    changes = trip.asset_changes.select_related(
+        "old_driver__user", "new_driver__user",
+        "old_vehicle", "new_vehicle", "changed_by",
+    )
+    return Response(TripAssetChangeSerializer(changes, many=True).data)

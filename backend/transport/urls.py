@@ -20,4 +20,8 @@ urlpatterns = [
     path("api/admin/routes/",   views.api_admin_routes,       name="api_admin_routes"),
     path("api/admin/trips/",    views.api_admin_trips,        name="api_admin_trips"),
     path("api/admin/flags/",    views.api_admin_flags,        name="api_admin_flags"),
+
+    path("api/available-assets/",                       views.api_available_drivers_vehicles, name="api_available_assets"),
+    path("api/my-trips/<int:trip_id>/reassign/",        views.api_reassign_trip,              name="api_reassign_trip"),
+    path("api/my-trips/<int:trip_id>/asset-changes/",   views.api_trip_asset_changes,         name="api_trip_asset_changes"),
 ]
