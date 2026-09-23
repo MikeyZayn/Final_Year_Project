@@ -1,0 +1,709 @@
+"""
+Merged API views: FYP trip/booking/operator + search-first routing/GPS/panic.
+"""
+import logging
+import math
+
+import requests
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+from django.conf import settings
+from django.db import models as dj_models
+from django.utils import timezone
+from django.utils.crypto import get_random_string
+from rest_framework import status
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.response import Response
+
+from accounts.models import OperatorProfile
+
+from .models import (
+    Booking,
+    Destination,
+    OperatorAtRank,
+    PanicAlert,
+    Rank,
+    Route,
+    TaxiFareRule,
+    Trip,
+    TripAssetChange,
+    TripFlag,
+    Vehicle,
+    VehicleLocation,
+    VerificationCode,
+)
+from .serializers import (
+    BookingSerializer,
+    DestinationSerializer,
+    PanicAlertSerializer,
+    RankSerializer,
+    RouteSerializer,
+    TripSerializer,
+    VehicleLocationSerializer,
+    VehicleSerializer,
+)
+from .services.routing_service import get_ad_hoc_route, get_driving_route, RoutingServiceError
+from .services.fare_service import estimate_ad_hoc_fare
+from .services.deviation import check_deviation
+
+
+logger = logging.getLogger(__name__)
+
+
+def _operator(request):
+    try:
+        return request.user.operator_profile
+    except Exception:
+        return None
+
+
+def _haversine_m(lat1, lng1, lat2, lng2):
+    r = 6371000
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _point_to_route_distance_m(lat, lng, geometry):
+    if not geometry or len(geometry) < 2:
+        return None
+    best = float("inf")
+    for pt in geometry:
+        if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+            continue
+        d = _haversine_m(lat, lng, float(pt[0]), float(pt[1]))
+        if d < best:
+            best = d
+    return best if best != float("inf") else None
+
+
+# ---------- Public discovery ----------
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_list_ranks(request):
+    return Response(RankSerializer(Rank.objects.all(), many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_list_destinations(request):
+    return Response(DestinationSerializer(Destination.objects.all(), many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_list_routes(request):
+    qs = Route.objects.filter(active=True).select_related("departure", "destination")
+    from_q = request.query_params.get("from", "").strip()
+    to_q = request.query_params.get("to", "").strip()
+    if from_q:
+        qs = qs.filter(
+            dj_models.Q(departure__name__icontains=from_q)
+            | dj_models.Q(departure__area__icontains=from_q)
+        )
+    if to_q:
+        qs = qs.filter(destination__name__icontains=to_q)
+    return Response(RouteSerializer(qs, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_list_trips(request):
+    """Upcoming / bookable trips for passengers."""
+    today = timezone.localdate()
+    qs = (
+        Trip.objects.filter(
+            departure_date__gte=today,
+            status__in=[
+                Trip.Status.SCHEDULED,
+                Trip.Status.BOARDING,
+                Trip.Status.IN_PROGRESS,
+            ],
+        )
+        .select_related(
+            "route__departure",
+            "route__destination",
+            "vehicle",
+            "driver__user",
+            "operator__association",
+        )
+        .order_by("departure_date", "expected_departure_time")
+    )
+    from_q = request.query_params.get("from", "").strip()
+    to_q = request.query_params.get("to", "").strip()
+    if from_q:
+        qs = qs.filter(
+            dj_models.Q(route__departure__name__icontains=from_q)
+            | dj_models.Q(route__departure__area__icontains=from_q)
+        )
+    if to_q:
+        qs = qs.filter(route__destination__name__icontains=to_q)
+    return Response(TripSerializer(qs, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_trip_detail(request, trip_id):
+    try:
+        trip = Trip.objects.select_related(
+            "route__departure", "route__destination", "vehicle", "driver__user", "operator__association"
+        ).get(pk=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found."}, status=404)
+    return Response(TripSerializer(trip).data)
+
+
+# ---------- Passenger booking ----------
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_create_booking(request):
+    """Passenger (or operator walk-in via separate endpoint) books a trip seat."""
+    trip_id = request.data.get("trip_id")
+    if not trip_id:
+        return Response({"detail": "trip_id is required."}, status=400)
+    try:
+        trip = Trip.objects.select_related("route").get(pk=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found."}, status=404)
+    if trip.seats_available < 1:
+        return Response({"detail": "No seats available."}, status=400)
+    if trip.status not in (Trip.Status.SCHEDULED, Trip.Status.BOARDING):
+        return Response({"detail": "Trip is not open for booking."}, status=400)
+
+    existing = Booking.objects.filter(
+        trip=trip,
+        passenger=request.user,
+        status__in=[Booking.Status.RESERVED, Booking.Status.BOARDED],
+    ).first()
+    if existing:
+        return Response(BookingSerializer(existing).data)
+
+    booking = Booking.objects.create(
+        trip=trip,
+        passenger=request.user,
+        status=Booking.Status.RESERVED,
+        fare_paid=trip.route.fare,
+    )
+    code = get_random_string(6).upper()
+    VerificationCode.objects.create(booking=booking, code=code)
+    data = BookingSerializer(booking).data
+    data["verification_code"] = code
+    return Response(data, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_bookings(request):
+    qs = (
+        Booking.objects.filter(passenger=request.user)
+        .select_related("trip__route__departure", "trip__route__destination")
+        .order_by("-booked_at")
+    )
+    return Response(BookingSerializer(qs, many=True).data)
+
+
+# ---------- Operator ----------
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_trips(request):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    qs = (
+        Trip.objects.filter(operator=op)
+        .select_related(
+            "route__departure", "route__destination", "vehicle", "driver__user", "operator__association"
+        )
+        .order_by("departure_date", "expected_departure_time")
+    )
+    return Response(TripSerializer(qs, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_trip_manifest(request, trip_id):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+    data = TripSerializer(trip).data
+    data["is_engaged"] = bool(trip.engaged_at or trip.engaged_by_id)
+    bookings = trip.bookings.select_related("passenger", "verification_code")
+    booked, walk_ins = [], []
+    for b in bookings:
+        vc = getattr(b, "verification_code", None)
+        name = b.display_name() if callable(getattr(b, "display_name", None)) else getattr(b, "display_name", None)
+        if not name:
+            name = (
+                (b.passenger.get_full_name() if b.passenger else None)
+                or b.walk_in_name
+                or "Passenger"
+            )
+        entry = {
+            "booking_id": b.id,
+            "name": name,
+            "phone": (b.passenger.phone if b.passenger else b.walk_in_phone) or "",
+            "status": b.status,
+            "walk_in": b.passenger is None,
+            "verification_code": vc.code if vc else None,
+            "code_verified": bool(vc and vc.verified_at),
+            "next_of_kin_name": b.walk_in_next_of_kin_name or "",
+            "next_of_kin_phone": b.walk_in_next_of_kin_phone or "",
+        }
+        (walk_ins if b.passenger is None else booked).append(entry)
+    data["booked_passengers"] = booked
+    data["walk_in_passengers"] = walk_ins
+    return Response(data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_register_walk_in(request, trip_id):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+    if trip.seats_available < 1:
+        return Response({"detail": "No seats available."}, status=400)
+    name = (request.data.get("name") or "").strip()
+    phone = (request.data.get("phone") or "").strip()
+    if not name:
+        return Response({"detail": "name is required."}, status=400)
+    booking = Booking.objects.create(
+        trip=trip,
+        walk_in_name=name,
+        walk_in_phone=phone,
+        walk_in_id_number=request.data.get("id_number", ""),
+        walk_in_next_of_kin_name=request.data.get("next_of_kin_name", ""),
+        walk_in_next_of_kin_phone=request.data.get("next_of_kin_phone", ""),
+        status=Booking.Status.RESERVED,
+        fare_paid=trip.route.fare,
+    )
+    code = get_random_string(6).upper()
+    VerificationCode.objects.create(booking=booking, code=code)
+    data = BookingSerializer(booking).data
+    data["verification_code"] = code
+    return Response(data, status=201)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_engage_trip(request, trip_id):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+    trip.engaged_by = op
+    trip.engaged_at = timezone.now()
+    if trip.status == Trip.Status.SCHEDULED:
+        trip.status = Trip.Status.BOARDING
+    trip.save()
+    return Response(TripSerializer(trip).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_release_trip(request, trip_id):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+    trip.engaged_by = None
+    trip.engaged_at = None
+    trip.save(update_fields=["engaged_by", "engaged_at"])
+    return Response(TripSerializer(trip).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_verify_booking(request, trip_id, booking_id):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+        booking = Booking.objects.get(pk=booking_id, trip=trip)
+    except (Trip.DoesNotExist, Booking.DoesNotExist):
+        return Response({"detail": "Not found."}, status=404)
+    code = (request.data.get("code") or "").strip().upper()
+    vc = getattr(booking, "verification_code", None)
+    if vc and code and vc.code.upper() != code:
+        return Response({"detail": "Invalid verification code."}, status=400)
+    booking.status = Booking.Status.BOARDED
+    booking.boarded_at = timezone.now()
+    booking.boarded_by = request.user
+    booking.save()
+    if vc and not vc.verified_at:
+        vc.verified_at = timezone.now()
+        vc.save(update_fields=["verified_at"])
+    return Response(BookingSerializer(booking).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_memberships(request):
+    """Operator rank memberships (FYP)."""
+    op = _operator(request)
+    if not op:
+        return Response({"detail": "Not an operator account."}, status=403)
+    qs = OperatorAtRank.objects.filter(operator=op).select_related("rank")
+    data = [
+        {
+            "id": m.id,
+            "status": m.status,
+            "notes": getattr(m, "notes", "") or "",
+            "rank": RankSerializer(m.rank).data,
+        }
+        for m in qs
+    ]
+    return Response(data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_request_rank(request):
+    """Operator requests approval to work at a rank (FYP)."""
+    op = _operator(request)
+    if not op:
+        return Response({"detail": "Not an operator account."}, status=403)
+    rank_id = request.data.get("rank_id")
+    notes = (request.data.get("notes") or "")[:500]
+    try:
+        rank = Rank.objects.get(pk=rank_id)
+    except Rank.DoesNotExist:
+        return Response({"detail": "Rank not found."}, status=404)
+    if OperatorAtRank.objects.filter(operator=op, rank=rank).exists():
+        return Response({"detail": "Already requested or member of this rank."}, status=400)
+    m = OperatorAtRank.objects.create(
+        operator=op,
+        rank=rank,
+        status=OperatorAtRank.Status.PENDING,
+    )
+    return Response(
+        {"id": m.id, "status": m.status, "rank": RankSerializer(rank).data, "notes": notes},
+        status=201,
+    )
+
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_flag_trip(request, trip_id):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+    flag = TripFlag.objects.create(
+        trip=trip,
+        category=request.data.get("category", TripFlag.Category.OTHER),
+        description=request.data.get("description", ""),
+        flagged_by=request.user,
+    )
+    trip.status = Trip.Status.FLAGGED
+    trip.save(update_fields=["status"])
+    return Response({"id": flag.id, "status": flag.status}, status=201)
+
+
+# ---------- Driver GPS (search-first) ----------
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_vehicle(request):
+    """Driver: vehicle linked via DriverVehicle or Trip assignment."""
+    try:
+        dp = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "Not a driver account."}, status=403)
+    assignment = (
+        dp.vehicle_assignments.filter(active=True).select_related("vehicle").first()
+    )
+    if assignment:
+        return Response(VehicleSerializer(assignment.vehicle).data)
+    trip = (
+        Trip.objects.filter(driver=dp, status=Trip.Status.IN_PROGRESS)
+        .select_related("vehicle")
+        .first()
+    )
+    if trip and trip.vehicle:
+        return Response(VehicleSerializer(trip.vehicle).data)
+    return Response({"detail": "No vehicle assigned."}, status=404)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_vehicle_location(request, vehicle_id):
+    """Driver pushes GPS. Computes on/off route against trip route geometry."""
+    try:
+        vehicle = Vehicle.objects.get(pk=vehicle_id)
+    except Vehicle.DoesNotExist:
+        return Response({"detail": "Vehicle not found."}, status=404)
+
+    # AuthZ: driver assigned to vehicle or operator/admin
+    allowed = False
+    if request.user.role == "admin":
+        allowed = True
+    elif request.user.role == "operator":
+        allowed = True
+    elif request.user.role == "driver":
+        try:
+            dp = request.user.driver_profile
+            allowed = dp.vehicle_assignments.filter(
+                vehicle=vehicle, active=True
+            ).exists() or Trip.objects.filter(
+                driver=dp, vehicle=vehicle, status__in=[
+                    Trip.Status.BOARDING, Trip.Status.IN_PROGRESS
+                ]
+            ).exists()
+        except Exception:
+            allowed = False
+    if not allowed:
+        return Response({"detail": "Not allowed to update this vehicle."}, status=403)
+
+    try:
+        lat = float(request.data["lat"])
+        lng = float(request.data["lng"])
+    except (KeyError, TypeError, ValueError):
+        return Response({"detail": "lat and lng required as numbers."}, status=400)
+
+    trip_id = request.data.get("trip_id")
+    trip = None
+    if trip_id:
+        trip = Trip.objects.filter(pk=trip_id, vehicle=vehicle).select_related("route").first()
+    if trip is None:
+        trip = (
+            Trip.objects.filter(
+                vehicle=vehicle,
+                status__in=[Trip.Status.BOARDING, Trip.Status.IN_PROGRESS],
+            )
+            .select_related("route")
+            .order_by("-engaged_at")
+            .first()
+        )
+
+    source = request.data.get("source", VehicleLocation.Source.GPS)
+    if source == VehicleLocation.Source.SIMULATED and not settings.DEBUG:
+        return Response({"detail": "Simulated GPS only in DEBUG."}, status=400)
+
+    loc = VehicleLocation.objects.create(
+        vehicle=vehicle,
+        trip=trip,
+        lat=lat,
+        lng=lng,
+        speed_kmh=request.data.get("speed_kmh"),
+        heading_deg=float(request.data.get("heading_deg") or 0),
+        accuracy_m=float(request.data.get("accuracy_m") or 0),
+        source=source,
+    )
+
+    route_status = "unknown"
+    # Original themba-search-first polyline deviation check
+    route_status = "unknown"
+    distance_from_route_m = None
+    if trip and trip.route:
+        dev = check_deviation(lat, lng, trip.route)
+        route_status = dev.status
+        distance_from_route_m = dev.distance_m
+
+    if trip and trip.status == Trip.Status.BOARDING:
+        trip.status = Trip.Status.IN_PROGRESS
+        trip.actual_departure_time = timezone.now()
+        trip.save(update_fields=["status", "actual_departure_time"])
+
+    payload = {
+        "vehicle_id": vehicle.id,
+        "trip_id": trip.id if trip else None,
+        "lat": lat,
+        "lng": lng,
+        "speed_kmh": loc.speed_kmh,
+        "heading_deg": loc.heading_deg,
+        "accuracy_m": loc.accuracy_m,
+        "source": loc.source,
+        "route_status": route_status,
+        "distance_from_route_m": distance_from_route_m,
+        "recorded_at": loc.recorded_at.isoformat(),
+    }
+
+    channel_layer = get_channel_layer()
+    if channel_layer is not None:
+        try:
+            async_to_sync(channel_layer.group_send)(
+                "fleet_tracking",
+                {"type": "fleet.update", "payload": payload},
+            )
+            if trip:
+                async_to_sync(channel_layer.group_send)(
+                    f"trip_{trip.id}",
+                    {"type": "trip.location", "payload": payload},
+                )
+        except Exception as exc:
+            logger.warning("WS broadcast failed: %s", exc)
+
+    return Response(payload)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_vehicle_latest_location(request, vehicle_id):
+    loc = (
+        VehicleLocation.objects.filter(vehicle_id=vehicle_id)
+        .order_by("-recorded_at")
+        .first()
+    )
+    if not loc:
+        return Response({"detail": "No location yet."}, status=404)
+    return Response(VehicleLocationSerializer(loc).data)
+
+
+# ---------- Routing (ORS / OSRM) ----------
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def api_ad_hoc_directions(request):
+    """
+    POST /api/routing/directions/
+
+    Original themba-search-first routing:
+      OpenRouteService (ORS_API_KEY) → OSRM (ROUTING_SERVICE_URL) → straight-line fallback.
+
+    Body: { "origin": {"lat", "lng"}, "destination": {"lat", "lng"} }
+    """
+    data = request.data or {}
+    origin_raw = data.get("origin") or {}
+    dest_raw = data.get("destination") or {}
+
+    def _pair(raw):
+        if not isinstance(raw, dict):
+            return None
+        lat = raw.get("lat", raw.get("latitude"))
+        lng = raw.get("lng", raw.get("longitude"))
+        try:
+            return (float(lat), float(lng))
+        except (TypeError, ValueError):
+            return None
+
+    origin = _pair(origin_raw)
+    destination = _pair(dest_raw)
+    if not origin or not destination:
+        return Response(
+            {"error": "origin and destination with lat/lng are required."},
+            status=400,
+        )
+
+    try:
+        directions = get_ad_hoc_route(origin, destination)
+    except RoutingServiceError as exc:
+        return Response({"error": str(exc)}, status=502)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Routing failed")
+        return Response({"error": f"Routing unavailable: {exc}"}, status=502)
+
+    fare, notice = estimate_ad_hoc_fare(directions["distance_km"])
+    return Response(
+        {
+            "geometry": directions["geometry"],
+            "distance_km": directions["distance_km"],
+            "duration_min": directions["duration_min"],
+            "source": directions["source"],
+            "fare": fare,
+            "fare_notice": notice,
+        }
+    )
+
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def api_calculate_route_fare(request):
+    """Turn client-supplied distance into THEMBA ad-hoc fare (original fare_service)."""
+    try:
+        distance_km = float(request.data.get("distanceKm") or request.data["distance_km"])
+    except (KeyError, TypeError, ValueError):
+        return Response({"error": "distance_km required."}, status=400)
+    fare, notice = estimate_ad_hoc_fare(distance_km)
+    return Response(
+        {
+            "fare": fare,
+            "notice": notice,
+            "fare_notice": notice,
+            "distance_km": distance_km,
+            "estimated_fare": fare,
+        }
+    )
+
+
+# ---------- Panic ----------
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def api_panic_alert(request):
+    data = request.data if isinstance(request.data, dict) else {}
+    alert = PanicAlert.objects.create(
+        user=request.user if request.user.is_authenticated else None,
+        trip_id=data.get("tripId") or data.get("trip_id"),
+        booking_id=data.get("bookingId") or data.get("booking_id"),
+        latitude=data.get("latitude"),
+        longitude=data.get("longitude"),
+        accuracy_m=data.get("accuracy"),
+        payload=data,
+    )
+    channel_layer = get_channel_layer()
+    if channel_layer is not None:
+        try:
+            async_to_sync(channel_layer.group_send)(
+                "fleet_tracking",
+                {
+                    "type": "panic.alert",
+                    "payload": PanicAlertSerializer(alert).data,
+                },
+            )
+        except Exception as exc:
+            logger.warning("Panic broadcast failed: %s", exc)
+    return Response({"id": alert.id, "status": "received"}, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_fleet_snapshot(request):
+    """Latest position per vehicle that has reported (operator/admin)."""
+    if request.user.role not in ("operator", "admin", "administrator"):
+        return Response({"detail": "Operators and admins only."}, status=403)
+    vehicles = Vehicle.objects.all()
+    out = []
+    for v in vehicles:
+        loc = v.locations.order_by("-recorded_at").first()
+        if not loc:
+            continue
+        out.append(
+            {
+                "vehicle": VehicleSerializer(v).data,
+                "location": VehicleLocationSerializer(loc).data,
+            }
+        )
+    return Response(out)
