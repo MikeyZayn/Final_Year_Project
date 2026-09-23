@@ -27,4 +27,5 @@ urlpatterns = [
     path("api/my-trips/<int:trip_id>/engage/",                           views.api_engage_trip,    name="api_engage_trip"),
     path("api/my-trips/<int:trip_id>/release/",                          views.api_release_trip,   name="api_release_trip"),
     path("api/my-trips/<int:trip_id>/bookings/<int:booking_id>/verify/", views.api_verify_booking, name="api_verify_booking"),
+    path("api/my-bookings/", views.api_my_bookings, name="api_my_bookings"),
 ]

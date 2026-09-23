@@ -913,89 +913,82 @@ function RouteMapPanel({ trip }) {
   );
 }
 
-function Passenger({ activeTrip, setActiveTrip, notify, issuedVerificationCodes }) {
-  const [verificationCode, setVerificationCode] = useState('');
+function Passenger({ notify }) {
   const [departure, setDeparture] = useState('');
   const [destination, setDestination] = useState('');
-  const [matchingTrips, setMatchingTrips] = useState([]);
-  const [selectedTrip, setSelectedTrip] = useState(null);
-  const [bookingConfirmed, setBookingConfirmed] = useState(false);
+  const [trips, setTrips] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [bookingId, setBookingId] = useState(null);
+
+  async function loadTrips(params = {}) {
+    setLoading(true);
+    setError('');
+    try {
+      const query = new URLSearchParams();
+      if (params.from) query.set('from', params.from);
+      if (params.to) query.set('to', params.to);
+      const qs = query.toString() ? `?${query.toString()}` : '';
+      const { data } = await api.get(`/transport/api/trips/${qs}`);
+      setTrips(data);
+    } catch (err) {
+      setError('Could not load trips. Is the backend running?');
+      setTrips([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadBookings() {
+    try {
+      const { data } = await api.get('/transport/api/my-bookings/');
+      setBookings(data);
+    } catch {
+      // ignore — passenger may not have any yet
+    }
+  }
+
+  useEffect(() => {
+    loadTrips();
+    loadBookings();
+  }, []);
+
+  async function bookTrip(tripId) {
+    setBookingId(tripId);
+    try {
+      await api.post('/transport/api/my-bookings/', { trip_id: tripId });
+      notify('Booking confirmed. Show up at the rank and tell the operator your name.');
+      await loadTrips();
+      await loadBookings();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Booking failed.');
+    } finally {
+      setBookingId(null);
+    }
+  }
 
   function searchTrips() {
-    const cleanedDeparture = departure.trim().toLowerCase();
-    const cleanedDestination = destination.trim().toLowerCase();
-    const results = trips.filter((trip) => {
-      const matchesDeparture = !cleanedDeparture || trip.origin.toLowerCase().includes(cleanedDeparture);
-      const matchesDestination = !cleanedDestination || trip.destination.toLowerCase().includes(cleanedDestination);
-      return matchesDeparture && matchesDestination;
-    });
-
-    setMatchingTrips(results);
-    setSelectedTrip(results[0] || null);
-    setBookingConfirmed(false);
-    setVerificationCode('');
-    setActiveTrip(null);
-    notify(results.length ? `${results.length} matching trip${results.length === 1 ? '' : 's'} found.` : 'No matching trips found.');
+    loadTrips({ from: departure.trim(), to: destination.trim() });
   }
-
-  function confirmBooking() {
-    if (!selectedTrip) {
-      notify('Search for and select a trip first.');
-      return;
-    }
-
-    setBookingConfirmed(true);
-    setVerificationCode('');
-    notify('Booking confirmed. Wait for the operator to give you the verification code.');
-  }
-
-  function verifyTripCode() {
-    const cleanedCode = verificationCode.trim();
-    if (!cleanedCode) {
-      notify('Enter a verification code first.');
-      return;
-    }
-
-    const issuedCode = selectedTrip ? issuedVerificationCodes[selectedTrip.id] : null;
-    const matchedTrip = selectedTrip && issuedCode && issuedCode.toLowerCase() === cleanedCode.toLowerCase()
-      ? selectedTrip
-      : null;
-
-    if (!matchedTrip) {
-      notify(issuedCode ? 'That code does not match your booking.' : 'Wait for the operator to give you a verification code.');
-      return;
-    }
-
-    setActiveTrip(matchedTrip);
-    notify(`Route ${matchedTrip.route} unlocked.`);
-  }
-
-  function selectTrip(trip) {
-    setSelectedTrip(trip);
-    setBookingConfirmed(false);
-    setVerificationCode('');
-    setActiveTrip(null);
-  }
-
-  const displayedTrips = matchingTrips.length ? matchingTrips : trips;
 
   return (
     <>
       <div className="dashboard-grid">
         <article className="module module-wide">
           <div className="module-heading">
-            <span>Find transport</span>
+            <span>Find a trip</span>
             <span className="module-number">01</span>
           </div>
 
           <div className="form-grid">
             <label>
-              Departure point
-              <input value={departure} onChange={(event) => setDeparture(event.target.value)} placeholder="Empangeni" />
+              From (rank or area)
+              <input value={departure} onChange={(e) => setDeparture(e.target.value)} placeholder="Empangeni" />
             </label>
             <label>
-              Destination
-              <input value={destination} onChange={(event) => setDestination(event.target.value)} placeholder="Durban" />
+              To (destination)
+              <input value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="Kwa-Dlangezwa" />
             </label>
           </div>
 
@@ -1005,83 +998,81 @@ function Passenger({ activeTrip, setActiveTrip, notify, issuedVerificationCodes 
         </article>
       </div>
 
-      <div className="module">
+      {bookings.length > 0 && (
+        <article className="module module-wide">
+          <div className="module-heading">
+            <span>My bookings</span>
+            <span className="module-number">{bookings.length}</span>
+          </div>
+          {bookings.map((b) => (
+            <div className="trip-row" key={b.id}>
+              <span>
+                <strong>{b.route_label}</strong>
+                <small>
+                  {b.trip_code} · {b.departure_date} · {b.status}
+                </small>
+              </span>
+              <span
+                className="status-pill"
+                style={{
+                  borderColor: b.status === 'boarded' ? 'var(--success)' : 'var(--accent)',
+                  color: b.status === 'boarded' ? 'var(--success)' : 'var(--accent)',
+                }}
+              >
+                {b.status}
+              </span>
+            </div>
+          ))}
+        </article>
+      )}
+
+      <article className="module module-wide">
         <div className="module-heading">
-          <span>{matchingTrips.length ? 'Search results' : 'Available trips'}</span>
-          <span className="module-number">02</span>
+          <span>Upcoming trips</span>
+          <span className="module-number">{trips.length}</span>
         </div>
 
-        {displayedTrips.map((trip) => (
-          <button
-            className={selectedTrip?.id === trip.id ? 'trip-row active' : 'trip-row'}
-            key={trip.id}
-            onClick={() => selectTrip(trip)}
-            type="button"
-          >
-            <span>
-              <strong>{trip.route}</strong>
-              <small>
-                {trip.date} · {trip.id} · {trip.departure} · {trip.status}
-              </small>
-            </span>
-            <b>{trip.fare}</b>
-          </button>
-        ))}
-      </div>
+        {loading && <p className="muted">Loading trips…</p>}
+        {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+        {!loading && !error && trips.length === 0 && (
+          <p className="muted">No upcoming trips match. Try clearing the search.</p>
+        )}
 
-      {selectedTrip && <RouteMapPanel trip={selectedTrip} />}
-
-      {selectedTrip && !bookingConfirmed && (
-        <div className="module">
-          <div className="module-heading">
-            <span>Confirm booking</span>
-            <span className="module-number">03</span>
-          </div>
-          <p className="muted">
-            Confirm your booking for {selectedTrip.route} on {selectedTrip.date} at {selectedTrip.departure}.
-          </p>
-          <button className="primary-button" onClick={confirmBooking} type="button">
-            Confirm booking <span>→</span>
-          </button>
-        </div>
-      )}
-
-      {bookingConfirmed && (
-        <div className="module">
-          <div className="module-heading">
-            <span>Verification code</span>
-            <span className="module-number">04</span>
-          </div>
-
-          <p className="muted">Your booking is confirmed. Wait for the operator to give you the verification code, then enter it below.</p>
-          <input
-            value={verificationCode}
-            onChange={(event) => setVerificationCode(event.target.value)}
-            placeholder="Enter code, e.g. TH-EMP-001"
-          />
-          <button className="secondary-button" onClick={verifyTripCode} type="button">
-            Verify trip
-          </button>
-        </div>
-      )}
-
-      {activeTrip && (
-        <div className="module verified-trip">
-          <div>
-            <div className="eyebrow">Verified trip</div>
-            <h3>{activeTrip.route}</h3>
-            <p className="muted">Driver: Bongani Mthembu · Toyota Quantum ND 123-456</p>
-          </div>
-
-          <button className="danger-button" onClick={() => notify('Emergency alert prepared for the active trip.')} type="button">
-            Panic alert
-          </button>
-          <button className="primary-button" onClick={() => notify('Feedback form opened for the completed trip.')} type="button">
-            Give feedback
-          </button>
-        </div>
-      )}
-
+        {!loading && trips.map((trip) => {
+          const alreadyBooked = bookings.some((b) => b.trip === trip.id);
+          const isFull = trip.seats_available <= 0;
+          return (
+            <div className="trip-row" key={trip.id}>
+              <span>
+                <strong>
+                  {trip.route.departure.name} → {trip.route.destination.name}
+                </strong>
+                <small>
+                  {trip.trip_code} · {trip.departure_date}
+                  {trip.expected_departure_time ? ` · ${trip.expected_departure_time.slice(0, 5)}` : ''}
+                  {' · '}{trip.operator_name}
+                  {' · '}{trip.seats_available} seats
+                  {trip.fare ? ` · R${trip.fare}` : ''}
+                </small>
+              </span>
+              {alreadyBooked ? (
+                <span className="status-pill">Booked</span>
+              ) : isFull ? (
+                <span className="status-pill" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }}>Full</span>
+              ) : (
+                <button
+                  className="primary-button"
+                  onClick={() => bookTrip(trip.id)}
+                  disabled={bookingId === trip.id}
+                  type="button"
+                >
+                  {bookingId === trip.id ? 'Booking…' : 'Book seat'}
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </article>
     </>
   );
 }

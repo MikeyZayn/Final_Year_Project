@@ -77,7 +77,7 @@ def api_list_destinations(request):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def api_list_trips(request):
-    """Upcoming trips. Public discovery for passengers."""
+    """Upcoming trips. Filter by from-rank name, to-destination name, or route id."""
     today = timezone.now().date()
     qs = Trip.objects.filter(
         status__in=[Trip.Status.SCHEDULED, Trip.Status.BOARDING],
@@ -86,11 +86,22 @@ def api_list_trips(request):
         "route__departure", "route__destination",
         "operator__association", "vehicle",
     ).order_by("departure_date", "expected_departure_time")
+
+    from_q = request.query_params.get("from", "").strip()
+    to_q = request.query_params.get("to", "").strip()
     route_id = request.query_params.get("route")
+
     if route_id:
         qs = qs.filter(route_id=route_id)
-    return Response(TripSerializer(qs, many=True).data)
+    if from_q:
+        qs = qs.filter(
+            models.Q(route__departure__name__icontains=from_q) |
+            models.Q(route__departure__area__icontains=from_q)
+        )
+    if to_q:
+        qs = qs.filter(route__destination__name__icontains=to_q)
 
+    return Response(TripSerializer(qs, many=True).data)
 
 # ---------- Operator ----------
 
@@ -524,3 +535,33 @@ def api_verify_booking(request, trip_id, booking_id):
         "bumped": bumped,
         "trip_full": trip.seats_taken >= trip.seat_capacity,
     })
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def api_my_bookings(request):
+    if request.method == "GET":
+        qs = Booking.objects.filter(passenger=request.user).select_related(
+            "trip__route__departure", "trip__route__destination",
+        )
+        return Response(BookingSerializer(qs, many=True).data)
+
+    trip_id = request.data.get("trip_id")
+    if not trip_id:
+        return Response({"detail": "trip_id is required."}, status=400)
+    try:
+        trip = Trip.objects.get(pk=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found."}, status=404)
+
+    if trip.status not in [Trip.Status.SCHEDULED, Trip.Status.BOARDING]:
+        return Response({"detail": "This trip is not open for booking."}, status=400)
+    if trip.seats_available <= 0:
+        return Response({"detail": "Trip is full."}, status=400)
+
+    booking, created = Booking.objects.get_or_create(
+        trip=trip, passenger=request.user,
+    )
+    if not created:
+        return Response({"detail": "You already booked this trip."}, status=400)
+
+    return Response(BookingSerializer(booking).data, status=201)

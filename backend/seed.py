@@ -1,12 +1,13 @@
 from datetime import date, time, timedelta
 from django.utils import timezone
-from accounts.models import User, OperatorProfile, RankCode, AdminProfile, DriverProfile
+from accounts.models import User, PassengerProfile, OperatorProfile, RankCode, AdminProfile, DriverProfile
 from transport.models import (
     Rank, Destination, OperatorAtRank, Route,
     Vehicle, DriverVehicle, Trip,
 )
 
 # ---- Clear ----
+AdminProfile.objects.update(rank=None)
 Trip.objects.all().delete()
 DriverVehicle.objects.all().delete()
 Vehicle.objects.all().delete()
@@ -253,3 +254,26 @@ print("Routes:           ", Route.objects.count())
 print("Vehicles:         ", Vehicle.objects.count())
 print("Drivers:          ", DriverProfile.objects.count())
 print("Trips:            ", Trip.objects.count())
+
+
+# ---- Demo passengers ----
+for phone, first, last in [
+    ("0821111111", "Sibusiso", "Dlamini"),
+    ("0821111112", "Thandi",   "Mkhize"),
+    ("0821111113", "Sipho",    "Nkosi"),
+]:
+    user, created = User.objects.get_or_create(
+        phone=phone, defaults={"role": "passenger", "username": phone},
+    )
+    user.first_name, user.last_name, user.role = first, last, "passenger"
+    if created or not user.has_usable_password():
+        user.set_password("Passw0rd!")
+    user.save()
+    PassengerProfile.objects.get_or_create(
+        user=user,
+        defaults={
+            "next_of_kin_name": "Family Contact",
+            "next_of_kin_phone": "0822222222",
+        },
+    )
+print("passengers ready")
