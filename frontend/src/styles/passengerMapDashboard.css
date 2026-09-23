@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap');
+
 .pmd {
   display: grid;
   grid-template-columns: minmax(280px, 340px) 1fr;
@@ -8,6 +10,167 @@
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Branch 6 React visual system, scoped to the passenger workspace. */
+.pmd {
+  --pmd-bg: #07191e;
+  --pmd-surface: rgba(17, 26, 30, 0.82);
+  --pmd-panel: rgba(255, 255, 255, 0.035);
+  --pmd-border: rgba(143, 158, 151, 0.18);
+  --pmd-text: #edf2ee;
+  --pmd-muted: rgba(237, 242, 238, 0.72);
+  --pmd-accent: #e3a441;
+  --pmd-accent-strong: #f2b14d;
+  --pmd-success: #81b77c;
+  font-family: 'Manrope', sans-serif;
+  color: var(--pmd-text);
+  background:
+    radial-gradient(circle at 70% 30%, rgba(21, 50, 62, 0.9) 0, rgba(21, 50, 62, 0.25) 18%, transparent 36%),
+    linear-gradient(180deg, #0a171d 0%, var(--pmd-bg) 100%);
+  border-color: var(--pmd-border);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+}
+
+.app.light .pmd {
+  --pmd-bg: #f5efe7;
+  --pmd-surface: rgba(255, 255, 255, 0.58);
+  --pmd-panel: rgba(255, 255, 255, 0.46);
+  --pmd-border: rgba(21, 35, 40, 0.12);
+  --pmd-text: #17252b;
+  --pmd-muted: rgba(21, 35, 40, 0.7);
+  --pmd-accent: #db9d35;
+  --pmd-accent-strong: #c8881a;
+  --pmd-success: #67a96b;
+  color: var(--pmd-text);
+  background:
+    radial-gradient(circle at 70% 30%, rgba(228, 155, 53, 0.18) 0, transparent 36%),
+    linear-gradient(180deg, #fbf7f0 0%, var(--pmd-bg) 100%);
+  box-shadow: 0 18px 40px rgba(26, 30, 20, 0.08);
+}
+
+.app.light .pmd-section,
+.app.light .pmd-match-card,
+.app.light .pmd-trip {
+  box-shadow: 0 10px 28px rgba(26, 30, 20, 0.08);
+}
+
+.app.light .pmd-btn.secondary {
+  background: rgba(21, 35, 40, 0.06);
+  color: var(--pmd-text);
+  border-color: var(--pmd-border);
+}
+
+.app.light .pmd-btn.ghost {
+  color: var(--pmd-text);
+  border-color: var(--pmd-border);
+}
+
+.app.light .pmd-trip small,
+.app.light .pmd-booking-list span,
+.app.light .pmd-profile-text,
+.app.light .pmd-hint {
+  color: var(--pmd-muted);
+}
+
+.app.light .pmd-code-banner,
+.app.light .pmd-verified-trip {
+  background: rgba(103, 169, 107, 0.12);
+  color: #2f6b38;
+  border-color: rgba(103, 169, 107, 0.3);
+}
+
+.pmd-sidebar,
+.pmd-results {
+  background: var(--pmd-surface);
+}
+
+.pmd-sidebar {
+  border-right-color: var(--pmd-border);
+}
+
+.pmd-section,
+.pmd-match-card,
+.pmd-trip {
+  background: var(--pmd-panel);
+  border-color: var(--pmd-border);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+}
+
+.pmd-section-head,
+.pmd-fare-block span,
+.pmd-role,
+.pmd-label,
+.pmd-hint,
+.pmd-trip small,
+.pmd-modal p,
+.pmd-foot small {
+  color: var(--pmd-muted);
+}
+
+.pmd-section-head,
+.pmd-role {
+  font-family: 'DM Mono', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pmd-mark,
+.pmd-btn.primary,
+.pmd-btn-primary {
+  background: linear-gradient(135deg, var(--pmd-accent-strong), var(--pmd-accent));
+  color: #0f1d20;
+}
+
+.pmd-btn,
+.pmd-btn-primary,
+.pmd-btn-secondary,
+.pmd-btn-danger {
+  border-radius: 6px;
+  transition: transform 0.18s ease, filter 0.18s ease, background 0.18s ease;
+}
+
+.pmd-btn:hover,
+.pmd-btn-primary:hover,
+.pmd-btn-secondary:hover,
+.pmd-btn-danger:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.04);
+}
+
+.pmd-label select,
+.pmd-label input {
+  border-color: var(--pmd-border);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--pmd-text);
+  font-family: 'Manrope', sans-serif;
+}
+
+.pmd-trip.active,
+.pmd-trip:hover {
+  border-color: var(--pmd-accent);
+  background: rgba(227, 164, 65, 0.08);
+}
+
+.pmd-trip strong,
+.pmd-fare-block strong {
+  color: var(--pmd-accent-strong);
+}
+
+.pmd-status,
+.pmd-verified {
+  color: var(--pmd-success);
+}
+
+.pmd-code-banner,
+.pmd-verified-trip {
+  border-color: rgba(129, 183, 124, 0.35);
+  background: rgba(129, 183, 124, 0.1);
+}
+
+.pmd-modal {
+  background: #101b1f;
+  border-color: var(--pmd-border);
 }
 
 .pmd-sidebar {
@@ -332,6 +495,39 @@
     height: auto;
   }
   .pmd-map {
+
+/* Keep the branch 6 treatment ahead of the legacy passenger declarations above. */
+.pmd-sidebar,
+.pmd-results {
+  background: var(--pmd-surface);
+}
+
+.pmd-mark {
+  background: linear-gradient(135deg, var(--pmd-accent-strong), var(--pmd-accent));
+  color: #0f1d20;
+}
+
+.pmd-trip {
+  background: var(--pmd-panel);
+  border-color: var(--pmd-border);
+}
+
+.pmd-trip.active,
+.pmd-trip:hover {
+  border-color: var(--pmd-accent);
+  background: rgba(227, 164, 65, 0.08);
+}
+
+.pmd-brand small,
+.pmd-profile-text strong,
+.pmd-trip-meta,
+.pmd-booking-list li {
+  color: var(--pmd-muted);
+}
+
+.pmd-fare-block {
+  background: rgba(227, 164, 65, 0.1);
+}
     min-height: 360px;
   }
   .pmd-match-card {

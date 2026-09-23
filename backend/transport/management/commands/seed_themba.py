@@ -246,7 +246,7 @@ class Command(BaseCommand):
         trip_defs = [
             ("TRP-ONG-EMP-01", "TH-ONG-EMP", time(8, 30), v1, dp),
             ("TRP-ONG-RB-01", "TH-ONG-RB", time(9, 0), v2, None),
-            ("TRP-EMP-RB-01", "TH-EMP-RB", time(10, 0), None, None),
+            ("TRP-EMP-RB-01", "TH-RB-EMP", time(10, 0), None, None),
         ]
         for code, route_code, t, vehicle, driver in trip_defs:
             Trip.objects.update_or_create(

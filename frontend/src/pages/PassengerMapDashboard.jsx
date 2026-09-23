@@ -55,7 +55,7 @@ function mapApiTrip(t) {
   };
 }
 
-export default function PassengerMapDashboard({ notify, onExit }) {
+export default function PassengerMapDashboard({ notify }) {
   const user = getUser();
   const passengerName =
     [user?.first_name, user?.last_name].filter(Boolean).join(' ') ||
@@ -348,21 +348,11 @@ export default function PassengerMapDashboard({ notify, onExit }) {
           <span className="pmd-verified">Verified</span>
         </div>
 
-        {onExit && (
-          <button type="button" className="pmd-btn ghost" onClick={onExit}>
-            Sign out / switch
-          </button>
-        )}
-
         {/* 01 Search Trip — SRS */}
         <section className="pmd-section">
           <div className="pmd-section-head">
             <span>01. SEARCH TRIP</span>
           </div>
-          <p className="pmd-hint">
-            Choose departure and destination. Matching live trips come from the API;
-            official local fares are shown for supported pairs (SRS Search Trip / Fare).
-          </p>
           {nearestHint && (
             <div className="pmd-nearest">
               <span>Nearest rank from your GPS</span>
@@ -439,11 +429,6 @@ export default function PassengerMapDashboard({ notify, onExit }) {
           <div className="pmd-section-head">
             <span>03. TRIP VERIFICATION</span>
           </div>
-          <p className="pmd-hint">
-            After booking you receive a <strong>single-use verification code</strong> linked to
-            your trip. Show it at boarding. The same verified participation enables post-trip
-            feedback (SRS).
-          </p>
           {booked?.verification_code && (
             <div className="pmd-code-banner">
               Your code: <strong>{booked.verification_code}</strong>
@@ -457,7 +442,6 @@ export default function PassengerMapDashboard({ notify, onExit }) {
             <input
               value={verifyInput}
               onChange={(e) => setVerifyInput(e.target.value)}
-              placeholder="Code from booking / operator"
             />
           </label>
           <button type="button" className="pmd-btn secondary" onClick={confirmVerifyCode}>
@@ -518,9 +502,6 @@ export default function PassengerMapDashboard({ notify, onExit }) {
             <strong>Matching trips</strong>
             <span>{results.length} result(s)</span>
           </div>
-          {!results.length && (
-            <p className="pmd-empty">Search a trip to see live API results here.</p>
-          )}
           {results.map((trip) => (
             <button
               key={trip.id ?? trip.trip_code + trip.origin}
