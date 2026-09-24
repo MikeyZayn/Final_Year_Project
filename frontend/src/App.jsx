@@ -4,6 +4,7 @@ import 'leaflet/dist/leaflet.css';
 import { useAuth } from './auth';
 const roles = ['passenger', 'driver', 'operator', 'administrator'];
 import api from './api';
+import DriverPage from './pages/DriverPage.jsx';
 
 const demoUsers = {
   passenger: 'Sibusiso Dlamini',
@@ -806,7 +807,7 @@ function Dashboard({ role, activeTrip, setActiveTrip, notify, issuedVerification
       </div>
 
       {role === 'passenger' && <Passenger activeTrip={activeTrip} setActiveTrip={setActiveTrip} notify={notify} issuedVerificationCodes={issuedVerificationCodes} />}
-      {role === 'driver' && <Driver notify={notify} />}
+      {role === 'driver' && <DriverPage notify={notify} />}
       {role === 'operator' && <Operator notify={notify} />}
       {role === 'administrator' && <Administrator notify={notify} />}
     </section>

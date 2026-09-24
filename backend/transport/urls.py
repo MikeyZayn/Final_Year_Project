@@ -47,4 +47,10 @@ urlpatterns = [
     path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
     path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
 
+    # Driver
+    path("api/driver/profile/",                        views.api_driver_profile,          name="api_driver_profile"),
+    path("api/driver/vehicle/",                        views.api_driver_vehicle,          name="api_driver_vehicle"),
+    path("api/driver/trips/",                          views.api_driver_trips,            name="api_driver_trips"),
+    path("api/driver/trips/confirm/",                  views.api_driver_confirm_trip,     name="api_driver_confirm_trip"),
+    path("api/driver/vehicle/<int:vehicle_id>/location/", views.api_driver_post_location, name="api_driver_post_location"),
 ]

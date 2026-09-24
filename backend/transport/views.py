@@ -10,7 +10,7 @@ from accounts.models import OperatorProfile
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
     Vehicle, Trip, Booking, VerificationCode, TripFlag, TripAssetChange,
-    Feedback,
+    Feedback, DriverVehicle,
 )
 from .serializers import (
     RankSerializer, DestinationSerializer, OperatorAtRankSerializer,
@@ -814,3 +814,150 @@ def api_cancel_booking(request, booking_id):
     booking.status = Booking.Status.CANCELLED
     booking.save()
     return Response(BookingSerializer(booking).data)
+
+# ---------- Driver endpoints ----------
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_driver_profile(request):
+    """Profile for the logged-in driver — includes ratings + complaints summary."""
+    try:
+        profile = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "Not a driver account."}, status=403)
+
+    u = request.user
+    from .models import Feedback
+
+    driver_trips = Trip.objects.filter(driver=profile)
+    feedback = Feedback.objects.filter(trip__driver=profile)
+
+    rating_qs = feedback.exclude(rating__isnull=True)
+    avg = rating_qs.aggregate(avg=models.Avg("rating"))["avg"]
+    rating_count = rating_qs.count()
+    complaint_count = feedback.filter(has_complaint=True).count()
+    open_complaints = feedback.filter(
+        has_complaint=True,
+        status__in=[Feedback.Status.SUBMITTED, Feedback.Status.UNDER_REVIEW, Feedback.Status.ESCALATED],
+    ).count()
+
+    return Response({
+        "user": {
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "phone": u.phone,
+            "email": u.email,
+        },
+        "license_number": profile.license_number,
+        "id_number": profile.id_number,
+        "pdp_number": profile.pdp_number,
+        "status": profile.status,
+        "external_verification_status": profile.external_verification_status,
+        "external_verification_reason": profile.external_verification_reason,
+        "rating_avg": round(avg, 2) if avg else None,
+        "rating_count": rating_count,
+        "complaint_count": complaint_count,
+        "open_complaints": open_complaints,
+        "notifications": [],   # placeholder until a notifications model exists
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_driver_vehicle(request):
+    """The vehicle currently assigned to the logged-in driver."""
+    try:
+        profile = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "Not a driver account."}, status=403)
+
+    assignment = (
+        DriverVehicle.objects
+        .filter(driver=profile, active=True, vehicle__roadworthy=True)
+        .select_related("vehicle")
+        .first()
+    )
+    if not assignment:
+        return Response(None)
+
+    v = assignment.vehicle
+    return Response({
+        "id": v.id,
+        "plate_number": v.plate_number,
+        "make": v.make,
+        "model": v.model,
+        "seat_capacity": v.seat_capacity,
+        "status": "roadworthy" if v.roadworthy else "not_roadworthy",
+    })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_driver_trips(request):
+    """Trips where this user is the assigned driver."""
+    try:
+        profile = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "Not a driver account."}, status=403)
+
+    qs = (
+        Trip.objects
+        .filter(driver=profile)
+        .select_related(
+            "route__departure", "route__destination",
+            "operator__association", "vehicle",
+        )
+        .order_by("departure_date", "expected_departure_time")
+    )
+    return Response(TripSerializer(qs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_driver_confirm_trip(request):
+    """Driver enters a trip code to confirm they're operating that trip.
+    For the prototype this simply fetches and returns the trip — the
+    authoritative assignment is what the operator/admin set."""
+    try:
+        profile = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "Not a driver account."}, status=403)
+
+    code = (request.data.get("trip_code") or "").strip()
+    if not code:
+        return Response({"detail": "trip_code is required."}, status=400)
+
+    try:
+        trip = Trip.objects.select_related(
+            "route__departure", "route__destination", "vehicle",
+        ).get(trip_code=code)
+    except Trip.DoesNotExist:
+        return Response({"detail": "No trip with that code."}, status=404)
+
+    if trip.driver_id and trip.driver_id != profile.id:
+        return Response(
+            {"detail": "This trip is assigned to another driver."},
+            status=403,
+        )
+
+    # If unassigned, assign to this driver
+    if trip.driver_id is None:
+        trip.driver = profile
+        trip.save()
+
+    return Response(TripSerializer(trip).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_driver_post_location(request, vehicle_id):
+    """Stub — GPS location ingestion not implemented in the prototype.
+    Returns a benign response so the driver UI can render without error."""
+    return Response({
+        "lat": request.data.get("lat"),
+        "lng": request.data.get("lng"),
+        "trip_id": request.data.get("trip_id"),
+        "route_status": "on_route",
+        "distance_from_route_m": 0,
+        "note": "GPS ingestion not implemented in the prototype.",
+    })
