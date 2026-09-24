@@ -21,11 +21,13 @@ class PassengerProfileAdmin(admin.ModelAdmin):
 
 @admin.register(DriverProfile)
 class DriverProfileAdmin(admin.ModelAdmin):
-    # This is where an operator/admin approves a driver — flip status to
-    # "verified" here once you're ready to enforce it elsewhere in the app.
-    list_display = ("user", "license_number", "status", "association")
-    list_filter = ("status",)
-
+    list_display = (
+        "user", "license_number", "id_number", "pdp_number",
+        "association", "status", "external_verification_status",
+    )
+    list_filter = ("status", "external_verification_status", "association")
+    search_fields = ("user__phone", "license_number", "id_number")
+    readonly_fields = ("external_verification_status", "external_verification_reason")
 @admin.register(RankCode)
 class RankCodeAdmin(admin.ModelAdmin):
     list_display = ("code", "association_name", "operating_region", "is_active", "created_at")

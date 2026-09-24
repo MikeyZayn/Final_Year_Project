@@ -557,6 +557,7 @@ function Register({ role, setRole, onBack, onAuthed }) {
     password: '',
     next_of_kin_name: '',
     next_of_kin_phone: '',
+    id_number: '',
     license_number: '',
     rank_code: '',
   });
@@ -600,6 +601,7 @@ function Register({ role, setRole, onBack, onAuthed }) {
         fd.append('phone', form.phone);
         fd.append('email', form.email);
         fd.append('password', form.password);
+        fd.append('id_number', form.id_number);
         fd.append('license_number', form.license_number);
         fd.append('rank_code', form.rank_code);
         fd.append('photo', photo);
@@ -691,6 +693,15 @@ function Register({ role, setRole, onBack, onAuthed }) {
 
       {role === 'driver' && (
         <>
+          <label>
+            SA ID number
+            <input
+              value={form.id_number}
+              onChange={(e) => set('id_number', e.target.value)}
+              maxLength={13}
+              placeholder="13 digits"
+            />
+          </label>
           <label>
             Driver license number
             <input

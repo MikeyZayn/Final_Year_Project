@@ -48,22 +48,37 @@ class PassengerProfile(models.Model):
 
     def __str__(self):
         return f"Passenger: {self.user}"
+
 class DriverProfile(models.Model):
     class VerificationStatus(models.TextChoices):
         PENDING = "pending", "Pending verification"
         VERIFIED = "verified", "Verified"
         REJECTED = "rejected", "Rejected"
 
+    class ExternalVerification(models.TextChoices):
+        UNVERIFIED = "unverified", "Not yet checked"
+        VERIFIED = "verified", "Verified with DOT"
+        FAILED = "failed", "Failed DOT verification"
+        SUSPENDED = "suspended", "Licence suspended or revoked"
+        UNAVAILABLE = "unavailable", "DOT registry unavailable"
+
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="driver_profile")
-    license_number = models.CharField(max_length=30)  # TODO: encrypt to match schema's license_number_enc
+    license_number = models.CharField(max_length=30)  # TODO: encrypt (license_number_enc) at deployment
+    id_number = models.CharField(max_length=13, blank=True)
+    pdp_number = models.CharField(max_length=30, blank=True)
     photo = models.ImageField(upload_to="driver_photos/")
     association = models.ForeignKey(
         "RankCode", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="driver_applications",
-    )    
+    )
     status = models.CharField(
         max_length=20, choices=VerificationStatus.choices, default=VerificationStatus.PENDING
     )
+    external_verification_status = models.CharField(
+        max_length=20, choices=ExternalVerification.choices,
+        default=ExternalVerification.UNVERIFIED,
+    )
+    external_verification_reason = models.CharField(max_length=50, blank=True)
 
     def __str__(self):
         return f"Driver: {self.user} ({self.status})"

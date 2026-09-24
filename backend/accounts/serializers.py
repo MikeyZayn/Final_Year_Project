@@ -1,6 +1,7 @@
 from django.contrib.auth import authenticate
 from rest_framework import serializers
-
+from django.db import transaction
+from .dot_adapter import verify_driver
 from .models import (
     AdminProfile,
     DriverProfile,
@@ -45,6 +46,7 @@ class PassengerRegisterSerializer(serializers.Serializer):
             raise serializers.ValidationError("Phone already registered.")
         return value
 
+    @transaction.atomic
     def create(self, data):
         profile_data = {
             "next_of_kin_name": data.pop("next_of_kin_name"),
@@ -60,13 +62,13 @@ class PassengerRegisterSerializer(serializers.Serializer):
         PassengerProfile.objects.create(user=user, **profile_data)
         return user
 
-
 class DriverRegisterSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=150)
     last_name = serializers.CharField(max_length=150)
     phone = serializers.CharField(max_length=15)
     password = serializers.CharField(write_only=True)
     email = serializers.EmailField(required=False, allow_blank=True)
+    id_number = serializers.CharField(max_length=13)
     license_number = serializers.CharField(max_length=30)
     rank_code = serializers.CharField(max_length=20)
     photo = serializers.ImageField()
@@ -83,23 +85,49 @@ class DriverRegisterSerializer(serializers.Serializer):
             raise serializers.ValidationError("Invalid or inactive rank code.")
         return value
 
+    @transaction.atomic
     def create(self, data):
         password = data.pop("password")
-        data.pop("rank_code")
+        data.pop("rank_code")   # discard the raw string; use self._rank instead
+        id_number = data.pop("id_number")
         license_number = data.pop("license_number")
         photo = data.pop("photo")
+
+        # Call the DOT adapter
+        result = verify_driver(id_number=id_number, license_number=license_number)
+
+        # Map adapter result to model choices
+        reason = result["reason"]
+        if result["verified"]:
+            ext_status = DriverProfile.ExternalVerification.VERIFIED
+        elif reason in ("license_suspended", "license_revoked"):
+            ext_status = DriverProfile.ExternalVerification.SUSPENDED
+        elif reason == "dot_unavailable":
+            ext_status = DriverProfile.ExternalVerification.UNAVAILABLE
+        else:
+            ext_status = DriverProfile.ExternalVerification.FAILED
+
         user = User(**data, role=User.Role.DRIVER)
         user.username = user.phone
         user.set_password(password)
         user.save()
+
+        pdp_number = ""
+        if result.get("record"):
+            pdp_number = result["record"].get("pdp_number") or ""
+
         DriverProfile.objects.create(
             user=user,
             license_number=license_number,
+            id_number=id_number,
+            pdp_number=pdp_number,
             photo=photo,
             association=self._rank,
+            status=DriverProfile.VerificationStatus.PENDING,
+            external_verification_status=ext_status,
+            external_verification_reason=reason,
         )
         return user
-
 
 class OperatorRegisterSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=15)
@@ -119,6 +147,7 @@ class OperatorRegisterSerializer(serializers.Serializer):
             raise serializers.ValidationError("Invalid or inactive rank code.")
         return value
 
+    @transaction.atomic
     def create(self, data):
         password = data.pop("password")
         data.pop("rank_code")
