@@ -9,7 +9,8 @@ Thumbs.db
 
 # --- Environment / secrets ---
 .env
-.env.local
+.env.*
+!.env.example
 *.pem
 *.key
 
@@ -21,7 +22,13 @@ venv/
 .venv/
 env/
 .ipynb_checkpoints/
+
+# --- Django ---
 *.sqlite3
+*.sqlite3-journal
+/backend/staticfiles/
+/backend/media/
+local_settings.py
 
 # --- Node / JS ---
 node_modules/
@@ -31,12 +38,9 @@ npm-debug.log*
 yarn-error.log*
 .next/
 
-# --- Data & models (adjust as needed) ---
-*.csv.bak
-*.log
-/data/raw/
-/models/*.pkl
-/models/*.h5
+# --- Vite ---
+.vite/
+*.local
 
-# --- Docs build artifacts ---
-docs/_build/
+# --- Logs ---
+*.log

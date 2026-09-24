@@ -14,6 +14,9 @@ from .models import (
     VehicleLocation,
     TaxiFareRule,
     PanicAlert,
+    DriverRating,
+    DriverComplaint,
+    DriverNotification,
 )
 
 
@@ -93,7 +96,12 @@ class TripSerializer(serializers.ModelSerializer):
     vehicle_plate = serializers.CharField(
         source="vehicle.plate_number", read_only=True, default=None
     )
+    vehicle_id = serializers.IntegerField(
+        source="vehicle.id", read_only=True, default=None
+    )
     driver_name = serializers.SerializerMethodField()
+    driver_phone = serializers.SerializerMethodField()
+    driver_license = serializers.SerializerMethodField()
     seats_taken = serializers.IntegerField(read_only=True)
     seats_available = serializers.IntegerField(read_only=True)
 
@@ -113,6 +121,8 @@ class TripSerializer(serializers.ModelSerializer):
             "seats_available",
             "status",
             "driver_name",
+            "driver_phone",
+            "driver_license",
             "vehicle_plate",
             "vehicle_id",
             "engaged_at",
@@ -125,6 +135,16 @@ class TripSerializer(serializers.ModelSerializer):
         u = obj.driver.user
         name = f"{u.first_name} {u.last_name}".strip()
         return name or u.phone or u.username
+
+    def get_driver_phone(self, obj):
+        if not obj.driver:
+            return None
+        return obj.driver.user.phone or None
+
+    def get_driver_license(self, obj):
+        if not obj.driver:
+            return None
+        return obj.driver.license_number or None
 
 
 class BookingSerializer(serializers.ModelSerializer):
@@ -160,6 +180,7 @@ class BookingSerializer(serializers.ModelSerializer):
 
 class BookingCreateSerializer(serializers.Serializer):
     trip_id = serializers.IntegerField()
+    trip_code = serializers.CharField(required=False, allow_blank=True)
     # optional walk-in if not authenticated passenger self-book
 
 
@@ -174,6 +195,80 @@ class PanicAlertSerializer(serializers.ModelSerializer):
             "longitude",
             "accuracy_m",
             "payload",
+            "created_at",
+        ]
+        read_only_fields = ["created_at"]
+
+
+# ---------------------------------------------------------------------------
+# Driver profile panel serializers
+# ---------------------------------------------------------------------------
+
+
+class DriverRatingSerializer(serializers.ModelSerializer):
+    passenger_name = serializers.SerializerMethodField()
+    trip_code = serializers.CharField(source="trip.trip_code", read_only=True, default=None)
+
+    class Meta:
+        model = DriverRating
+        fields = [
+            "id",
+            "driver",
+            "trip",
+            "trip_code",
+            "passenger",
+            "passenger_name",
+            "score",
+            "comment",
+            "created_at",
+        ]
+        read_only_fields = ["created_at"]
+
+    def get_passenger_name(self, obj):
+        if not obj.passenger:
+            return None
+        u = obj.passenger
+        full = f"{u.first_name} {u.last_name}".strip()
+        return full or u.phone or u.username
+
+
+class DriverComplaintSerializer(serializers.ModelSerializer):
+    raised_by_name = serializers.SerializerMethodField()
+    trip_code = serializers.CharField(source="trip.trip_code", read_only=True, default=None)
+
+    class Meta:
+        model = DriverComplaint
+        fields = [
+            "id",
+            "driver",
+            "trip",
+            "trip_code",
+            "raised_by",
+            "raised_by_name",
+            "category",
+            "description",
+            "status",
+            "created_at",
+        ]
+        read_only_fields = ["created_at"]
+
+    def get_raised_by_name(self, obj):
+        if not obj.raised_by:
+            return None
+        u = obj.raised_by
+        full = f"{u.first_name} {u.last_name}".strip()
+        return full or u.phone or u.username
+
+
+class DriverNotificationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DriverNotification
+        fields = [
+            "id",
+            "driver",
+            "title",
+            "body",
+            "read",
             "created_at",
         ]
         read_only_fields = ["created_at"]

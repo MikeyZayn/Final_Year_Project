@@ -10,6 +10,7 @@ Decisions applied:
 - Operator scope: FYP OperatorAtRank + OperatorProfile.
 - Fares: fixed Route.fare for corridors; TaxiFareRule for Google/ORS ad-hoc routes.
 - Duplicate engaged_* fields from FYP source fixed (single pair).
+- Driver profile support: ratings, complaints, notifications (new).
 """
 from django.conf import settings
 from django.db import models
@@ -575,3 +576,102 @@ class PanicAlert(models.Model):
 
     def __str__(self):
         return f"PanicAlert {self.id} @ {self.created_at:%Y-%m-%d %H:%M}"
+
+
+# ---------------------------------------------------------------------------
+# Driver profile support: ratings, complaints, notifications (NEW)
+# ---------------------------------------------------------------------------
+
+
+class DriverRating(models.Model):
+    """Passenger rating of a driver (1–5 stars), optionally tied to a trip."""
+
+    driver = models.ForeignKey(
+        "accounts.DriverProfile",
+        on_delete=models.CASCADE,
+        related_name="ratings",
+    )
+    trip = models.ForeignKey(
+        Trip,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="driver_ratings",
+    )
+    passenger = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="driver_ratings_given",
+    )
+    score = models.PositiveSmallIntegerField()
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.driver} — {self.score}/5"
+
+
+class DriverComplaint(models.Model):
+    """Complaint raised against a driver, optionally tied to a trip."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        RESOLVED = "resolved", "Resolved"
+        DISMISSED = "dismissed", "Dismissed"
+
+    driver = models.ForeignKey(
+        "accounts.DriverProfile",
+        on_delete=models.CASCADE,
+        related_name="complaints",
+    )
+    trip = models.ForeignKey(
+        Trip,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="driver_complaints",
+    )
+    raised_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="driver_complaints_raised",
+    )
+    category = models.CharField(max_length=40, default="other")
+    description = models.TextField()
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.OPEN
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.driver} — {self.category} ({self.status})"
+
+
+class DriverNotification(models.Model):
+    """In-app notification delivered to a driver's profile panel."""
+
+    driver = models.ForeignKey(
+        "accounts.DriverProfile",
+        on_delete=models.CASCADE,
+        related_name="notifications",
+    )
+    title = models.CharField(max_length=120)
+    body = models.TextField(blank=True)
+    read = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.driver} — {self.title}"
