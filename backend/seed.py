@@ -244,6 +244,19 @@ make_trip("0820000006", "Richards Bay Main Rank", "Empangeni", tomorrow, time(9,
 make_trip("0820000008", "Empangeni Rank 3", "Richards Bay",  tomorrow, time(11, 0))
 make_trip("0820000009", "Empangeni Rank 4", "eSikhawini",    tomorrow, time(13, 0))
 
+
+# ---- Ensure superuser exists ----
+su_phone = "0813109193"
+su, created = User.objects.get_or_create(
+    phone=su_phone,
+    defaults={"username": su_phone, "role": "admin", "is_staff": True, "is_superuser": True},
+)
+if created:
+    su.set_password("AdminPass123!")
+    su.save()
+    print(f"superuser ready: {su_phone} / AdminPass123!")
+else:
+    print(f"superuser exists: {su_phone}")
 print("\n=== FINAL STATE ===")
 print("Ranks:            ", Rank.objects.count())
 print("Admins:           ", AdminProfile.objects.count())
@@ -277,3 +290,5 @@ for phone, first, last in [
         },
     )
 print("passengers ready")
+
+
