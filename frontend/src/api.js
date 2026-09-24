@@ -152,6 +152,28 @@ export const api = {
       auth: true,
       body: { rank_id: rankId, notes },
     }),
+  listAnnouncements: () => request('/announcements/', { auth: true }),
+  createAnnouncement: (payload) =>
+    request('/announcements/', {
+      method: 'POST',
+      auth: true,
+      body: payload,
+    }),
+  listOperatorDrivers: () => request('/operator/drivers/', { auth: true }),
+  getOperatorDriver: (driverId) => request(`/operator/drivers/${driverId}/`, { auth: true }),
+  listOperatorComplaints: () => request('/operator/complaints/', { auth: true }),
+  resolveOperatorComplaint: (complaintId, status = 'resolved') =>
+    request(`/operator/complaints/${complaintId}/resolve/`, {
+      method: 'POST',
+      auth: true,
+      body: { status },
+    }),
+  flagTrip: (tripId, payload = {}) =>
+    request(`/my-trips/${tripId}/flag/`, {
+      method: 'POST',
+      auth: true,
+      body: payload,
+    }),
   listRanks: () => request('/ranks/'),
 
   directions: (origin, destination) =>

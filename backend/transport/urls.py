@@ -23,6 +23,11 @@ urlpatterns = [
     path("my-trips/<int:trip_id>/engage/", views.api_engage_trip),
     path("my-trips/<int:trip_id>/release/", views.api_release_trip),
     path("my-trips/<int:trip_id>/flag/", views.api_flag_trip),
+    path("announcements/", views.api_announcements),
+    path("operator/drivers/", views.api_operator_drivers),
+    path("operator/drivers/<int:driver_id>/", views.api_operator_driver_detail),
+    path("operator/complaints/", views.api_operator_complaints),
+    path("operator/complaints/<int:complaint_id>/resolve/", views.api_resolve_driver_complaint),
     path(
         "my-trips/<int:trip_id>/bookings/<int:booking_id>/verify/",
         views.api_verify_booking,

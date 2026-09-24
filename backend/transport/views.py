@@ -16,12 +16,14 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from accounts.models import OperatorProfile
+from accounts.models import DriverProfile, OperatorProfile
 from accounts.serializers import UserPublicSerializer
 
 from .models import (
+    Announcement,
     Booking,
     Destination,
+    DriverComplaint,
     OperatorAtRank,
     PanicAlert,
     Rank,
@@ -36,8 +38,10 @@ from .models import (
     DriverNotification,
 )
 from .serializers import (
+    AnnouncementSerializer,
     BookingSerializer,
     DestinationSerializer,
+    DriverComplaintSerializer,
     PanicAlertSerializer,
     RankSerializer,
     RouteSerializer,
@@ -458,6 +462,154 @@ def api_flag_trip(request, trip_id):
     trip.status = Trip.Status.FLAGGED
     trip.save(update_fields=["status"])
     return Response({"id": flag.id, "status": flag.status}, status=201)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def api_announcements(request):
+    """Manage operator/admin announcements."""
+    if request.user.role not in {"operator", "admin"}:
+        return Response({"detail": "Operators and admins only."}, status=403)
+
+    if request.method == "GET":
+        qs = Announcement.objects.filter(is_active=True).select_related("created_by")
+        if request.user.role == "operator":
+            qs = qs.filter(audience__in=[Announcement.Audience.ALL, Announcement.Audience.OPERATORS])
+        return Response(AnnouncementSerializer(qs, many=True).data)
+
+    title = (request.data.get("title") or "").strip()
+    message = (request.data.get("message") or "").strip()
+    if not title or not message:
+        return Response({"detail": "title and message are required."}, status=400)
+
+    audience = request.data.get("audience") or Announcement.Audience.ALL
+    announcement = Announcement.objects.create(
+        created_by=request.user,
+        title=title,
+        message=message,
+        audience=audience,
+        is_active=True,
+    )
+    return Response(AnnouncementSerializer(announcement).data, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_drivers(request):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+
+    drivers = (
+        DriverProfile.objects.filter(association=op.association)
+        .select_related("user", "association")
+        .order_by("user__last_name", "user__first_name")
+    )
+    data = []
+    for driver in drivers:
+        trips = Trip.objects.filter(driver=driver).select_related(
+            "route__departure",
+            "route__destination",
+            "vehicle",
+        ).order_by("-departure_date")[:5]
+        data.append(
+            {
+                "id": driver.id,
+                "user": UserPublicSerializer(driver.user).data,
+                "license_number": driver.license_number,
+                "id_number": driver.id_number,
+                "status": driver.status,
+                "verified_at": driver.verified_at,
+                "association": {
+                    "id": driver.association.id if driver.association else None,
+                    "association_name": driver.association.association_name if driver.association else None,
+                    "operating_region": driver.association.operating_region if driver.association else None,
+                },
+                "trip_count": Trip.objects.filter(driver=driver).count(),
+                "recent_trips": TripSerializer(trips, many=True).data,
+            }
+        )
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_complaints(request):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+
+    driver_ids = DriverProfile.objects.filter(association=op.association).values_list("id", flat=True)
+    complaints = (
+        DriverComplaint.objects.filter(driver_id__in=driver_ids)
+        .select_related("driver__user", "trip__route__departure", "trip__route__destination", "raised_by")
+        .order_by("-created_at")
+    )
+    return Response(DriverComplaintSerializer(complaints, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_resolve_driver_complaint(request, complaint_id):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+
+    try:
+        complaint = DriverComplaint.objects.select_related("driver__user").get(
+            pk=complaint_id,
+            driver__association=op.association,
+        )
+    except DriverComplaint.DoesNotExist:
+        return Response({"detail": "Complaint not found for this association."}, status=404)
+
+    status = (request.data.get("status") or complaint.status).strip().lower()
+    if status not in {choice[0] for choice in DriverComplaint.Status.choices}:
+        return Response({"detail": "Invalid complaint status."}, status=400)
+
+    complaint.status = status
+    complaint.save(update_fields=["status"])
+    return Response(DriverComplaintSerializer(complaint).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_driver_detail(request, driver_id):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+
+    try:
+        driver = DriverProfile.objects.select_related("user", "association").get(
+            pk=driver_id,
+            association=op.association,
+        )
+    except DriverProfile.DoesNotExist:
+        return Response({"detail": "Driver not found for this association."}, status=404)
+
+    trips = Trip.objects.filter(driver=driver).select_related(
+        "route__departure",
+        "route__destination",
+        "vehicle",
+    ).order_by("-departure_date")
+
+    return Response(
+        {
+            "id": driver.id,
+            "user": UserPublicSerializer(driver.user).data,
+            "license_number": driver.license_number,
+            "id_number": driver.id_number,
+            "status": driver.status,
+            "verified_at": driver.verified_at,
+            "association": {
+                "id": driver.association.id if driver.association else None,
+                "association_name": driver.association.association_name if driver.association else None,
+                "operating_region": driver.association.operating_region if driver.association else None,
+            },
+            "trip_count": trips.count(),
+            "recent_trips": TripSerializer(trips[:10], many=True).data,
+        }
+    )
 
 
 # ---------- Driver ----------

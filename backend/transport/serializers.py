@@ -10,6 +10,7 @@ from .models import (
     Booking,
     VerificationCode,
     TripFlag,
+    Announcement,
     TripAssetChange,
     VehicleLocation,
     TaxiFareRule,
@@ -189,6 +190,32 @@ class BookingSerializer(serializers.ModelSerializer):
 class BookingCreateSerializer(serializers.Serializer):
     trip_id = serializers.IntegerField()
     trip_code = serializers.CharField(required=False, allow_blank=True)
+
+
+class AnnouncementSerializer(serializers.ModelSerializer):
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Announcement
+        fields = [
+            "id",
+            "title",
+            "message",
+            "audience",
+            "is_active",
+            "created_by",
+            "created_by_name",
+            "created_at",
+            "updated_at",
+            "expires_at",
+        ]
+        read_only_fields = ["id", "created_by", "created_at", "updated_at"]
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by:
+            return None
+        full = f"{obj.created_by.first_name} {obj.created_by.last_name}".strip()
+        return full or obj.created_by.username or obj.created_by.phone or obj.created_by.email
 
 
 class PanicAlertSerializer(serializers.ModelSerializer):

@@ -445,6 +445,41 @@ class TripFlag(models.Model):
         return f"{self.trip.trip_code} — {self.get_category_display()} ({self.status})"
 
 
+class Announcement(models.Model):
+    """Operator/admin communication item visible to the relevant audience."""
+
+    class Audience(models.TextChoices):
+        ALL = "all", "All users"
+        OPERATORS = "operators", "Operators"
+        DRIVERS = "drivers", "Drivers"
+        PASSENGERS = "passengers", "Passengers"
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="announcements_created",
+    )
+    title = models.CharField(max_length=150)
+    message = models.TextField()
+    audience = models.CharField(
+        max_length=20,
+        choices=Audience.choices,
+        default=Audience.ALL,
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.title} ({self.audience})"
+
+
 class TripAssetChange(models.Model):
     """Audit log of driver or vehicle reassignment on a trip (FYP)."""
 
