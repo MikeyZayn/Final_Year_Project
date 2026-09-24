@@ -9,7 +9,7 @@ Used for:
 Order of preference for get_driving_route / get_ad_hoc_route:
   1. OpenRouteService (if ORS_API_KEY is set)
   2. OSRM-compatible service (if ROUTING_SERVICE_URL is set)
-  3. Straight-line haversine fallback
+  (No straight-line fallback — raise if both fail.)
 
 ORS docs: https://openrouteservice.org/dev/#/api-docs/v2/directions
 """
@@ -17,8 +17,6 @@ import logging
 
 import requests
 from django.conf import settings
-
-from .geo import haversine_km
 
 logger = logging.getLogger(__name__)
 
@@ -32,32 +30,36 @@ class RoutingServiceError(Exception):
 def get_driving_route(origin, destination, timeout=8):
     """
     origin / destination: (lat, lng) tuples.
-
-    Returns:
-        {
-            "geometry": [[lat, lng], ...],
-            "distance_km": float,
-            "duration_min": float,
-            "source": "ors" | "osrm" | "fallback",
-        }
+    Returns geometry, distance_km, duration_min, source ("ors" | "osrm").
+    No straight-line fallback — raises RoutingServiceError if both fail.
     """
-    # 1) OpenRouteService
+    errors = []
+
     ors_key = getattr(settings, "ORS_API_KEY", None) or ""
     if ors_key.strip():
         try:
             return _ors_route(origin, destination, ors_key.strip(), timeout=timeout)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("OpenRouteService unavailable, trying OSRM/fallback: %s", exc)
+            logger.warning("OpenRouteService unavailable: %s", exc)
+            errors.append(f"ORS: {exc}")
+    else:
+        errors.append("ORS: ORS_API_KEY not set")
 
-    # 2) OSRM-compatible
     base_url = getattr(settings, "ROUTING_SERVICE_URL", None) or ""
     if base_url.strip():
         try:
             return _osrm_route(origin, destination, base_url.strip(), timeout=timeout)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("OSRM routing service unavailable, using fallback: %s", exc)
+            logger.warning("OSRM routing unavailable: %s", exc)
+            errors.append(f"OSRM: {exc}")
+    else:
+        errors.append("OSRM: ROUTING_SERVICE_URL not set")
 
-    return _fallback_route(origin, destination)
+    raise RoutingServiceError(
+        "Road routing unavailable (straight-line fallback disabled). "
+        + "; ".join(errors)
+        + ". Set ORS_API_KEY or ensure ROUTING_SERVICE_URL is reachable."
+    )
 
 
 def get_ad_hoc_route(origin, destination, timeout=8):
@@ -108,7 +110,6 @@ def _ors_route(origin, destination, api_key, timeout=8):
 
     geometry = _decode_ors_geometry(route)
     if len(geometry) < 2:
-        # Some responses only return encoded polyline; try geojson if present
         raise RoutingServiceError("OpenRouteService returned empty geometry.")
 
     return {
@@ -122,7 +123,7 @@ def _ors_route(origin, destination, api_key, timeout=8):
 def _decode_ors_geometry(route):
     """
     ORS JSON directions returns an encoded polyline in route['geometry'].
-    Decode to [[lat, lng], ...]. Prefer explicit coordinates if ever present.
+    Decode to [[lat, lng], ...].
     """
     encoded = route.get("geometry")
     if not encoded or not isinstance(encoded, str):
@@ -169,7 +170,7 @@ def _decode_polyline(encoded):
 
 
 def _osrm_route(origin, destination, base_url, timeout=5):
-    # OSRM expects lng,lat order.
+    """OSRM expects lng,lat order."""
     coords = f"{origin[1]},{origin[0]};{destination[1]},{destination[0]}"
     url = f"{base_url.rstrip('/')}/route/v1/driving/{coords}"
     response = requests.get(
@@ -187,15 +188,4 @@ def _osrm_route(origin, destination, base_url, timeout=5):
         "distance_km": round(route["distance"] / 1000, 3),
         "duration_min": round(route["duration"] / 60, 1),
         "source": "osrm",
-    }
-
-
-def _fallback_route(origin, destination, average_speed_kmh=35.0):
-    distance_km = haversine_km(origin[0], origin[1], destination[0], destination[1])
-    duration_min = (distance_km / average_speed_kmh) * 60
-    return {
-        "geometry": [list(origin), list(destination)],
-        "distance_km": round(distance_km, 3),
-        "duration_min": round(duration_min, 1),
-        "source": "fallback",
     }

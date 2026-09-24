@@ -32,9 +32,16 @@ class DestinationSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "area", "latitude", "longitude"]
 
 
+class RouteStopSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RouteStop
+        fields = ["id", "name", "order", "lat", "lng", "fare_from_origin"]
+
+
 class RouteSerializer(serializers.ModelSerializer):
     departure = RankSerializer(read_only=True)
     destination = DestinationSerializer(read_only=True)
+    stops = RouteStopSerializer(many=True, read_only=True)
 
     class Meta:
         model = Route
@@ -53,6 +60,7 @@ class RouteSerializer(serializers.ModelSerializer):
             "vehicle_class",
             "deviation_threshold_m",
             "active",
+            "stops",
         ]
 
 
@@ -181,7 +189,6 @@ class BookingSerializer(serializers.ModelSerializer):
 class BookingCreateSerializer(serializers.Serializer):
     trip_id = serializers.IntegerField()
     trip_code = serializers.CharField(required=False, allow_blank=True)
-    # optional walk-in if not authenticated passenger self-book
 
 
 class PanicAlertSerializer(serializers.ModelSerializer):
@@ -207,7 +214,9 @@ class PanicAlertSerializer(serializers.ModelSerializer):
 
 class DriverRatingSerializer(serializers.ModelSerializer):
     passenger_name = serializers.SerializerMethodField()
-    trip_code = serializers.CharField(source="trip.trip_code", read_only=True, default=None)
+    trip_code = serializers.CharField(
+        source="trip.trip_code", read_only=True, default=None
+    )
 
     class Meta:
         model = DriverRating
@@ -234,7 +243,9 @@ class DriverRatingSerializer(serializers.ModelSerializer):
 
 class DriverComplaintSerializer(serializers.ModelSerializer):
     raised_by_name = serializers.SerializerMethodField()
-    trip_code = serializers.CharField(source="trip.trip_code", read_only=True, default=None)
+    trip_code = serializers.CharField(
+        source="trip.trip_code", read_only=True, default=None
+    )
 
     class Meta:
         model = DriverComplaint
@@ -263,12 +274,5 @@ class DriverComplaintSerializer(serializers.ModelSerializer):
 class DriverNotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = DriverNotification
-        fields = [
-            "id",
-            "driver",
-            "title",
-            "body",
-            "read",
-            "created_at",
-        ]
+        fields = ["id", "driver", "title", "body", "read", "created_at"]
         read_only_fields = ["created_at"]

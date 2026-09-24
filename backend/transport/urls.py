@@ -8,6 +8,7 @@ urlpatterns = [
     path("routes/", views.api_list_routes),
     path("trips/", views.api_list_trips),
     path("trips/<int:trip_id>/", views.api_trip_detail),
+    path("trips/<int:trip_id>/live/", views.api_trip_live_tracking),
 
     # Passenger
     path("bookings/", views.api_create_booking),
@@ -35,8 +36,16 @@ urlpatterns = [
 
     # Driver-specific
     path("driver/trips/", views.api_driver_my_trips),
-    path("driver/confirm-trip/", views.api_driver_confirm_trip),   # NEW
-    path("driver/profile/", views.api_driver_profile),             # NEW
+    path("driver/confirm-trip/", views.api_driver_confirm_trip),
+    path("driver/profile/", views.api_driver_profile),
+    path(
+        "driver/notifications/<int:notification_id>/read/",
+        views.api_driver_notification_read,
+    ),
+    path(
+        "driver/notifications/read-all/",
+        views.api_driver_notifications_read_all,
+    ),
 
     # Routing
     path("routing/directions/", views.api_ad_hoc_directions),

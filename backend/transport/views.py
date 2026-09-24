@@ -33,6 +33,7 @@ from .models import (
     Vehicle,
     VehicleLocation,
     VerificationCode,
+    DriverNotification,
 )
 from .serializers import (
     BookingSerializer,
@@ -137,25 +138,63 @@ def api_trip_detail(request, trip_id):
     return Response(TripSerializer(trip).data)
 
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_trip_live_tracking(request, trip_id):
+    """
+    GET /api/trips/<id>/live/
+    Trip summary + latest vehicle GPS for a booked passenger.
+    """
+    try:
+        trip = Trip.objects.select_related(
+            "route__departure",
+            "route__destination",
+            "vehicle",
+            "driver__user",
+            "operator__association",
+        ).get(pk=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found."}, status=404)
+
+    role = getattr(request.user, "role", "") or ""
+    if role == "passenger":
+        has = Booking.objects.filter(
+            trip=trip,
+            passenger=request.user,
+            status__in=[Booking.Status.RESERVED, Booking.Status.BOARDED],
+        ).exists()
+        if not has:
+            return Response(
+                {"detail": "Book this trip before tracking."},
+                status=403,
+            )
+
+    data = TripSerializer(trip).data
+    loc = None
+    if trip.vehicle_id:
+        loc_obj = (
+            VehicleLocation.objects.filter(vehicle_id=trip.vehicle_id)
+            .order_by("-recorded_at")
+            .first()
+        )
+        if loc_obj:
+            loc = VehicleLocationSerializer(loc_obj).data
+    data["live_location"] = loc
+    data["has_live_location"] = loc is not None
+    return Response(data)
+
+
 # ---------- Passenger booking ----------
 
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_create_booking(request):
-    """
-    Passenger books a trip seat.
-
-    Requires either trip_id or trip_code (or both, which must match).
-    The trip_code is the trip verification code the passenger must know.
-    """
     trip_id = request.data.get("trip_id")
     trip_code = (request.data.get("trip_code") or "").strip().upper()
 
     if not trip_id and not trip_code:
-        return Response(
-            {"detail": "trip_id or trip_code is required."}, status=400
-        )
+        return Response({"detail": "trip_id or trip_code is required."}, status=400)
 
     if trip_code:
         trip = (
@@ -164,13 +203,9 @@ def api_create_booking(request):
             .first()
         )
         if not trip:
-            return Response(
-                {"detail": "Invalid trip verification code."}, status=404
-            )
+            return Response({"detail": "Invalid trip verification code."}, status=404)
         if trip_id and int(trip_id) != trip.id:
-            return Response(
-                {"detail": "trip_id does not match trip_code."}, status=400
-            )
+            return Response({"detail": "trip_id does not match trip_code."}, status=400)
     else:
         try:
             trip = Trip.objects.select_related("route").get(pk=trip_id)
@@ -362,7 +397,6 @@ def api_verify_booking(request, trip_id, booking_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_my_memberships(request):
-    """Operator rank memberships (FYP)."""
     op = _operator(request)
     if not op:
         return Response({"detail": "Not an operator account."}, status=403)
@@ -382,7 +416,6 @@ def api_my_memberships(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_request_rank(request):
-    """Operator requests approval to work at a rank (FYP)."""
     op = _operator(request)
     if not op:
         return Response({"detail": "Not an operator account."}, status=403)
@@ -433,7 +466,6 @@ def api_flag_trip(request, trip_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_my_vehicle(request):
-    """Driver: vehicle linked via DriverVehicle or Trip assignment."""
     try:
         dp = request.user.driver_profile
     except Exception:
@@ -456,8 +488,7 @@ def api_my_vehicle(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_driver_my_trips(request):
-    """Driver: trips currently assigned to this driver."""
-    if request.user.role != "driver":
+    if getattr(request.user, "role", None) != "driver":
         return Response({"detail": "Drivers only."}, status=403)
     try:
         dp = request.user.driver_profile
@@ -468,6 +499,7 @@ def api_driver_my_trips(request):
         .select_related(
             "route__departure", "route__destination", "vehicle", "driver__user"
         )
+        .prefetch_related("route__stops")
         .order_by("-departure_date", "-expected_departure_time")
     )
     return Response(TripSerializer(qs, many=True).data)
@@ -476,8 +508,7 @@ def api_driver_my_trips(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_driver_confirm_trip(request):
-    """Driver confirms they are the driver for a trip using its trip_code."""
-    if request.user.role != "driver":
+    if getattr(request.user, "role", None) != "driver":
         return Response({"detail": "Drivers only."}, status=403)
     try:
         dp = request.user.driver_profile
@@ -493,6 +524,7 @@ def api_driver_confirm_trip(request):
     trip = (
         Trip.objects.filter(trip_code__iexact=code)
         .select_related("route__departure", "route__destination", "vehicle")
+        .prefetch_related("route__stops")
         .first()
     )
     if not trip:
@@ -511,8 +543,7 @@ def api_driver_confirm_trip(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_driver_profile(request):
-    """Driver profile panel: rating, complaints, notifications, trips."""
-    if request.user.role != "driver":
+    if getattr(request.user, "role", None) != "driver":
         return Response({"detail": "Drivers only."}, status=403)
     try:
         dp = request.user.driver_profile
@@ -538,6 +569,7 @@ def api_driver_profile(request):
                     "route__destination",
                     "vehicle",
                 )
+                .prefetch_related("route__stops")
                 .order_by("-departure_date")[:20],
                 many=True,
             ).data,
@@ -557,23 +589,53 @@ def api_driver_profile(request):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+def api_driver_notification_read(request, notification_id):
+    if getattr(request.user, "role", None) != "driver":
+        return Response({"detail": "Drivers only."}, status=403)
+    try:
+        dp = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "No driver profile."}, status=404)
+    try:
+        n = dp.notifications.get(pk=notification_id)
+    except DriverNotification.DoesNotExist:
+        return Response({"detail": "Notification not found."}, status=404)
+    if not n.read:
+        n.read = True
+        n.save(update_fields=["read"])
+    return Response({"id": n.id, "read": n.read})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_driver_notifications_read_all(request):
+    if getattr(request.user, "role", None) != "driver":
+        return Response({"detail": "Drivers only."}, status=403)
+    try:
+        dp = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "No driver profile."}, status=404)
+    updated = dp.notifications.filter(read=False).update(read=True)
+    return Response({"updated": updated})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
 def api_vehicle_location(request, vehicle_id):
-    """Driver pushes GPS. Computes on/off route against trip route geometry."""
     try:
         vehicle = Vehicle.objects.get(pk=vehicle_id)
     except Vehicle.DoesNotExist:
         return Response({"detail": "Vehicle not found."}, status=404)
 
-    # AuthZ: driver assigned to vehicle or operator/admin
     allowed = False
-    if request.user.role == "admin":
+    if getattr(request.user, "role", None) == "admin":
         allowed = True
-    elif request.user.role == "operator":
+    elif getattr(request.user, "role", None) == "operator":
         op = _operator(request)
         allowed = op is not None and Trip.objects.filter(
             operator=op, vehicle=vehicle
         ).exists()
-    elif request.user.role == "driver":
+    elif getattr(request.user, "role", None) == "driver":
         try:
             dp = request.user.driver_profile
             allowed = dp.vehicle_assignments.filter(
@@ -594,7 +656,6 @@ def api_vehicle_location(request, vehicle_id):
     except (KeyError, TypeError, ValueError):
         return Response({"detail": "lat and lng required as numbers."}, status=400)
 
-    # --- Reject simulated GPS always ---
     source = request.data.get("source", VehicleLocation.Source.GPS)
     if source == VehicleLocation.Source.SIMULATED:
         return Response({"detail": "Simulated GPS is disabled."}, status=400)
@@ -686,17 +747,12 @@ def api_vehicle_latest_location(request, vehicle_id):
     return Response(VehicleLocationSerializer(loc).data)
 
 
-# ---------- Routing (ORS / OSRM) ----------
+# ---------- Routing ----------
 
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def api_ad_hoc_directions(request):
-    """
-    POST /api/routing/directions/
-
-    Body: { "origin": {"lat", "lng"}, "destination": {"lat", "lng"} }
-    """
     data = request.data or {}
     origin_raw = data.get("origin") or {}
     dest_raw = data.get("destination") or {}
@@ -743,7 +799,6 @@ def api_ad_hoc_directions(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def api_calculate_route_fare(request):
-    """Turn client-supplied distance into THEMBA ad-hoc fare."""
     try:
         distance_km = float(request.data.get("distanceKm") or request.data["distance_km"])
     except (KeyError, TypeError, ValueError):
@@ -781,10 +836,7 @@ def api_panic_alert(request):
         try:
             async_to_sync(channel_layer.group_send)(
                 "fleet_tracking",
-                {
-                    "type": "panic.alert",
-                    "payload": PanicAlertSerializer(alert).data,
-                },
+                {"type": "panic.alert", "payload": PanicAlertSerializer(alert).data},
             )
         except Exception as exc:
             logger.warning("Panic broadcast failed: %s", exc)
@@ -794,8 +846,7 @@ def api_panic_alert(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_fleet_snapshot(request):
-    """Latest position per vehicle that has reported (operator/admin)."""
-    if request.user.role not in ("operator", "admin"):
+    if getattr(request.user, "role", None) not in ("operator", "admin"):
         return Response({"detail": "Operators and admins only."}, status=403)
     vehicles = Vehicle.objects.all()
     out = []

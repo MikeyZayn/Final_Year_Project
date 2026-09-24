@@ -1,12 +1,8 @@
 /**
- * Google Maps map for THEMBA (replaces Leaflet).
- *
- * Same prop contract as before:
- *  - polylines: [{ id, positions: [[lat,lng],...], color?, dashed?, weight? }]
- *  - markers: [{ id, lat, lng, label?, color?, kind? }]
- *  - height, initialCenter [lat,lng], initialZoom, onMapClick, fitKey
- *
- * Requires VITE_GOOGLE_MAPS_API_KEY. Map is created once; overlays update in place.
+ * Google Maps map for THEMBA.
+ * Polylines: [{ id, positions, color?, dashed?, weight? }]
+ * Markers:   [{ id, lat, lng, label?, color?, kind? }]
+ * onMapClick({lat,lng}); onMarkerClick(marker) — when provided, replaces InfoWindow.
  */
 import { useEffect, useRef, useState } from 'react';
 import { loadGoogleMaps } from '../services/googleMapsLoader';
@@ -16,6 +12,7 @@ const KIND_COLORS = {
   dest: '#b45309',
   vehicle: '#1d4ed8',
   user: '#7c3aed',
+  you: '#38bdf8',
   default: '#334155',
 };
 
@@ -33,6 +30,28 @@ function pinIcon(maps, color) {
   };
 }
 
+function safeCleanupOverlay(overlay) {
+  try {
+    if (overlay && typeof overlay.setMap === 'function') overlay.setMap(null);
+  } catch {
+    /* ignore */
+  }
+}
+
+function toLatLng(p) {
+  if (Array.isArray(p) && p.length >= 2) {
+    const lat = +p[0];
+    const lng = +p[1];
+    return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  }
+  if (p && typeof p === 'object') {
+    const lat = +p.lat;
+    const lng = +p.lng;
+    return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+  }
+  return null;
+}
+
 export default function ThembaMap({
   polylines = [],
   markers = [],
@@ -40,31 +59,36 @@ export default function ThembaMap({
   initialCenter = [-28.8, 31.95],
   initialZoom = DEFAULT_ZOOM,
   onMapClick,
+  onMarkerClick,
   fitKey,
   className = '',
 }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
-  const overlaysRef = useRef([]); // polylines + markers to clear
+  const overlaysRef = useRef([]);
+  const infoWindowsRef = useRef([]);
   const clickListenerRef = useRef(null);
   const onMapClickRef = useRef(onMapClick);
+  const onMarkerClickRef = useRef(onMarkerClick);
   onMapClickRef.current = onMapClick;
+  onMarkerClickRef.current = onMarkerClick;
 
-  const [status, setStatus] = useState('loading'); // loading | ready | error
+  const [status, setStatus] = useState('loading');
   const [loadError, setLoadError] = useState('');
 
-  // Create map once
   useEffect(() => {
     let cancelled = false;
-
-    loadGoogleMaps()
+    if (typeof loadGoogleMaps !== 'function') {
+      setLoadError('googleMapsLoader is missing.');
+      setStatus('error');
+      return undefined;
+    }
+    Promise.resolve(loadGoogleMaps())
       .then((maps) => {
         if (cancelled || !containerRef.current || mapRef.current) return;
-
         const center = Array.isArray(initialCenter)
           ? { lat: +initialCenter[0], lng: +initialCenter[1] }
           : initialCenter || DEFAULT_CENTER;
-
         const map = new maps.Map(containerRef.current, {
           center,
           zoom: initialZoom ?? DEFAULT_ZOOM,
@@ -78,90 +102,100 @@ export default function ThembaMap({
       })
       .catch((err) => {
         if (cancelled) return;
-        setLoadError(err.message || String(err));
+        setLoadError((err && err.message) || String(err));
         setStatus('error');
       });
-
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Click handler
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== 'ready') return undefined;
-    const maps = window.google.maps;
+    const maps = window.google && window.google.maps;
+    if (!maps) return undefined;
 
     if (clickListenerRef.current) {
-      maps.event.removeListener(clickListenerRef.current);
+      try {
+        maps.event.removeListener(clickListenerRef.current);
+      } catch {
+        /* ignore */
+      }
       clickListenerRef.current = null;
     }
+
     if (onMapClickRef.current) {
       clickListenerRef.current = map.addListener('click', (event) => {
-        onMapClickRef.current?.({
-          lat: event.latLng.lat(),
-          lng: event.latLng.lng(),
-        });
+        onMapClickRef.current?.({ lat: event.latLng.lat(), lng: event.latLng.lng() });
       });
     }
+
     return () => {
       if (clickListenerRef.current) {
-        maps.event.removeListener(clickListenerRef.current);
+        try {
+          maps.event.removeListener(clickListenerRef.current);
+        } catch {
+          /* ignore */
+        }
         clickListenerRef.current = null;
       }
     };
   }, [status, onMapClick]);
 
-  // Update polylines + markers
   useEffect(() => {
     const map = mapRef.current;
     if (!map || status !== 'ready') return;
-    const maps = window.google.maps;
+    const maps = window.google && window.google.maps;
+    if (!maps) return;
 
-    overlaysRef.current.forEach((o) => o.setMap(null));
+    infoWindowsRef.current.forEach((iw) => {
+      try {
+        iw.close();
+      } catch {
+        /* ignore */
+      }
+    });
+    infoWindowsRef.current = [];
+
+    overlaysRef.current.forEach(safeCleanupOverlay);
     overlaysRef.current = [];
 
     const bounds = new maps.LatLngBounds();
     let hasBounds = false;
 
     polylines.forEach((line) => {
-      const path = (line.positions || [])
-        .filter(
-          (p) =>
-            Array.isArray(p) &&
-            p.length >= 2 &&
-            Number.isFinite(+p[0]) &&
-            Number.isFinite(+p[1])
-        )
-        .map(([lat, lng]) => ({ lat: +lat, lng: +lng }));
+      const path = (line.positions || []).map(toLatLng).filter(Boolean);
       if (path.length < 2) return;
+
+      const color = line.color || '#0f766e';
+      const weight = line.weight ?? 4;
+
+      const dashedIcons = line.dashed
+        ? [
+            {
+              icon: {
+                path: 'M 0,-1 0,1',
+                strokeOpacity: 0.9,
+                strokeColor: color,
+                scale: 3,
+              },
+              offset: '0',
+              repeat: '14px',
+            },
+          ]
+        : undefined;
 
       const pl = new maps.Polyline({
         path,
         map,
-        strokeColor: line.color || '#0f766e',
+        strokeColor: color,
         strokeOpacity: line.dashed ? 0 : 0.9,
-        strokeWeight: line.weight ?? 4,
-        ...(line.dashed
-          ? {
-              icons: [
-                {
-                  icon: {
-                    path: 'M 0,-1 0,1',
-                    strokeOpacity: 0.9,
-                    strokeColor: line.color || '#d97706',
-                    scale: 3,
-                  },
-                  offset: '0',
-                  repeat: '14px',
-                },
-              ],
-              strokeOpacity: 0,
-            }
-          : {}),
+        strokeWeight: weight,
+        ...(dashedIcons ? { icons: dashedIcons } : {}),
       });
+
       overlaysRef.current.push(pl);
       path.forEach((pt) => {
         bounds.extend(pt);
@@ -170,22 +204,34 @@ export default function ThembaMap({
     });
 
     markers.forEach((m) => {
-      if (!Number.isFinite(+m.lat) || !Number.isFinite(+m.lng)) return;
+      const lat = +m.lat;
+      const lng = +m.lng;
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
       const color = m.color || KIND_COLORS[m.kind] || KIND_COLORS.default;
       const marker = new maps.Marker({
         map,
-        position: { lat: +m.lat, lng: +m.lng },
+        position: { lat, lng },
         title: m.label ? String(m.label).replace(/<br\/?>/gi, ' · ') : undefined,
         icon: pinIcon(maps, color),
       });
+
       if (m.label) {
         const info = new maps.InfoWindow({
           content: `<div style="font:12px/1.4 system-ui,sans-serif">${m.label}</div>`,
         });
-        marker.addListener('click', () => info.open({ map, anchor: marker }));
+        marker.addListener('click', () => {
+          if (typeof onMarkerClickRef.current === 'function') {
+            onMarkerClickRef.current(m);
+          } else {
+            info.open({ map, anchor: marker });
+          }
+        });
+        infoWindowsRef.current.push(info);
       }
+
       overlaysRef.current.push(marker);
-      bounds.extend({ lat: +m.lat, lng: +m.lng });
+      bounds.extend({ lat, lng });
       hasBounds = true;
     });
 
@@ -199,6 +245,22 @@ export default function ThembaMap({
       }
     }
   }, [polylines, markers, fitKey, status]);
+
+  useEffect(
+    () => () => {
+      infoWindowsRef.current.forEach((iw) => {
+        try {
+          iw.close();
+        } catch {
+          /* ignore */
+        }
+      });
+      infoWindowsRef.current = [];
+      overlaysRef.current.forEach(safeCleanupOverlay);
+      overlaysRef.current = [];
+    },
+    []
+  );
 
   if (status === 'error') {
     return (
@@ -218,8 +280,7 @@ export default function ThembaMap({
         <p style={{ margin: '0.5rem 0 0' }}>{loadError}</p>
         <p style={{ margin: '0.5rem 0 0', opacity: 0.85 }}>
           Set <code>VITE_GOOGLE_MAPS_API_KEY</code> in <code>frontend/.env</code> and allow this
-          origin under the key’s Website restrictions (e.g. <code>http://localhost:5173/*</code>
-          and <code>http://&lt;LAN-IP&gt;:5173/*</code>).
+          origin under the key’s Website restrictions.
         </p>
       </div>
     );

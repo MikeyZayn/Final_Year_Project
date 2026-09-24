@@ -1,13 +1,11 @@
 /**
- * Restored passenger hub UI (search-first layout) wired to merged API.
+ * Passenger hub UI — 3 stages: Desk → Route → Active.
+ * - Desk: search trips, local fares, verify code, My bookings
+ * - Route: route preview on map (distance/time/fare)
+ * - Active: verified trip — live vehicle map + info + panic
  *
- * SRS alignment:
- * - Search Trip / Fare / Route (predetermined ranks + API trips)
- * - Confirm booking → POST /api/bookings/ → single-use verification code
- * - Show verification code for boarding + future trip-verified feedback
- * - View driver/vehicle on selected trip
- * - Panic alert with trip + location
- * - Google Maps for display; ORS/OSRM via backend for road geometry
+ * search-first: GPS → chosen departure (dashed blue)
+ *               chosen departure → destination (amber solid)
  */
 import { useEffect, useMemo, useState } from 'react';
 import { api, getUser } from '../api';
@@ -46,6 +44,7 @@ function mapApiTrip(t) {
     status: t.status,
     operator: t.operator_name || t.route?.operator_name || 'Taxi association',
     driver: t.driver_name || 'To be assigned',
+    driver_phone: t.driver_phone || '',
     vehicle: t.vehicle_label || t.vehicle_plate || '—',
     registration: t.vehicle_plate || '—',
     fare: fareNum != null ? `R${fareNum}` : '—',
@@ -55,7 +54,7 @@ function mapApiTrip(t) {
   };
 }
 
-export default function PassengerMapDashboard({ notify }) {
+export default function PassengerMapDashboard({ notify, onExit }) {
   const user = getUser();
   const passengerName =
     [user?.first_name, user?.last_name].filter(Boolean).join(' ') ||
@@ -71,12 +70,18 @@ export default function PassengerMapDashboard({ notify }) {
   const [booking, setBooking] = useState(false);
   const [nearestHint, setNearestHint] = useState(null);
   const [panicOpen, setPanicOpen] = useState(false);
-  const [booked, setBooked] = useState(null); // { booking_id, verification_code, trip_code }
+  const [booked, setBooked] = useState(null);
   const [myBookings, setMyBookings] = useState([]);
   const [adhocLine, setAdhocLine] = useState(null);
+  const [toRankGeometry, setToRankGeometry] = useState([]);
+  const [taxiGeometry, setTaxiGeometry] = useState([]);
   const [routing, setRouting] = useState(false);
   const [verifyInput, setVerifyInput] = useState('');
   const [verifiedTrip, setVerifiedTrip] = useState(null);
+  const [liveTrip, setLiveTrip] = useState(null);
+  const [liveError, setLiveError] = useState('');
+  // desk | route | active
+  const [viewMode, setViewMode] = useState('desk');
 
   const initials = useMemo(
     () =>
@@ -91,7 +96,6 @@ export default function PassengerMapDashboard({ notify }) {
 
   const depPlace = placeByName(departure);
   const destPlace = placeByName(destination);
-
   const localFare = lookupLocalFare(departure, destination);
 
   useEffect(() => {
@@ -113,6 +117,17 @@ export default function PassengerMapDashboard({ notify }) {
       .catch(() => {});
   }, [booked]);
 
+  // Poll live trip after verification
+  useEffect(() => {
+    const tripId = liveTrip?.id || selected?.raw?.id;
+    if (!verifiedTrip || !tripId) return undefined;
+    const tick = () => loadLiveForTrip(tripId);
+    tick();
+    const id = setInterval(tick, 8000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [verifiedTrip, selected?.raw?.id, liveTrip?.id]);
+
   async function searchTrip() {
     if (departure === destination) {
       notify?.('Departure and destination must be different.');
@@ -127,7 +142,6 @@ export default function PassengerMapDashboard({ notify }) {
       const trips = await api.listTrips({ from: departure, to: destination });
       let matched = (trips || []).map(mapApiTrip);
 
-      // Fallback: show local fare info even if no live trip seeded
       if (!matched.length && localFare != null) {
         matched = [
           {
@@ -149,7 +163,7 @@ export default function PassengerMapDashboard({ notify }) {
           },
         ];
         notify?.(
-          'No live trips on API for that pair yet — showing official local fare. Ask operator or wait for seeded trips.'
+          'No live trips on API for that pair yet — showing official local fare.'
         );
       } else if (!matched.length) {
         notify?.('No trips found for that route.');
@@ -178,12 +192,13 @@ export default function PassengerMapDashboard({ notify }) {
         booking_id: b.id,
         verification_code: code,
         trip_code: b.trip_code || selected.trip_code,
+        trip_id: b.trip || selected.raw?.id,
         status: b.status,
       });
       if (code) {
         setVerifyInput(code);
         notify?.(
-          `Booked ${selected.trip_code}. Verification code: ${code} — show at boarding (SRS).`
+          `Booked ${selected.trip_code}. Verification code: ${code} — show at boarding.`
         );
       } else {
         notify?.(`Booking #${b.id} confirmed for ${selected.trip_code}.`);
@@ -197,76 +212,131 @@ export default function PassengerMapDashboard({ notify }) {
 
   async function previewRoadRoute() {
     if (!depPlace || !destPlace) {
-      notify?.('Choose departure and destination ranks first.');
+      notify?.('Select valid departure and destination.');
       return;
     }
+    if (departure === destination) {
+      notify?.('Departure and destination must be different.');
+      return;
+    }
+
     setRouting(true);
+    setTaxiGeometry([]);
+    setToRankGeometry([]);
+    setAdhocLine(null);
+
     try {
-      // Original search-first path: computeRoute → POST /api/routing/directions/
-      const data = await computeRoute(
-        { lat: depPlace.lat, lng: depPlace.lng },
-        { lat: destPlace.lat, lng: destPlace.lng }
-      );
-      setAdhocLine(
-        polylineFromDirections({
-          geometry: data.geometry,
-          distance_km: data.distanceKm,
-          duration_min: data.durationMin,
-          source: data.source,
-          fare: data.fare,
-        })
-      );
+      const gps = geo.position
+        ? { lat: geo.position.lat, lng: geo.position.lng }
+        : null;
+
+      const rank = { lat: depPlace.lat, lng: depPlace.lng, name: depPlace.name };
+
+      if (gps) {
+        const nearest = nearestRank(gps.lat, gps.lng);
+        const dist = Math.hypot(gps.lat - rank.lat, gps.lng - rank.lng);
+        if (dist > 0.0015) {
+          const leg1 = await computeRoute(gps, rank);
+          setToRankGeometry(leg1.geometry || []);
+          if (nearest && nearest.name !== rank.name) {
+            notify?.(
+              `Routing via ${rank.name}. Nearest rank to you is ${nearest.name} (${nearest.distanceKm} km).`
+            );
+          }
+        }
+      } else {
+        geo.requestOnce?.();
+        notify?.('Enable GPS for the path from your location to the departure rank.');
+      }
+
+      const leg2 = await computeRoute(rank, destPlace);
+      setTaxiGeometry(leg2.geometry || []);
+      const line = polylineFromDirections({
+        geometry: leg2.geometry,
+        distance_km: leg2.distanceKm,
+        duration_min: leg2.durationMin,
+        source: leg2.source,
+        fare: leg2.fare,
+      });
+      if (line) {
+        line.distanceKm = leg2.distanceKm;
+        line.durationMin = leg2.durationMin;
+      }
+      setAdhocLine(line);
+
       notify?.(
-        `Road route ${data.distanceKm} km · ~${data.durationMin} min (${data.source})` +
-          (data.fare != null
-            ? ` · est. R${data.fare}`
-            : localFare != null
-              ? ` · local R${localFare}`
-              : '')
+        `Route: your location → ${rank.name} → ${destPlace.name} (${leg2.source || 'ORS/OSRM'}) · ${Number(leg2.distanceKm).toFixed(1)} km`
       );
-    } catch (e) {
-      notify?.(e.message);
+      setViewMode('route');
+    } catch (err) {
+      notify?.(err.message || 'Routing failed. Check ORS_API_KEY and backend.');
     } finally {
       setRouting(false);
     }
   }
 
-  function confirmVerifyCode() {
+  async function loadLiveForTrip(tripId) {
+    if (!tripId) return;
+    setLiveError('');
+    try {
+      const data = await api.tripLive(tripId);
+      setLiveTrip(data);
+    } catch (e) {
+      setLiveError(e.message);
+      setLiveTrip(null);
+    }
+  }
+
+  async function confirmVerifyCode() {
     const cleaned = verifyInput.trim();
     if (!cleaned) {
       notify?.('Enter the verification code from your booking.');
       return;
     }
-    // SRS: code is single-use, linked to booking/trip — passenger holds it for boarding + feedback
+
+    let matchedBooking = null;
+    let tripId = selected?.raw?.id || null;
+
     if (booked?.verification_code && cleaned === booked.verification_code) {
-      setVerifiedTrip({
-        ...selected,
-        verification_code: cleaned,
-        booking_id: booked.booking_id,
-      });
-      notify?.(
-        'Code recognised for this booking. Present it to the operator at boarding. After the trip completes, the same verified link enables feedback (SRS central contribution).'
+      matchedBooking = booked;
+      tripId = selected?.raw?.id || booked.trip_id || tripId;
+    } else {
+      const fromMine = myBookings.find(
+        (b) =>
+          String(b.verification_code || '').toLowerCase() === cleaned.toLowerCase() ||
+          String(b.trip_code || '').toLowerCase() === cleaned.toLowerCase()
       );
+      if (fromMine) {
+        matchedBooking = {
+          booking_id: fromMine.id,
+          verification_code: fromMine.verification_code || cleaned,
+          trip_code: fromMine.trip_code,
+          status: fromMine.status,
+        };
+        tripId = fromMine.trip || fromMine.trip_id || tripId;
+      }
+    }
+
+    if (!matchedBooking) {
+      notify?.('Code not found on your bookings.');
       return;
     }
-    const fromMine = myBookings.find(
-      (b) =>
-        String(b.verification_code || '').toLowerCase() === cleaned.toLowerCase() ||
-        String(b.trip_code || '').toLowerCase() === cleaned.toLowerCase()
-    );
-    if (fromMine) {
-      setVerifiedTrip({
-        trip_code: fromMine.trip_code,
-        verification_code: fromMine.verification_code || cleaned,
-        booking_id: fromMine.id,
-        status: fromMine.status,
-      });
-      notify?.(`Linked to booking ${fromMine.trip_code} · status ${fromMine.status}.`);
-      return;
+
+    setVerifiedTrip({
+      ...(selected || {}),
+      verification_code: matchedBooking.verification_code || cleaned,
+      booking_id: matchedBooking.booking_id,
+      trip_code: matchedBooking.trip_code || selected?.trip_code,
+      status: matchedBooking.status,
+    });
+    setViewMode('active');
+
+    if (tripId) {
+      await loadLiveForTrip(tripId);
+      notify?.('Code confirmed — showing trip details and live vehicle location.');
+    } else {
+      notify?.('Code recognised, but trip id is missing.');
     }
-    notify?.(
-      'Code not found on your bookings. Book a trip first, or use the code shown after Confirm booking.'
-    );
   }
 
   async function sendPanic() {
@@ -300,182 +370,533 @@ export default function PassengerMapDashboard({ notify }) {
   }
 
   const mapOverlays = useMemo(() => {
-    const base = selected?.raw ? overlaysFromTrip(selected.raw) : { polylines: [], markers: [] };
+    const tripSrc = liveTrip || selected?.raw;
+    const base = tripSrc ? overlaysFromTrip(tripSrc) : { polylines: [], markers: [] };
     const lines = [...base.polylines];
-    if (adhocLine) lines.push(adhocLine);
-    // Rank markers from selected places if no trip geometry
     const markers = [...base.markers];
-    if (!markers.length) {
-      if (depPlace) {
-        markers.push({
-          id: 'dep',
-          lat: depPlace.lat,
-          lng: depPlace.lng,
-          label: depPlace.name,
-          kind: 'rank',
-        });
-      }
-      if (destPlace) {
-        markers.push({
-          id: 'dest',
-          lat: destPlace.lat,
-          lng: destPlace.lng,
-          label: destPlace.name,
-          kind: 'dest',
-        });
-      }
+
+    if (toRankGeometry.length > 2) {
+      lines.push({
+        id: 'to-rank',
+        positions: toRankGeometry,
+        color: '#38bdf8',
+        weight: 4,
+        dashed: true,
+      });
+    }
+    if (taxiGeometry.length > 2) {
+      lines.push({
+        id: 'taxi-corridor',
+        positions: taxiGeometry,
+        color: '#f5a524',
+        weight: 5,
+      });
+    } else if (adhocLine) {
+      lines.push(adhocLine);
+    }
+
+    if (depPlace) {
+      markers.push({
+        id: 'dep',
+        lat: depPlace.lat,
+        lng: depPlace.lng,
+        label: `Departure: ${depPlace.name}`,
+        kind: 'rank',
+      });
+    }
+    if (destPlace) {
+      markers.push({
+        id: 'dest',
+        lat: destPlace.lat,
+        lng: destPlace.lng,
+        label: `Destination: ${destPlace.name}`,
+        kind: 'dest',
+      });
+    }
+    if (nearestHint) {
+      markers.push({
+        id: 'nearest',
+        lat: nearestHint.lat,
+        lng: nearestHint.lng,
+        label: `Nearest rank: ${nearestHint.name}`,
+        kind: 'rank',
+      });
+    }
+    if (geo.position) {
+      markers.push({
+        id: 'you',
+        lat: geo.position.lat,
+        lng: geo.position.lng,
+        label: 'You',
+        kind: 'you',
+        color: '#38bdf8',
+      });
+    }
+    const live = liveTrip?.live_location;
+    if (live && live.lat != null && live.lng != null) {
+      markers.push({
+        id: 'vehicle-live',
+        lat: Number(live.lat),
+        lng: Number(live.lng),
+        label: liveTrip?.vehicle_plate || 'Taxi',
+        kind: 'vehicle',
+        color: '#22c55e',
+      });
     }
     return { polylines: lines, markers };
-  }, [selected, adhocLine, depPlace, destPlace]);
+  }, [
+    selected,
+    adhocLine,
+    toRankGeometry,
+    taxiGeometry,
+    depPlace,
+    destPlace,
+    nearestHint,
+    geo.position,
+    liveTrip,
+  ]);
 
+  const brandHeader = (
+    <header className="pmd-topbar">
+      <div className="pmd-brand-row">
+        <span className="pmd-mark">T</span>
+        <div>
+          <strong>TRANSIT // PASS</strong>
+          <small>PASSENGER OPERATIONS PORTAL</small>
+        </div>
+      </div>
+      <div className="pmd-user-chip">
+        <span className="pmd-live-dot" /> IDENTITY VERIFIED
+        <strong>{passengerName}</strong>
+        <span className="pmd-avatar-sm">{initials}</span>
+      </div>
+    </header>
+  );
+
+  /* ========== Stage: Active trip ========== */
+  if (viewMode === 'active' && verifiedTrip) {
+    const vt = verifiedTrip;
+    return (
+      <div className="pmd pmd-stage-active">
+        {brandHeader}
+        <div className="pmd-active-wrap">
+          <div className="pmd-active-head">
+            <button type="button" className="pmd-btn ghost" onClick={() => setViewMode('desk')}>
+              ← Desk
+            </button>
+            <div>
+              <p className="pmd-kicker">
+                ACTIVE TRIP{vt.trip_code ? ` / ${vt.trip_code}` : ''}
+              </p>
+              <h1>
+                {vt.origin || departure} → {vt.destination || destination}
+              </h1>
+              <p className="pmd-hint">Trip verified. Review vehicle and live location.</p>
+            </div>
+            <span className="pmd-pill ok">VERIFIED · READY</span>
+          </div>
+
+          <div className="pmd-active-grid">
+            <div className="pmd-map-panel">
+              <div className="pmd-map-badge">
+                <span className="pmd-live-dot" /> LIVE ROUTE
+                {liveTrip?.live_location ? ' · GPS CONNECTED' : ''}
+              </div>
+              <ThembaMap
+                polylines={mapOverlays.polylines}
+                markers={mapOverlays.markers}
+                height="420px"
+                fitKey={`active-${vt.trip_code}-${liveTrip?.live_location?.lat || ''}`}
+              />
+              <div className="pmd-map-legend">
+                <span>● {departure}</span>
+                <span>— {destination}</span>
+              </div>
+              <div className="pmd-trip-control">
+                <small>TRIP CONTROL</small>
+                <p>
+                  {liveTrip?.vehicle_plate
+                    ? `Vehicle ${liveTrip.vehicle_plate}`
+                    : vt.vehicle && vt.vehicle !== '—'
+                      ? `Vehicle ${vt.vehicle} ${vt.registration || ''}`.trim()
+                      : 'Awaiting vehicle GPS'}
+                  {liveTrip?.live_location ? ' · live position on map' : ' · waiting for driver GPS'}
+                </p>
+                {liveError && <p className="pmd-error">{liveError}</p>}
+              </div>
+            </div>
+
+            <div className="pmd-active-side">
+              <section className="pmd-card">
+                <div className="pmd-card-head">
+                  <h3>Trip information</h3>
+                  <span className="pmd-pill ok">CONFIRMED</span>
+                </div>
+                <dl className="pmd-dl">
+                  <div>
+                    <dt>Fare</dt>
+                    <dd>{vt.fare || (localFare != null ? `R${localFare}` : '—')}</dd>
+                  </div>
+                  <div>
+                    <dt>Departure</dt>
+                    <dd>{vt.departure || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>Route</dt>
+                    <dd>
+                      {vt.origin || departure} → {vt.destination || destination}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Vehicle</dt>
+                    <dd>
+                      {vt.vehicle || '—'} {vt.registration || ''}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Driver</dt>
+                    <dd>{vt.driver || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt>Status</dt>
+                    <dd>{vt.status || 'verified'}</dd>
+                  </div>
+                  <div>
+                    <dt>Code</dt>
+                    <dd>{vt.verification_code || verifyInput || '—'}</dd>
+                  </div>
+                </dl>
+              </section>
+
+              <section className="pmd-card">
+                <div className="pmd-card-head">
+                  <h3>Safety area</h3>
+                  <span className="pmd-pill muted">MONITORING ON</span>
+                </div>
+                <p className="pmd-hint">Emergency assistance available 24/7</p>
+                <button
+                  type="button"
+                  className="pmd-btn danger block"
+                  onClick={() => setPanicOpen(true)}
+                >
+                  PANIC / GET HELP
+                </button>
+              </section>
+            </div>
+          </div>
+        </div>
+
+        {panicOpen && (
+          <div className="pmd-modal-backdrop" role="presentation">
+            <div className="pmd-modal" role="dialog">
+              <h3>Emergency alert</h3>
+              <p>
+                This notifies the operator/administrator with your trip and location. It does not
+                replace calling emergency services.
+              </p>
+              <div className="pmd-modal-actions">
+                <button type="button" className="pmd-btn ghost" onClick={() => setPanicOpen(false)}>
+                  Cancel
+                </button>
+                <button type="button" className="pmd-btn danger" onClick={sendPanic}>
+                  Send alert
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ========== Stage: Route preview ========== */
+  if (viewMode === 'route') {
+    return (
+      <div className="pmd pmd-stage-route">
+        {brandHeader}
+        <div className="pmd-route-wrap">
+          <div className="pmd-active-head">
+            <button type="button" className="pmd-btn ghost" onClick={() => setViewMode('desk')}>
+              ← Return to search
+            </button>
+            <div>
+              <p className="pmd-kicker">ROUTE SEARCH / RESULT</p>
+              <h1>
+                {departure} → {destination}
+              </h1>
+              <p className="pmd-hint">
+                Recommended passenger route (road geometry from routing service).
+              </p>
+            </div>
+            <span className="pmd-pill ok">ROUTE AVAILABLE</span>
+          </div>
+
+          <div className="pmd-active-grid">
+            <div className="pmd-map-panel">
+              <div className="pmd-map-badge">ROUTE PREVIEW</div>
+              <ThembaMap
+                polylines={mapOverlays.polylines}
+                markers={mapOverlays.markers}
+                height="420px"
+                fitKey={`route-${departure}-${destination}-${taxiGeometry.length}`}
+              />
+              <div className="pmd-map-legend">
+                <span>● {departure}</span>
+                <span>— {destination}</span>
+              </div>
+              <div className="pmd-stat-row">
+                <div className="pmd-stat">
+                  <small>ESTIMATED DISTANCE</small>
+                  <strong>
+                    {adhocLine?.distanceKm != null
+                      ? `${Number(adhocLine.distanceKm).toFixed(1)} km`
+                      : taxiGeometry.length
+                        ? 'See path'
+                        : '—'}
+                  </strong>
+                </div>
+                <div className="pmd-stat">
+                  <small>ESTIMATED TIME</small>
+                  <strong>
+                    {adhocLine?.durationMin != null
+                      ? `${Math.round(adhocLine.durationMin)} min`
+                      : '—'}
+                  </strong>
+                </div>
+                <div className="pmd-stat">
+                  <small>OFFICIAL FARE</small>
+                  <strong>{localFare != null ? `R${localFare}` : '—'}</strong>
+                </div>
+              </div>
+            </div>
+
+            <div className="pmd-active-side">
+              <section className="pmd-card">
+                <h3>Route summary</h3>
+                <dl className="pmd-dl">
+                  <div>
+                    <dt>Departure</dt>
+                    <dd>{departure}</dd>
+                  </div>
+                  <div>
+                    <dt>Destination</dt>
+                    <dd>{destination}</dd>
+                  </div>
+                  <div>
+                    <dt>Legs</dt>
+                    <dd>
+                      {toRankGeometry.length > 2
+                        ? 'You → rank → destination'
+                        : 'Rank → destination'}
+                    </dd>
+                  </div>
+                </dl>
+              </section>
+              <section className="pmd-card fare-card">
+                <small>OFFICIAL FARE</small>
+                <strong className="pmd-fare-lg">
+                  {localFare != null ? `R${localFare}` : '—'}
+                </strong>
+                <span className="pmd-pill muted">FIXED FARE</span>
+              </section>
+              <button
+                type="button"
+                className="pmd-btn primary block"
+                onClick={() => {
+                  setViewMode('desk');
+                  searchTrip();
+                }}
+                disabled={loading}
+              >
+                → Continue to trip search
+              </button>
+              <button
+                type="button"
+                className="pmd-btn ghost block"
+                onClick={() => setViewMode('desk')}
+              >
+                ← Return to search
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ========== Stage: Desk ========== */
   return (
-    <div className="pmd">
-      <aside className="pmd-sidebar">
-        <div className="pmd-brand">
-          <span className="pmd-mark">T</span>
+    <div className="pmd pmd-stage-desk">
+      {brandHeader}
+      <div className="pmd-desk">
+        <div className="pmd-desk-head">
           <div>
-            <strong>THEMBA</strong>
-            <small>TRANSPORT HUB</small>
+            <p className="pmd-kicker">PASSENGER DESK / DISCOVERY</p>
+            <h1>Find and verify your trip</h1>
+            <p className="pmd-hint">
+              Search official routes, confirm the fare, then verify your booking code.
+            </p>
           </div>
+          {onExit && (
+            <button type="button" className="pmd-btn ghost" onClick={onExit}>
+              Sign out
+            </button>
+          )}
         </div>
 
-        <div className="pmd-profile">
-          <div className="pmd-avatar">{initials}</div>
-          <div className="pmd-profile-text">
-            <span className="pmd-role">PASSENGER DASHBOARD</span>
-            <strong>{passengerName}</strong>
-          </div>
-          <span className="pmd-verified">Verified</span>
+        <div className="pmd-desk-grid">
+          <section className="pmd-card">
+            <h3>Search trip</h3>
+            <p className="pmd-hint">
+              Enter your planned journey to check the official passenger fare.
+            </p>
+            {nearestHint && (
+              <div className="pmd-nearest">
+                <span>Nearest rank (GPS)</span>
+                <strong>
+                  {nearestHint.name} · {nearestHint.distanceKm} km
+                </strong>
+              </div>
+            )}
+            <label className="pmd-label">
+              Departure
+              <select value={departure} onChange={(e) => setDeparture(e.target.value)}>
+                {PLACES.map((pl) => (
+                  <option key={pl.id} value={pl.name}>
+                    {pl.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="pmd-label">
+              Destination
+              <select value={destination} onChange={(e) => setDestination(e.target.value)}>
+                {PLACES.map((pl) => (
+                  <option key={pl.id} value={pl.name}>
+                    {pl.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {localFare != null && (
+              <div className="pmd-fare-banner">
+                <span>OFFICIAL TRIP FARE · One passenger</span>
+                <strong>R{localFare}</strong>
+              </div>
+            )}
+            <div className="pmd-btn-row">
+              <button
+                type="button"
+                className="pmd-btn primary"
+                onClick={searchTrip}
+                disabled={loading}
+              >
+                {loading ? 'Searching…' : 'Search trip'}
+              </button>
+              <button
+                type="button"
+                className="pmd-btn ghost"
+                onClick={previewRoadRoute}
+                disabled={routing}
+              >
+                {routing ? 'Routing…' : 'Search route'}
+              </button>
+            </div>
+
+            {results.length > 0 && (
+              <div className="pmd-desk-results">
+                <div className="pmd-results-head">
+                  <span>Matching trips</span>
+                  <span>{results.length}</span>
+                </div>
+                {results.map((trip) => (
+                  <button
+                    key={trip.id ?? `${trip.origin}-${trip.destination}-${trip.trip_code}`}
+                    type="button"
+                    className={
+                      selected &&
+                      ((trip.id != null && selected.id === trip.id) ||
+                        (trip.isInfoOnly &&
+                          selected.isInfoOnly &&
+                          selected.origin === trip.origin))
+                        ? 'pmd-trip active'
+                        : 'pmd-trip'
+                    }
+                    onClick={() => setSelected(trip)}
+                  >
+                    <strong>
+                      {trip.origin} → {trip.destination}
+                    </strong>
+                    <small>
+                      {trip.operator} · {trip.trip_code}
+                    </small>
+                    <div className="pmd-trip-meta">
+                      <span>{trip.departure}</span>
+                      <span className="pmd-status">{trip.status}</span>
+                    </div>
+                  </button>
+                ))}
+                {selected && !selected.isInfoOnly && (
+                  <>
+                    <div className="pmd-fare-block">
+                      <span>OFFICIAL FARE</span>
+                      <strong>{selected.fare}</strong>
+                    </div>
+                    {!booked ? (
+                      <button
+                        type="button"
+                        className="pmd-btn primary block"
+                        onClick={confirmBooking}
+                        disabled={booking}
+                      >
+                        {booking ? 'Booking…' : 'Confirm booking'}
+                      </button>
+                    ) : (
+                      <div className="pmd-code-banner">
+                        Booked · code <strong>{booked.verification_code || '—'}</strong>
+                        <small>Enter this code under Verify a booked trip</small>
+                      </div>
+                    )}
+                  </>
+                )}
+                {selected && selected.isInfoOnly && (
+                  <div className="pmd-fare-block">
+                    <span>LOCAL FARE (no live trip yet)</span>
+                    <strong>{selected.fare}</strong>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+
+          <section className="pmd-card">
+            <h3>Verify a booked trip</h3>
+            <p className="pmd-hint">Use the verification code from your booking confirmation.</p>
+            <label className="pmd-label">
+              Trip verification code
+              <input
+                value={verifyInput}
+                onChange={(e) => setVerifyInput(e.target.value.toUpperCase())}
+                placeholder="e.g. code from booking"
+                onKeyDown={(e) => e.key === 'Enter' && confirmVerifyCode()}
+              />
+            </label>
+            <button type="button" className="pmd-btn primary block" onClick={confirmVerifyCode}>
+              Verify trip
+            </button>
+            <p className="pmd-hint">
+              Verification unlocks journey details, live map, and safety controls.
+            </p>
+          </section>
         </div>
-
-        {/* 01 Search Trip — SRS */}
-        <section className="pmd-section">
-          <div className="pmd-section-head">
-            <span>01. SEARCH TRIP</span>
-          </div>
-          {nearestHint && (
-            <div className="pmd-nearest">
-              <span>Nearest rank from your GPS</span>
-              <strong>
-                {nearestHint.name} · {nearestHint.distanceKm} km
-              </strong>
-            </div>
-          )}
-          <label className="pmd-label">
-            Departure
-            <select value={departure} onChange={(e) => setDeparture(e.target.value)}>
-              {PLACES.map((p) => (
-                <option key={p.id} value={p.name}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="pmd-label">
-            Destination
-            <select value={destination} onChange={(e) => setDestination(e.target.value)}>
-              {PLACES.map((p) => (
-                <option key={p.id} value={p.name}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {localFare != null && (
-            <div className="pmd-fare-inline">
-              Local official fare: <strong>R{localFare}</strong>
-            </div>
-          )}
-          <button type="button" className="pmd-btn primary" onClick={searchTrip} disabled={loading}>
-            {loading ? 'Searching…' : 'Search trip'}
-          </button>
-          <button
-            type="button"
-            className="pmd-btn ghost"
-            onClick={previewRoadRoute}
-            disabled={routing}
-          >
-            {routing ? 'Routing…' : 'Preview road route (map)'}
-          </button>
-        </section>
-
-        {/* Local fare table — SRS Search Fare */}
-        <section className="pmd-section">
-          <div className="pmd-section-head">
-            <span>02. LOCAL FARES</span>
-          </div>
-          <table className="pmd-fare-table">
-            <thead>
-              <tr>
-                <th>From</th>
-                <th>To</th>
-                <th>R</th>
-              </tr>
-            </thead>
-            <tbody>
-              {FARE_ROWS.map(([a, b, r]) => (
-                <tr key={`${a}-${b}`}>
-                  <td>{a}</td>
-                  <td>{b}</td>
-                  <td>{r}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-
-        {/* Verification — SRS central contribution */}
-        <section className="pmd-section">
-          <div className="pmd-section-head">
-            <span>03. TRIP VERIFICATION</span>
-          </div>
-          {booked?.verification_code && (
-            <div className="pmd-code-banner">
-              Your code: <strong>{booked.verification_code}</strong>
-              <small>
-                {booked.trip_code} · booking #{booked.booking_id}
-              </small>
-            </div>
-          )}
-          <label className="pmd-label">
-            Enter verification code
-            <input
-              value={verifyInput}
-              onChange={(e) => setVerifyInput(e.target.value)}
-            />
-          </label>
-          <button type="button" className="pmd-btn secondary" onClick={confirmVerifyCode}>
-            Confirm code
-          </button>
-          {verifiedTrip && (
-            <div className="pmd-verified-trip">
-              <strong>Verified for this session</strong>
-              <span>
-                {verifiedTrip.trip_code || verifiedTrip.origin} · code{' '}
-                {verifiedTrip.verification_code}
-              </span>
-            </div>
-          )}
-        </section>
-
-        <section className="pmd-section">
-          <div className="pmd-section-head">
-            <span>04. SAFETY</span>
-          </div>
-          <button type="button" className="pmd-btn danger" onClick={() => setPanicOpen(true)}>
-            Panic button
-          </button>
-        </section>
 
         {myBookings.length > 0 && (
-          <section className="pmd-section">
-            <div className="pmd-section-head">
-              <span>MY BOOKINGS</span>
-            </div>
+          <section className="pmd-card pmd-bookings">
+            <h3>My bookings</h3>
             <ul className="pmd-booking-list">
-              {myBookings.slice(0, 5).map((b) => (
+              {myBookings.map((b) => (
                 <li key={b.id}>
-                  <strong>{b.trip_code}</strong>
+                  <strong>{b.trip_code || b.id}</strong>
                   <span>
                     {b.status}
                     {b.verification_code ? ` · ${b.verification_code}` : ''}
@@ -485,80 +906,7 @@ export default function PassengerMapDashboard({ notify }) {
             </ul>
           </section>
         )}
-      </aside>
-
-      <main className="pmd-main">
-        <div className="pmd-map-wrap">
-          <ThembaMap
-            polylines={mapOverlays.polylines}
-            markers={mapOverlays.markers}
-            height="100%"
-            fitKey={`${selected?.id || departure}-${destination}-${adhocLine?.id || ''}`}
-          />
-        </div>
-
-        <div className="pmd-results">
-          <div className="pmd-results-head">
-            <strong>Matching trips</strong>
-            <span>{results.length} result(s)</span>
-          </div>
-          {results.map((trip) => (
-            <button
-              key={trip.id ?? trip.trip_code + trip.origin}
-              type="button"
-              className={selected?.id === trip.id ? 'pmd-trip active' : 'pmd-trip'}
-              onClick={() => {
-                if (!trip.isInfoOnly) setSelected(trip);
-              }}
-            >
-              <div>
-                <strong>
-                  {trip.origin} → {trip.destination}
-                </strong>
-                <small>
-                  {trip.operator} · {trip.trip_code}
-                </small>
-                <div className="pmd-trip-meta">
-                  <span>{trip.departure}</span>
-                  <span className="pmd-status">{trip.status}</span>
-                  {trip.seats_available != null && (
-                    <span>{trip.seats_available} seats</span>
-                  )}
-                </div>
-                <div className="pmd-trip-meta">
-                  <span>
-                    Driver: {trip.driver} · {trip.vehicle} {trip.registration}
-                  </span>
-                </div>
-              </div>
-            </button>
-          ))}
-
-          {selected && !selected.isInfoOnly && (
-            <>
-              <div className="pmd-fare-block">
-                <span>OFFICIAL FARE</span>
-                <strong>{selected.fare}</strong>
-              </div>
-              {!booked ? (
-                <button
-                  type="button"
-                  className="pmd-btn primary block"
-                  onClick={confirmBooking}
-                  disabled={booking}
-                >
-                  {booking ? 'Booking…' : 'Confirm booking'}
-                </button>
-              ) : (
-                <div className="pmd-code-banner">
-                  Booked · code <strong>{booked.verification_code || '—'}</strong>
-                  <small>Show this code to the operator when boarding</small>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </main>
+      </div>
 
       {panicOpen && (
         <div className="pmd-modal-backdrop" role="presentation">

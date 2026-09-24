@@ -1,7 +1,6 @@
 /**
- * Ad-hoc road routing — original themba-search-first client.
- * POST /api/routing/directions/ → ORS → OSRM → fallback (server).
- * Google Maps is NOT used for road geometry.
+ * Ad-hoc road routing — themba-search-first client.
+ * POST /api/routing/directions/ → ORS → OSRM (server).
  */
 import { api } from '../api';
 

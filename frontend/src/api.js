@@ -88,8 +88,9 @@ export const api = {
     return request(`/trips/${q ? `?${q}` : ''}`);
   },
   listRoutes: () => request('/routes/'),
+  tripDetail: (tripId) => request(`/trips/${tripId}/`),
+  tripLive: (tripId) => request(`/trips/${tripId}/live/`, { auth: true }),
 
-  // --- Passenger booking now requires trip_code ---
   createBooking: (tripId, tripCode) =>
     request('/bookings/', {
       method: 'POST',
@@ -98,7 +99,7 @@ export const api = {
     }),
   myBookings: () => request('/bookings/mine/', { auth: true }),
 
-  // --- Operator ---
+  // Operator
   myTrips: () => request('/my-trips/', { auth: true }),
   manifest: (tripId) => request(`/my-trips/${tripId}/manifest/`, { auth: true }),
   engage: (tripId) =>
@@ -114,7 +115,7 @@ export const api = {
       body: { code },
     }),
 
-  // --- Driver ---
+  // Driver
   myVehicle: () => request('/vehicles/mine/', { auth: true }),
   postLocation: (vehicleId, payload) =>
     request(`/vehicles/${vehicleId}/location/`, {
@@ -129,6 +130,18 @@ export const api = {
       method: 'POST',
       auth: true,
       body: { trip_code: tripCode },
+    }),
+  notificationsMarkRead: (id) =>
+    request(`/driver/notifications/${id}/read/`, {
+      method: 'POST',
+      auth: true,
+      body: {},
+    }),
+  notificationsMarkAllRead: () =>
+    request('/driver/notifications/read-all/', {
+      method: 'POST',
+      auth: true,
+      body: {},
     }),
 
   fleet: () => request('/fleet/', { auth: true }),

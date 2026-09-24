@@ -1,5 +1,5 @@
 /**
- * Central local taxi fare table (bidirectional) — original themba-search-first.
+ * Central local taxi fare table (bidirectional) — themba-search-first.
  * Prefer backend route fare when API returns a Route; this is the single
  * frontend source when matching by place names.
  */
@@ -10,7 +10,6 @@ export const PREDETERMINED_PLACES = [
   { id: 'richards-bay', name: 'Richards Bay', lat: -28.781, lng: 32.0377 },
 ];
 
-/** Unordered pairs — same fare both directions */
 export const LOCAL_FARES = [
   { a: 'Ongoye', b: 'Empangeni', fare: 24 },
   { a: 'Ongoye', b: 'Esikhawini', fare: 20 },
