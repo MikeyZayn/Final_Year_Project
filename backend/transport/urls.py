@@ -44,5 +44,7 @@ urlpatterns = [
     path("api/admin/feedback/", views.api_admin_feedback, name="api_admin_feedback"),
     path("api/admin/feedback/<int:feedback_id>/confirm-incident/", views.api_admin_confirm_incident, name="api_admin_confirm_incident"),
     path("api/admin/feedback/<int:feedback_id>/dismiss/", views.api_admin_dismiss, name="api_admin_dismiss"),
+    path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
+    path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
 
 ]

@@ -921,6 +921,8 @@ function Passenger({ notify }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [bookingId, setBookingId] = useState(null);
+  const [feedbackList, setFeedbackList] = useState([]);
+  const [ratingFormFor, setRatingFormFor] = useState(null); // booking id
 
   async function loadTrips(params = {}) {
     setLoading(true);
@@ -952,6 +954,7 @@ function Passenger({ notify }) {
   useEffect(() => {
     loadTrips();
     loadBookings();
+    loadFeedback();
   }, []);
 
   async function bookTrip(tripId) {
@@ -967,7 +970,36 @@ function Passenger({ notify }) {
       setBookingId(null);
     }
   }
-
+  async function loadFeedback() {
+    try {
+      const { data } = await api.get('/transport/api/my-feedback/');
+      setFeedbackList(data);
+    } catch {
+      /* ignore */
+    }
+  }
+  async function cancelBooking(bookingId) {
+    if (!window.confirm('Cancel this booking? You can rebook if seats are still available.')) return;
+    try {
+      await api.post(`/transport/api/my-bookings/${bookingId}/cancel/`);
+      notify('Booking cancelled.');
+      await loadBookings();
+      await loadTrips();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Cancellation failed.');
+    }
+  }
+  async function cancelBooking(bookingId) {
+    if (!window.confirm('Cancel this booking? You can rebook if seats are still available.')) return;
+    try {
+      await api.post(`/transport/api/my-bookings/${bookingId}/cancel/`);
+      notify('Booking cancelled.');
+      await loadBookings();
+      await loadTrips();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Cancellation failed.');
+    }
+  }
   function searchTrips() {
     loadTrips({ from: departure.trim(), to: destination.trim() });
   }
@@ -1008,23 +1040,76 @@ function Passenger({ notify }) {
             <div className="trip-row" key={b.id}>
               <span>
                 <strong>{b.route_label}</strong>
-                <small>
-                  {b.trip_code} · {b.departure_date} · {b.status}
-                </small>
+                <small>{b.trip_code} · {b.departure_date} · {b.status}</small>
               </span>
-              <span
-                className="status-pill"
-                style={{
-                  borderColor: b.status === 'boarded' ? 'var(--success)' : 'var(--accent)',
-                  color: b.status === 'boarded' ? 'var(--success)' : 'var(--accent)',
-                }}
-              >
-                {b.status}
-              </span>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {b.status === 'completed' && !feedbackList.some(f => f.booking === b.id) && (
+                  <button className="primary-button" onClick={() => setRatingFormFor(b.id)} type="button">
+                    Rate this trip
+                  </button>
+                )}
+                {(b.status === 'reserved' || b.status === 'boarded') && (
+                  <button className="danger-button" onClick={() => cancelBooking(b.id)} type="button">
+                    Cancel
+                  </button>
+                )}
+                <span className="status-pill">{b.status}</span>
+              </div>
             </div>
           ))}
         </article>
       )}
+
+      {feedbackList.length > 0 && (
+        <article className="module module-wide">
+          <div className="module-heading">
+            <span>My feedback</span>
+            <span className="module-number">{feedbackList.length}</span>
+          </div>
+          {feedbackList.map((f) => (
+            <div key={f.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                <span>
+                  <strong>{f.trip_code} · {f.rating}★</strong>
+                  <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+                    {f.route_label}
+                    {f.has_complaint ? ` · Complaint: ${f.category_label}` : ''}
+                  </small>
+                </span>
+                <span
+                  className="status-pill"
+                  style={{
+                    borderColor: f.status === 'resolved' ? 'var(--success)' :
+                                f.status === 'confirmed_incident' ? 'var(--danger)' :
+                                'var(--accent)',
+                    color: f.status === 'resolved' ? 'var(--success)' :
+                          f.status === 'confirmed_incident' ? 'var(--danger)' :
+                          'var(--accent)',
+                  }}
+                >
+                  {f.status_label}
+                </span>
+              </div>
+              {f.has_complaint && f.description && (
+                <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
+                  <em>You wrote:</em> {f.description}
+                </p>
+              )}
+              {f.operator_response && (
+                <p className="muted" style={{ marginTop: 8, fontSize: 13, paddingLeft: 12, borderLeft: '2px solid var(--success)' }}>
+                  <em>Operator replied:</em> {f.operator_response}
+                </p>
+              )}
+              {f.admin_response && (
+                <p className="muted" style={{ marginTop: 8, fontSize: 13, paddingLeft: 12, borderLeft: '2px solid var(--danger)' }}>
+                  <em>Admin:</em> {f.admin_response}
+                </p>
+              )}
+            </div>
+          ))}
+        </article>
+      )}
+
 
       <article className="module module-wide">
         <div className="module-heading">
@@ -1073,7 +1158,137 @@ function Passenger({ notify }) {
           );
         })}
       </article>
+      {ratingFormFor && (
+        <RatingModal
+          bookingId={ratingFormFor}
+          onClose={() => setRatingFormFor(null)}
+          onDone={() => { setRatingFormFor(null); loadFeedback(); loadBookings(); }}
+          notify={notify}
+        />
+      )}
     </>
+  );
+}
+
+function RatingModal({ bookingId, onClose, onDone, notify }) {
+  const [rating, setRating] = useState(5);
+  const [hasComplaint, setHasComplaint] = useState(false);
+  const [category, setCategory] = useState('punctuality');
+  const [description, setDescription] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit() {
+    setError('');
+    if (hasComplaint && !description.trim()) {
+      setError('Please describe what happened.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post(`/transport/api/my-bookings/${bookingId}/feedback/`, {
+        rating,
+        has_complaint: hasComplaint,
+        category: hasComplaint ? category : '',
+        description: hasComplaint ? description : '',
+      });
+      notify('Feedback submitted.');
+      onDone();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to submit.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="settings-overlay" onClick={onClose}>
+      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="settings-header">
+          <h3>Rate this trip</h3>
+          <button className="text-button" onClick={onClose} type="button">Close</button>
+        </div>
+
+        <div className="settings-section">
+          <div className="section-title">Rating</div>
+          <div style={{ display: 'flex', gap: 6, fontSize: 32, margin: '10px 0' }}>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button
+                key={n}
+                type="button"
+                onClick={() => setRating(n)}
+                style={{
+                  background: 'none', border: 0, cursor: 'pointer',
+                  fontSize: 32, padding: 4,
+                  color: n <= rating ? 'var(--accent)' : 'var(--muted)',
+                }}
+                aria-label={`${n} stars`}
+              >
+                ★
+              </button>
+            ))}
+            <span style={{ marginLeft: 12, alignSelf: 'center', fontSize: 16, color: 'var(--muted)' }}>
+              {rating}/5
+            </span>
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <div className="section-title">Add a complaint?</div>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={hasComplaint}
+              onChange={(e) => setHasComplaint(e.target.checked)}
+            />
+            Yes, I want to report an issue
+          </label>
+
+          {hasComplaint && (
+            <>
+              <label>
+                Category
+                <select value={category} onChange={(e) => setCategory(e.target.value)}>
+                  <option value="driver_conduct">Driver behaviour</option>
+                  <option value="safety">Safety concern</option>
+                  <option value="punctuality">Punctuality</option>
+                  <option value="vehicle_condition">Vehicle condition</option>
+                  <option value="overcharging">Overcharging</option>
+                  <option value="other">Other</option>
+                </select>
+              </label>
+              <label>
+                What happened?
+                <textarea
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  rows={4}
+                  style={{
+                    width: '100%',
+                    padding: 10,
+                    borderRadius: 6,
+                    border: '1px solid var(--border)',
+                    background: 'var(--surface)',
+                    color: 'var(--text)',
+                    fontFamily: 'inherit',
+                    marginTop: 7,
+                  }}
+                />
+              </label>
+            </>
+          )}
+        </div>
+
+        {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+
+        <div className="settings-actions">
+          <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+          <button className="primary-button" onClick={submit} disabled={busy} type="button">
+            {busy ? 'Submitting…' : 'Submit feedback'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1174,6 +1389,7 @@ function Operator({ notify }) {
   return (
     <div className="dashboard-grid">
       <OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} />
+      <OperatorFeedback notify={notify} />
       <OperatorMemberships memberships={memberships} />
       <OperatorRequestRank notify={notify} onRequested={load} />
 
@@ -1189,6 +1405,169 @@ function Operator({ notify }) {
         </p>
       </article>
     </div>
+  );
+}
+
+function OperatorFeedback({ notify }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [respondingTo, setRespondingTo] = useState(null);
+  const [responseText, setResponseText] = useState('');
+  const [filter, setFilter] = useState('all'); // all | complaints | ratings
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/transport/api/operator/feedback/');
+      setItems(data);
+    } catch {
+      /* ignore */
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function respond(id) {
+    if (!responseText.trim()) { notify('Write a response first.'); return; }
+    try {
+      await api.post(`/transport/api/operator/feedback/${id}/respond/`, {
+        operator_response: responseText,
+      });
+      notify('Response sent. Passenger will see it.');
+      setRespondingTo(null);
+      setResponseText('');
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Failed to respond.');
+    }
+  }
+
+  async function escalate(id) {
+    if (!window.confirm('Escalate this complaint to admin review?')) return;
+    try {
+      await api.post(`/transport/api/operator/feedback/${id}/escalate/`);
+      notify('Complaint escalated to admin.');
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Failed to escalate.');
+    }
+  }
+
+  async function acknowledge(id) {
+    try {
+      await api.post(`/transport/api/operator/feedback/${id}/acknowledge/`);
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Failed to acknowledge.');
+    }
+  }
+
+  const filtered = items.filter((f) => {
+    if (filter === 'complaints') return f.has_complaint;
+    if (filter === 'ratings') return !f.has_complaint;
+    return true;
+  });
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Passenger feedback</span>
+        <span className="module-number">{filtered.length}</span>
+      </div>
+
+      <div className="role-picker" style={{ marginBottom: 16 }}>
+        {['all', 'complaints', 'ratings'].map((f) => (
+          <button
+            key={f}
+            className={filter === f ? 'selected' : ''}
+            onClick={() => setFilter(f)}
+            type="button"
+          >
+            {f}
+          </button>
+        ))}
+      </div>
+
+      {loading && <p className="muted">Loading…</p>}
+      {!loading && filtered.length === 0 && <p className="muted">No feedback yet.</p>}
+
+      {filtered.map((f) => (
+        <div key={f.id} style={{ padding: '14px 0', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span>
+              <strong>{f.trip_code} · {f.rating}★</strong>
+              <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+                {f.passenger_name} · {f.passenger_phone} · {f.route_label}
+              </small>
+            </span>
+            <span
+              className="status-pill"
+              style={{
+                borderColor: f.status === 'resolved' ? 'var(--success)' :
+                             f.status === 'escalated' ? 'var(--danger)' :
+                             'var(--accent)',
+                color: f.status === 'resolved' ? 'var(--success)' :
+                       f.status === 'escalated' ? 'var(--danger)' :
+                       'var(--accent)',
+              }}
+            >
+              {f.status_label}
+            </span>
+          </div>
+
+          {f.has_complaint && (
+            <div style={{ marginTop: 10, paddingLeft: 12, borderLeft: '2px solid var(--accent)' }}>
+              <small style={{ opacity: 0.7 }}>{f.category_label}</small>
+              <p className="muted" style={{ marginTop: 4 }}>{f.description}</p>
+            </div>
+          )}
+
+          {f.operator_response && (
+            <p className="muted" style={{ marginTop: 10, fontSize: 13 }}>
+              <em>You replied:</em> {f.operator_response}
+            </p>
+          )}
+
+          {f.has_complaint && f.status !== 'resolved' && f.status !== 'escalated' && (
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              {f.status === 'submitted' && (
+                <button className="secondary-button" onClick={() => acknowledge(f.id)} type="button">
+                  Mark under review
+                </button>
+              )}
+              <button className="primary-button" onClick={() => { setRespondingTo(f.id); setResponseText(''); }} type="button">
+                Respond
+              </button>
+              <button className="danger-button" onClick={() => escalate(f.id)} type="button">
+                Escalate to admin
+              </button>
+            </div>
+          )}
+
+          {respondingTo === f.id && (
+            <div style={{ marginTop: 12 }}>
+              <textarea
+                value={responseText}
+                onChange={(e) => setResponseText(e.target.value)}
+                rows={3}
+                placeholder="Write your response…"
+                style={{
+                  width: '100%', padding: 10, borderRadius: 6,
+                  border: '1px solid var(--border)', background: 'var(--surface)',
+                  color: 'var(--text)', fontFamily: 'inherit',
+                }}
+              />
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button className="secondary-button" onClick={() => setRespondingTo(null)} type="button">Cancel</button>
+                <button className="primary-button" onClick={() => respond(f.id)} type="button">Send response</button>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
+    </article>
   );
 }
 
@@ -1434,7 +1813,16 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
       notify(err.response?.data?.detail || 'Could not release.');
     }
   }
-
+  async function completeTrip() {
+    if (!window.confirm('Complete this trip? Unverified passengers will be marked no-show.')) return;
+    try {
+      const { data } = await api.post(`/transport/api/my-trips/${tripId}/complete/`);
+      notify(`Trip completed. ${data.no_shows} no-show(s) marked, ${data.completed_passengers} passenger(s) can now rate.`);
+      onBack();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Could not complete trip.');
+    }
+  }
   async function verifyBooking(bookingId) {
     setVerifyingId(bookingId);
     try {
@@ -1538,22 +1926,16 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     <>
       <article className="module module-wide">
         <div className="module-heading">
-          <span>{trip.trip_code} · BOARDING</span>
+          <span>{trip.trip_code} · {trip.status.toUpperCase()}</span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="secondary-button" onClick={onBack} type="button">← Back</button>
-            <button className="danger-button" onClick={release} type="button">Release trip</button>
+            <button className="primary-button" onClick={completeTrip} type="button">
+              Complete trip
+            </button>
+            <button className="danger-button" onClick={release} type="button">
+              Release (abandon)
+            </button>
           </div>
-        </div>
-        <h3 style={{ margin: '8px 0' }}>
-          {trip.route.departure.name} → {trip.route.destination.name}
-        </h3>
-        <div className="route-summary">
-          <div><span className="route-label">Date</span><strong>{trip.departure_date}</strong></div>
-          <div><span className="route-label">Time</span><strong>{trip.expected_departure_time?.slice(0, 5) || '—'}</strong></div>
-          <div><span className="route-label">Driver</span><strong>{trip.driver_name || 'Unassigned'}</strong></div>
-          <div><span className="route-label">Vehicle</span><strong>{trip.vehicle_plate || 'Unassigned'}</strong></div>
-          <div><span className="route-label">Seats</span><strong style={{ color: isFull ? 'var(--danger)' : undefined }}>{trip.seats_taken}/{trip.seat_capacity}</strong></div>
-          <div><span className="route-label">Status</span><strong>{trip.status}</strong></div>
         </div>
       </article>
 

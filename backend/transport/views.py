@@ -541,6 +541,7 @@ def api_verify_booking(request, trip_id, booking_id):
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def api_my_bookings(request):
+    qs = Booking.objects.filter(passenger=request.user).exclude(status=Booking.Status.CANCELLED)
     if request.method == "GET":
         qs = Booking.objects.filter(passenger=request.user).select_related(
             "trip__route__departure", "trip__route__destination",
@@ -751,7 +752,8 @@ def api_admin_dismiss(request, feedback_id):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_complete_trip(request, trip_id):
-    """Operator marks a trip as completed."""
+    """Operator marks a trip as completed. Works whether or not the taxi is full.
+    Unverified reservations become no-shows. Boarded passengers become completed."""
     op = _get_operator_or_none(request)
     if op is None:
         return Response({"detail": "Not an operator account."}, status=403)
@@ -760,6 +762,55 @@ def api_complete_trip(request, trip_id):
     except Trip.DoesNotExist:
         return Response({"detail": "Trip not found or not yours."}, status=404)
 
+    if trip.status == Trip.Status.COMPLETED:
+        return Response({"detail": "Trip is already completed."}, status=400)
+    if trip.status == Trip.Status.CANCELLED:
+        return Response({"detail": "Cannot complete a cancelled trip."}, status=400)
+
+    # Bump unverified reservations
+    no_shows = trip.bookings.filter(status=Booking.Status.RESERVED).update(
+        status=Booking.Status.NO_SHOW
+    )
+    # Mark boarded passengers as completed so they can rate
+    completed = trip.bookings.filter(status=Booking.Status.BOARDED).update(
+        status=Booking.Status.COMPLETED
+    )
+
     trip.status = Trip.Status.COMPLETED
+    trip.engaged_by = None
+    trip.engaged_at = None
     trip.save()
-    return Response(TripSerializer(trip).data)
+
+    return Response({
+        "trip": TripSerializer(trip).data,
+        "no_shows": no_shows,
+        "completed_passengers": completed,
+    })
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_cancel_booking(request, booking_id):
+    """Passenger cancels their own booking. Only allowed before boarding."""
+    try:
+        booking = Booking.objects.get(pk=booking_id, passenger=request.user)
+    except Booking.DoesNotExist:
+        return Response({"detail": "Booking not found."}, status=404)
+
+    if booking.status == Booking.Status.CANCELLED:
+        return Response({"detail": "Already cancelled."}, status=400)
+
+    if booking.status in [Booking.Status.BOARDED, Booking.Status.COMPLETED]:
+        return Response(
+            {"detail": "Cannot cancel after boarding. Contact the operator."},
+            status=400,
+        )
+
+    if booking.trip.status == Trip.Status.IN_PROGRESS:
+        return Response(
+            {"detail": "Trip has already departed. Cannot cancel."},
+            status=400,
+        )
+
+    booking.status = Booking.Status.CANCELLED
+    booking.save()
+    return Response(BookingSerializer(booking).data)
