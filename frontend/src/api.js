@@ -88,10 +88,17 @@ export const api = {
     return request(`/trips/${q ? `?${q}` : ''}`);
   },
   listRoutes: () => request('/routes/'),
-  createBooking: (tripId) =>
-    request('/bookings/', { method: 'POST', auth: true, body: { trip_id: tripId } }),
+
+  // --- Passenger booking now requires trip_code ---
+  createBooking: (tripId, tripCode) =>
+    request('/bookings/', {
+      method: 'POST',
+      auth: true,
+      body: { trip_id: tripId, trip_code: tripCode },
+    }),
   myBookings: () => request('/bookings/mine/', { auth: true }),
 
+  // --- Operator ---
   myTrips: () => request('/my-trips/', { auth: true }),
   manifest: (tripId) => request(`/my-trips/${tripId}/manifest/`, { auth: true }),
   engage: (tripId) =>
@@ -107,6 +114,7 @@ export const api = {
       body: { code },
     }),
 
+  // --- Driver ---
   myVehicle: () => request('/vehicles/mine/', { auth: true }),
   postLocation: (vehicleId, payload) =>
     request(`/vehicles/${vehicleId}/location/`, {
@@ -114,6 +122,15 @@ export const api = {
       auth: true,
       body: payload,
     }),
+  driverTrips: () => request('/driver/trips/', { auth: true }),
+  driverProfile: () => request('/driver/profile/', { auth: true }),
+  confirmTrip: (tripCode) =>
+    request('/driver/confirm-trip/', {
+      method: 'POST',
+      auth: true,
+      body: { trip_code: tripCode },
+    }),
+
   fleet: () => request('/fleet/', { auth: true }),
   myMemberships: () => request('/my-memberships/', { auth: true }),
   requestRank: (rankId, notes = '') =>
@@ -123,7 +140,6 @@ export const api = {
       body: { rank_id: rankId, notes },
     }),
   listRanks: () => request('/ranks/'),
-
 
   directions: (origin, destination) =>
     request('/routing/directions/', {
