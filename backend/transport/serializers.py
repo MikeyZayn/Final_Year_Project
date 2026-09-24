@@ -1,7 +1,9 @@
 from rest_framework import serializers
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
-    Vehicle, DriverVehicle, Trip, Booking, VerificationCode, TripFlag, TripAssetChange,
+    Vehicle, DriverVehicle, Trip, Booking,
+    VerificationCode, TripFlag, TripAssetChange,
+    Feedback,
 )
 
 
@@ -220,3 +222,52 @@ class TripAssetChangeSerializer(serializers.ModelSerializer):
             return "Unknown"
         u = obj.changed_by
         return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+class FeedbackSerializer(serializers.ModelSerializer):
+    passenger_name = serializers.SerializerMethodField()
+    passenger_phone = serializers.CharField(source="passenger.phone", read_only=True)
+    trip_code = serializers.CharField(source="trip.trip_code", read_only=True)
+    route_label = serializers.SerializerMethodField()
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    category_label = serializers.CharField(source="get_category_display", read_only=True)
+
+    class Meta:
+        model = Feedback
+        fields = [
+            "id", "booking", "trip", "trip_code", "route_label",
+            "passenger_name", "passenger_phone",
+            "rating", "has_complaint", "category", "category_label",
+            "description", "status", "status_label",
+            "operator_response", "admin_response",
+            "created_at", "reviewed_at", "resolved_at",
+        ]
+        read_only_fields = [
+            "status", "operator_response", "admin_response",
+            "created_at", "reviewed_at", "resolved_at",
+        ]
+
+    def get_passenger_name(self, obj):
+        u = obj.passenger
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def get_route_label(self, obj):
+        return f"{obj.trip.route.departure.name} → {obj.trip.route.destination.name}"
+
+
+class FeedbackSubmitSerializer(serializers.Serializer):
+    rating = serializers.IntegerField(min_value=1, max_value=5)
+    has_complaint = serializers.BooleanField(default=False)
+    category = serializers.CharField(required=False, allow_blank=True)
+    description = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if attrs.get("has_complaint"):
+            if not attrs.get("category"):
+                raise serializers.ValidationError({"category": "Required when submitting a complaint."})
+            if not attrs.get("description", "").strip():
+                raise serializers.ValidationError({"description": "Please describe what happened."})
+        return attrs
+
+
+class FeedbackRespondSerializer(serializers.Serializer):
+    operator_response = serializers.CharField()

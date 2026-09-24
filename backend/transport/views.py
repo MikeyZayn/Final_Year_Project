@@ -10,12 +10,14 @@ from accounts.models import OperatorProfile
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
     Vehicle, Trip, Booking, VerificationCode, TripFlag, TripAssetChange,
+    Feedback,
 )
 from .serializers import (
     RankSerializer, DestinationSerializer, OperatorAtRankSerializer,
     RouteSerializer, RouteWriteSerializer, VehicleSerializer,
     TripSerializer, TripWriteSerializer, BookingSerializer,
     VerificationCodeSerializer, TripFlagSerializer, TripAssetChangeSerializer,
+    FeedbackSerializer, FeedbackRespondSerializer, FeedbackSubmitSerializer
 )
 
 
@@ -565,3 +567,199 @@ def api_my_bookings(request):
         return Response({"detail": "You already booked this trip."}, status=400)
 
     return Response(BookingSerializer(booking).data, status=201)
+
+# ---------- Feedback ----------
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_submit_feedback(request, booking_id):
+    """Passenger submits feedback for their completed booking."""
+    try:
+        booking = Booking.objects.get(pk=booking_id, passenger=request.user)
+    except Booking.DoesNotExist:
+        return Response({"detail": "Booking not found."}, status=404)
+
+    if booking.trip.status != Trip.Status.COMPLETED:
+        return Response(
+            {"detail": "Feedback is only available after the trip is completed."},
+            status=400,
+        )
+    if Feedback.objects.filter(booking=booking).exists():
+        return Response({"detail": "Feedback already submitted for this trip."}, status=400)
+
+    s = FeedbackSubmitSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+    data = s.validated_data
+
+    feedback = Feedback.objects.create(
+        booking=booking,
+        passenger=request.user,
+        trip=booking.trip,
+        rating=data["rating"],
+        has_complaint=data.get("has_complaint", False),
+        category=data.get("category", "") if data.get("has_complaint") else "",
+        description=data.get("description", "") if data.get("has_complaint") else "",
+    )
+    return Response(FeedbackSerializer(feedback).data, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_feedback(request):
+    """Passenger sees their own feedback (ratings + complaints + status)."""
+    qs = Feedback.objects.filter(passenger=request.user).select_related(
+        "trip__route__departure", "trip__route__destination", "passenger",
+    )
+    return Response(FeedbackSerializer(qs, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_feedback(request):
+    """Operator sees feedback for their trips."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    qs = Feedback.objects.filter(trip__operator=op).select_related(
+        "trip__route__departure", "trip__route__destination", "passenger",
+    )
+    return Response(FeedbackSerializer(qs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_operator_respond(request, feedback_id):
+    """Operator responds to a complaint → status becomes 'resolved'."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        fb = Feedback.objects.get(pk=feedback_id, trip__operator=op)
+    except Feedback.DoesNotExist:
+        return Response({"detail": "Feedback not found."}, status=404)
+
+    s = FeedbackRespondSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+
+    fb.operator_response = s.validated_data["operator_response"]
+    fb.status = Feedback.Status.RESOLVED
+    fb.reviewed_at = timezone.now()
+    fb.reviewed_by = request.user
+    fb.resolved_at = timezone.now()
+    fb.save()
+    return Response(FeedbackSerializer(fb).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_operator_escalate(request, feedback_id):
+    """Operator escalates a complaint to admin review."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        fb = Feedback.objects.get(pk=feedback_id, trip__operator=op)
+    except Feedback.DoesNotExist:
+        return Response({"detail": "Feedback not found."}, status=404)
+
+    fb.status = Feedback.Status.ESCALATED
+    fb.reviewed_at = timezone.now()
+    fb.reviewed_by = request.user
+    fb.save()
+    return Response(FeedbackSerializer(fb).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_operator_acknowledge(request, feedback_id):
+    """Operator marks a complaint as under review (opens it)."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        fb = Feedback.objects.get(pk=feedback_id, trip__operator=op)
+    except Feedback.DoesNotExist:
+        return Response({"detail": "Feedback not found."}, status=404)
+
+    if fb.status == Feedback.Status.SUBMITTED:
+        fb.status = Feedback.Status.UNDER_REVIEW
+        fb.reviewed_at = timezone.now()
+        fb.reviewed_by = request.user
+        fb.save()
+    return Response(FeedbackSerializer(fb).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_feedback(request):
+    """Admin sees all feedback, especially escalated ones."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    qs = Feedback.objects.all().select_related(
+        "trip__route__departure", "trip__route__destination",
+        "trip__operator__association", "passenger",
+    )
+    # by default show escalated + confirmed
+    scope = request.query_params.get("scope", "escalated")
+    if scope == "escalated":
+        qs = qs.filter(status=Feedback.Status.ESCALATED)
+    return Response(FeedbackSerializer(qs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_confirm_incident(request, feedback_id):
+    """Admin confirms a complaint as a formal safety incident."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        fb = Feedback.objects.get(pk=feedback_id)
+    except Feedback.DoesNotExist:
+        return Response({"detail": "Feedback not found."}, status=404)
+
+    fb.status = Feedback.Status.CONFIRMED_INCIDENT
+    fb.admin_response = request.data.get("admin_response", "").strip()
+    fb.reviewed_at = timezone.now()
+    fb.reviewed_by = request.user
+    fb.resolved_at = timezone.now()
+    fb.save()
+    return Response(FeedbackSerializer(fb).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_dismiss(request, feedback_id):
+    """Admin dismisses a complaint — no incident confirmed."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        fb = Feedback.objects.get(pk=feedback_id)
+    except Feedback.DoesNotExist:
+        return Response({"detail": "Feedback not found."}, status=404)
+
+    fb.status = Feedback.Status.DISMISSED
+    fb.admin_response = request.data.get("admin_response", "").strip()
+    fb.reviewed_at = timezone.now()
+    fb.reviewed_by = request.user
+    fb.resolved_at = timezone.now()
+    fb.save()
+    return Response(FeedbackSerializer(fb).data)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_complete_trip(request, trip_id):
+    """Operator marks a trip as completed."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found or not yours."}, status=404)
+
+    trip.status = Trip.Status.COMPLETED
+    trip.save()
+    return Response(TripSerializer(trip).data)

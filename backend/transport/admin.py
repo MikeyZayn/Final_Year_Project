@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
-    Vehicle, DriverVehicle, Trip, Booking, VerificationCode, TripFlag,
+    Vehicle, DriverVehicle, Trip, Booking, VerificationCode, TripFlag, Feedback,
 )
 
 
@@ -111,3 +111,10 @@ class TripFlagAdmin(admin.ModelAdmin):
             resolved_at=timezone.now(),
         )
         self.message_user(request, f"Resolved {updated} flag(s).")
+
+@admin.register(Feedback)
+class FeedbackAdmin(admin.ModelAdmin):
+    list_display = ("trip", "rating", "has_complaint", "category", "status", "created_at")
+    list_filter = ("status", "category", "has_complaint", "rating")
+    search_fields = ("passenger__phone", "trip__trip_code")
+    readonly_fields = ("created_at", "reviewed_at", "resolved_at")

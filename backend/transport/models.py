@@ -313,3 +313,59 @@ class TripAssetChange(models.Model):
 
     def __str__(self):
         return f"{self.trip.trip_code} — {self.get_reason_display()}"
+
+class Feedback(models.Model):
+    """A passenger's rating and optional complaint for a completed trip.
+    One per booking — enforced by OneToOneField."""
+
+    class Status(models.TextChoices):
+        SUBMITTED = "submitted", "Submitted"
+        UNDER_REVIEW = "under_review", "Under review"
+        RESOLVED = "resolved", "Resolved — check your notifications"
+        ESCALATED = "escalated", "Escalated to admin"
+        CONFIRMED_INCIDENT = "confirmed_incident", "Confirmed safety incident"
+        DISMISSED = "dismissed", "Dismissed"
+
+    class Category(models.TextChoices):
+        DRIVER_CONDUCT = "driver_conduct", "Driver behaviour"
+        SAFETY = "safety", "Safety concern"
+        PUNCTUALITY = "punctuality", "Punctuality"
+        VEHICLE_CONDITION = "vehicle_condition", "Vehicle condition"
+        OVERCHARGING = "overcharging", "Overcharging"
+        OTHER = "other", "Other"
+
+    booking = models.OneToOneField(
+        Booking, on_delete=models.CASCADE, related_name="feedback"
+    )
+    passenger = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="feedback_given"
+    )
+    trip = models.ForeignKey(Trip, on_delete=models.CASCADE, related_name="feedback")
+
+    rating = models.PositiveSmallIntegerField()  # 1–5
+    has_complaint = models.BooleanField(default=False)
+    category = models.CharField(
+        max_length=30, choices=Category.choices, blank=True
+    )
+    description = models.TextField(blank=True)
+
+    status = models.CharField(
+        max_length=30, choices=Status.choices, default=Status.SUBMITTED
+    )
+    operator_response = models.TextField(blank=True)
+    admin_response = models.TextField(blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="feedback_reviewed",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        kind = "complaint" if self.has_complaint else "rating"
+        return f"{kind} {self.rating}★ for {self.trip.trip_code} ({self.status})"
