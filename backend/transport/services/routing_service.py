@@ -22,8 +22,7 @@ from .geo import haversine_km
 
 logger = logging.getLogger(__name__)
 
-ORS_DIRECTIONS_URL = "https://api.openrouteservice.org/v2/directions/driving-car/json"
-
+ORS_DIRECTIONS_URL = "https://api.heigit.org/openrouteservice/v2/directions/driving-car"
 
 class RoutingServiceError(Exception):
     pass
@@ -80,7 +79,7 @@ def _ors_route(origin, destination, api_key, timeout=8):
         ORS_DIRECTIONS_URL,
         json=body,
         headers={
-            "Authorization": api_key,
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         },

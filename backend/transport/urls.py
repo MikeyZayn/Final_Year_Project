@@ -52,5 +52,6 @@ urlpatterns = [
     path("api/driver/vehicle/",                        views.api_driver_vehicle,          name="api_driver_vehicle"),
     path("api/driver/trips/",                          views.api_driver_trips,            name="api_driver_trips"),
     path("api/driver/trips/confirm/",                  views.api_driver_confirm_trip,     name="api_driver_confirm_trip"),
+    path("api/routing/directions/", views.api_routing_directions, name="api_routing_directions"),
     path("api/driver/vehicle/<int:vehicle_id>/location/", views.api_driver_post_location, name="api_driver_post_location"),
-]
+]   

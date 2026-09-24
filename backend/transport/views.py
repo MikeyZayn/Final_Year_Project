@@ -961,3 +961,40 @@ def api_driver_post_location(request, vehicle_id):
         "distance_from_route_m": 0,
         "note": "GPS ingestion not implemented in the prototype.",
     })
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def api_routing_directions(request):
+    """Proxy to the routing service. Reads ORS_API_KEY from Django settings."""
+    origin = request.data.get("origin") or {}
+    destination = request.data.get("destination") or {}
+
+    lat0 = origin.get("lat")
+    lng0 = origin.get("lng")
+    lat1 = destination.get("lat")
+    lng1 = destination.get("lng")
+
+    if None in (lat0, lng0, lat1, lng1):
+        return Response(
+            {"detail": "origin and destination must both have lat and lng."},
+            status=400,
+        )
+
+    try:
+        from .services.routing_service import get_driving_route
+    except ImportError as e:
+        return Response(
+            {"detail": f"Routing service not available: {e}"}, status=503
+        )
+
+    try:
+        result = get_driving_route(
+            (float(lat0), float(lng0)),
+            (float(lat1), float(lng1)),
+        )
+    except Exception as exc:
+        return Response(
+            {"detail": f"Routing failed: {exc}"}, status=502
+        )
+
+    return Response(result)

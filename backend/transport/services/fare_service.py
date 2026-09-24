@@ -1,30 +1,19 @@
 """
-Ad-hoc fare estimation — original themba-search-first logic.
-Road distance comes from ORS/OSRM; fare always from TaxiFareRule.
+Fare lookup has been consolidated onto Route.fare.
+
+Routes carry a single predetermined fare, stored on the Route model
+(see transport.models.Route). No dynamic fare calculation is performed
+in the prototype. This module is retained only as a stub so existing
+imports continue to resolve.
 """
-from ..models import TaxiFareRule
 
 
 def estimate_ad_hoc_fare(distance_km, route=None):
+    """Deprecated. Fares are predetermined per route.
+
+    If a route is provided, returns its stored fare. Otherwise returns None.
     """
-    Returns (fare, notice).
-    """
-    rule = None
     if route is not None:
-        rule = TaxiFareRule.objects.filter(
-            route_specific_override=route, active=True
-        ).first()
-    if rule is None:
-        rule = TaxiFareRule.objects.filter(
-            active=True, route_specific_override__isnull=True
-        ).first()
-
-    if rule is None:
-        fare = round(max(5.0 + 2.0 * float(distance_km), 10.0), 2)
-    else:
-        fare = rule.estimate(distance_km)
-
-    notice = getattr(TaxiFareRule, "DEMONSTRATION_NOTICE", None) or (
-        "Demonstration fare from THEMBA TaxiFareRule configuration."
-    )
-    return fare, notice
+        fare = getattr(route, "fare", None)
+        return fare, "Fare is stored on the route."
+    return None, "No fare available without a route."

@@ -66,3 +66,8 @@ dot_registry/*.sqlite*
 /data/raw/
 /models/*.pkl
 /models/*.h5
+
+# Local env files
+.env
+.env.local
+.env.*.local
