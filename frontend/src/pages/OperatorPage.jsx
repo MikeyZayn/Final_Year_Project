@@ -42,7 +42,7 @@ export default function OperatorPage({ notify, isAdmin }) {
 
   if (loading) {
     return (
-      <div className="app light fyp-operator">
+      <div className="fyp-operator">
         <article className="module module-wide">
           <p className="muted">Loading operator data…</p>
         </article>
@@ -52,7 +52,7 @@ export default function OperatorPage({ notify, isAdmin }) {
 
   if (error) {
     return (
-      <div className="app light fyp-operator">
+      <div className="fyp-operator">
         <article className="module module-wide">
           <p style={{ color: 'var(--danger)' }}>{error}</p>
           <button type="button" className="secondary-button" onClick={load}>
@@ -65,7 +65,7 @@ export default function OperatorPage({ notify, isAdmin }) {
 
   if (selectedTripId) {
     return (
-      <div className="app light fyp-operator">
+      <div className="fyp-operator">
         <OperatorTripDetail
           tripId={selectedTripId}
           onBack={() => {
@@ -79,7 +79,7 @@ export default function OperatorPage({ notify, isAdmin }) {
   }
 
   return (
-    <div className="app light fyp-operator">
+    <div className="fyp-operator">
       <div className="dashboard-grid">
         <OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} />
         <OperatorMemberships memberships={memberships} />
@@ -87,10 +87,9 @@ export default function OperatorPage({ notify, isAdmin }) {
         <article className="module module-wide" style={{ opacity: 0.55 }}>
           <div className="module-heading">
             <span>Complaints</span>
-            <span className="module-number">UI preview</span>
           </div>
           <p className="muted">
-            Central contribution — review passenger feedback for trips you operated (SRS).
+            Review passenger feedback for trips you operated.
           </p>
         </article>
       </div>
