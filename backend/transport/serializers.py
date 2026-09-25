@@ -1,0 +1,335 @@
+from rest_framework import serializers
+from .models import (
+    Rank, Destination, OperatorAtRank, Route,
+    Vehicle, DriverVehicle, Trip, Booking,
+    VerificationCode, TripFlag, TripAssetChange,
+    Feedback, Announcement, PanicAlert,
+)
+
+
+class RankSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Rank
+        fields = ["id", "name", "area", "latitude", "longitude"]
+
+
+class DestinationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Destination
+        fields = ["id", "name", "area", "latitude", "longitude"]
+
+
+class OperatorAtRankSerializer(serializers.ModelSerializer):
+    rank = RankSerializer(read_only=True)
+    operator_id = serializers.IntegerField(source="operator.id", read_only=True)
+    operator_name = serializers.CharField(
+        source="operator.association.association_name", read_only=True
+    )
+
+    class Meta:
+        model = OperatorAtRank
+        fields = ["id", "operator_id", "operator_name", "rank", "status", "notes"]
+
+
+class RouteSerializer(serializers.ModelSerializer):
+    departure = RankSerializer(read_only=True)
+    destination = DestinationSerializer(read_only=True)
+    fare = serializers.DecimalField(max_digits=8, decimal_places=2)
+
+    class Meta:
+        model = Route
+        fields = [
+            "id", "departure", "destination", "fare",
+            "service_category", "typical_duration_minutes", "active",
+        ]
+
+
+class RouteWriteSerializer(serializers.ModelSerializer):
+    departure_id = serializers.PrimaryKeyRelatedField(
+        queryset=Rank.objects.all(), source="departure"
+    )
+    destination_id = serializers.PrimaryKeyRelatedField(
+        queryset=Destination.objects.all(), source="destination"
+    )
+
+    class Meta:
+        model = Route
+        fields = [
+            "departure_id", "destination_id", "fare",
+            "service_category", "typical_duration_minutes",
+        ]
+
+
+class VehicleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Vehicle
+        fields = ["id", "plate_number", "make", "model",
+                  "seat_capacity", "roadworthy", "notes"]
+
+
+class TripSerializer(serializers.ModelSerializer):
+    
+    route = RouteSerializer(read_only=True)
+    operator_name = serializers.CharField(
+        source="operator.association.association_name", read_only=True
+    )
+    driver_name = serializers.SerializerMethodField()
+    vehicle_plate = serializers.CharField(source="vehicle.plate_number", read_only=True)
+    seats_taken = serializers.IntegerField(read_only=True)
+    seats_available = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Trip
+        fields = [
+            "id", "trip_code", "operator_name",
+            "route", "departure_date", "expected_departure_time",
+            "actual_departure_time", "seat_capacity", "seats_taken",
+            "seats_available", "status", "driver_name", "vehicle_plate",
+            "engaged_by_name", "is_engaged",
+            "notes", "created_at",
+        ]
+    def get_driver_name(self, obj):
+        if not obj.driver:
+            return None
+        u = obj.driver.user
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    engaged_by_name = serializers.SerializerMethodField()
+    is_engaged = serializers.SerializerMethodField()
+
+    def get_engaged_by_name(self, obj):
+        if not obj.engaged_by:
+            return None
+        u = obj.engaged_by.user
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def get_is_engaged(self, obj):
+        return obj.engaged_by is not None
+
+class TripWriteSerializer(serializers.ModelSerializer):
+    route_id = serializers.PrimaryKeyRelatedField(
+        queryset=Route.objects.all(), source="route"
+    )
+    operator_id = serializers.PrimaryKeyRelatedField(
+        queryset=__import__("accounts.models", fromlist=["OperatorProfile"]).OperatorProfile.objects.all(),
+        source="operator",
+    )
+    driver_id = serializers.IntegerField(required=False, allow_null=True)
+    vehicle_id = serializers.IntegerField(required=False, allow_null=True)
+
+    class Meta:
+        model = Trip
+        fields = [
+            "route_id", "operator_id", "departure_date",
+            "expected_departure_time", "seat_capacity",
+            "driver_id", "vehicle_id", "notes",
+        ]
+
+    def create(self, validated):
+        from accounts.models import DriverProfile
+        from .models import Vehicle
+
+        driver_id = validated.pop("driver_id", None)
+        vehicle_id = validated.pop("vehicle_id", None)
+        driver = DriverProfile.objects.filter(pk=driver_id).first() if driver_id else None
+        vehicle = Vehicle.objects.filter(pk=vehicle_id).first() if vehicle_id else None
+
+        trip = Trip.objects.create(driver=driver, vehicle=vehicle, **validated)
+        return trip
+
+
+class BookingSerializer(serializers.ModelSerializer):
+    trip_code = serializers.CharField(source="trip.trip_code", read_only=True)
+    route_label = serializers.SerializerMethodField()
+    departure_date = serializers.DateField(source="trip.departure_date", read_only=True)
+    passenger_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Booking
+        fields = [
+            "id", "trip", "trip_code", "route_label",
+            "departure_date", "status", "booked_at",
+            "passenger_name", "walk_in_name", "walk_in_phone",
+            "walk_in_next_of_kin_name", "walk_in_next_of_kin_phone",
+        ]
+
+        read_only_fields = ["status", "booked_at"]
+
+    def get_route_label(self, obj):
+        return f"{obj.trip.route.departure.name} → {obj.trip.route.destination.name}"
+
+    def get_passenger_name(self, obj):
+        return obj.display_name()
+
+
+class VerificationCodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VerificationCode
+        fields = ["id", "code", "issued_at", "verified_at"]
+
+
+class TripFlagSerializer(serializers.ModelSerializer):
+    category_label = serializers.CharField(source="get_category_display", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    flagged_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TripFlag
+        fields = [
+            "id", "trip", "category", "category_label",
+            "notes", "status", "status_label",
+            "flagged_by_name", "flagged_at",
+        ]
+
+    def get_flagged_by_name(self, obj):
+        if not obj.flagged_by:
+            return "Unknown"
+        u = obj.flagged_by
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+
+class TripAssetChangeSerializer(serializers.ModelSerializer):
+    reason_label = serializers.CharField(source="get_reason_display", read_only=True)
+    old_driver_name = serializers.SerializerMethodField()
+    new_driver_name = serializers.SerializerMethodField()
+    old_vehicle_plate = serializers.CharField(source="old_vehicle.plate_number", read_only=True)
+    new_vehicle_plate = serializers.CharField(source="new_vehicle.plate_number", read_only=True)
+    changed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = TripAssetChange
+        fields = [
+            "id", "reason", "reason_label", "notes", "changed_at",
+            "old_driver_name", "new_driver_name",
+            "old_vehicle_plate", "new_vehicle_plate",
+            "changed_by_name",
+        ]
+
+    def _driver_name(self, dp):
+        if not dp:
+            return None
+        u = dp.user
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def get_old_driver_name(self, obj):
+        return self._driver_name(obj.old_driver)
+
+    def get_new_driver_name(self, obj):
+        return self._driver_name(obj.new_driver)
+
+    def get_changed_by_name(self, obj):
+        if not obj.changed_by:
+            return "Unknown"
+        u = obj.changed_by
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+class FeedbackSerializer(serializers.ModelSerializer):
+    passenger_name = serializers.SerializerMethodField()
+    passenger_phone = serializers.CharField(source="passenger.phone", read_only=True)
+    trip_code = serializers.CharField(source="trip.trip_code", read_only=True)
+    route_label = serializers.SerializerMethodField()
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    category_label = serializers.CharField(source="get_category_display", read_only=True)
+
+    class Meta:
+        model = Feedback
+        fields = [
+            "id", "booking", "trip", "trip_code", "route_label",
+            "passenger_name", "passenger_phone",
+            "rating", "has_complaint", "category", "category_label",
+            "description", "status", "status_label",
+            "operator_response", "admin_response",
+            "created_at", "reviewed_at", "resolved_at",
+        ]
+        read_only_fields = [
+            "status", "operator_response", "admin_response",
+            "created_at", "reviewed_at", "resolved_at",
+        ]
+
+    def get_passenger_name(self, obj):
+        u = obj.passenger
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def get_route_label(self, obj):
+        return f"{obj.trip.route.departure.name} → {obj.trip.route.destination.name}"
+
+
+class FeedbackSubmitSerializer(serializers.Serializer):
+    rating = serializers.IntegerField(min_value=1, max_value=5)
+    has_complaint = serializers.BooleanField(default=False)
+    category = serializers.CharField(required=False, allow_blank=True)
+    description = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        if attrs.get("has_complaint"):
+            if not attrs.get("category"):
+                raise serializers.ValidationError({"category": "Required when submitting a complaint."})
+            if not attrs.get("description", "").strip():
+                raise serializers.ValidationError({"description": "Please describe what happened."})
+        return attrs
+
+
+class FeedbackRespondSerializer(serializers.Serializer):
+    operator_response = serializers.CharField()
+
+
+class AnnouncementSerializer(serializers.ModelSerializer):
+    route_label = serializers.SerializerMethodField()
+    operator_name = serializers.CharField(
+        source="operator.association.association_name", read_only=True
+    )
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Announcement
+        fields = [
+            "id", "title", "body", "active", "route", "route_label",
+            "operator_name", "created_by_name",
+            "created_at", "updated_at", "expires_at",
+        ]
+
+    def get_route_label(self, obj):
+        if not obj.route:
+            return None
+        return f"{obj.route.departure.name} → {obj.route.destination.name}"
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by:
+            return "System"
+        u = obj.created_by
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+
+class AnnouncementWriteSerializer(serializers.ModelSerializer):
+    route_id = serializers.IntegerField(required=False, allow_null=True)
+
+    class Meta:
+        model = Announcement
+        fields = ["title", "body", "route_id", "active", "expires_at"]
+
+class PanicAlertSerializer(serializers.ModelSerializer):
+    trip_code = serializers.CharField(source="booking.trip.trip_code", read_only=True)
+    passenger_name = serializers.SerializerMethodField()
+    passenger_phone = serializers.CharField(source="passenger.phone", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    acknowledged_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PanicAlert
+        fields = [
+            "id", "trip_code", "passenger_name", "passenger_phone",
+            "latitude", "longitude", "message", "status", "status_label",
+            "created_at", "acknowledged_at", "acknowledged_by_name",
+            "resolved_at", "resolution_notes",
+        ]
+
+    def get_passenger_name(self, obj):
+        u = obj.passenger
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def get_acknowledged_by_name(self, obj):
+        if not obj.acknowledged_by:
+            return None
+        u = obj.acknowledged_by
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+

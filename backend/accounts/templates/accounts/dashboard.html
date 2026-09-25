@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>THEMBA — Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>body { font-family: sans-serif; background-color: #0b132b; color: white; }</style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+    <div class="text-center">
+        <h1 class="text-xl font-bold mb-2">Welcome, {{ user.username }}</h1>
+        <p class="text-sm text-slate-400 mb-4">Role: {{ user.role }}</p>
+        <a href="/accounts/logout/" class="text-amber-400 underline text-sm">Logout</a>
+    </div>
+</body>
+</html>
