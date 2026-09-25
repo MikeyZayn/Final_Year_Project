@@ -21,6 +21,7 @@ class UserManager(DjangoUserManager):
         if extra_fields.get("is_superuser") is not True:
             raise ValueError("Superuser must have is_superuser=True.")
         return self.create_user(phone, password, **extra_fields)
+
 class User(AbstractUser):
     class Role(models.TextChoices):
         PASSENGER = "passenger", "Passenger"
@@ -28,15 +29,26 @@ class User(AbstractUser):
         OPERATOR = "operator", "Operator"
         ADMIN = "admin", "Admin"
 
-    role = models.CharField(max_length=20, choices=Role.choices, default= Role.PASSENGER)
+    class AccountStatus(models.TextChoices):
+        ACTIVE = "active", "Active"
+        DISABLED = "disabled", "Disabled"
+        ARCHIVED = "archived", "Archived"
+
+    role = models.CharField(max_length=20, choices=Role.choices, default=Role.PASSENGER)
     phone = models.CharField(max_length=15, unique=True)
+    account_status = models.CharField(
+        max_length=20, choices=AccountStatus.choices, default=AccountStatus.ACTIVE
+    )
+    status_reason = models.TextField(blank=True)
+    status_changed_at = models.DateTimeField(null=True, blank=True)
+    status_changed_by = models.ForeignKey(
+        "self", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="status_changes_made",
+    )
 
     USERNAME_FIELD = "phone"
     REQUIRED_FIELDS = []
     objects = UserManager()
-    def __str__(self):
-        
-        return f"{self.username} ({self.role})"
 
 class PassengerProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="passenger_profile")
@@ -115,3 +127,4 @@ class AdminProfile(models.Model):
     def __str__(self):
         rank_label = self.rank.name if self.rank else "unassigned"
         return f"Admin: {self.user} ({self.institution_name}) @ {rank_label}"
+

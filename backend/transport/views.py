@@ -6,12 +6,14 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from accounts.models import OperatorProfile
+from accounts.models import OperatorProfile, User
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
-    Vehicle, Trip, Booking, VerificationCode, TripFlag, TripAssetChange,
-    Feedback, DriverVehicle, Announcement, PanicAlert,
+    Vehicle, Trip, Booking, VerificationCode,
+    TripFlag, TripAssetChange, Feedback,
+    QueueEntry, DriverVehicle, Announcement, PanicAlert,
 )
+
 from .serializers import (
     RankSerializer, DestinationSerializer, OperatorAtRankSerializer,
     RouteSerializer, RouteWriteSerializer, VehicleSerializer,
@@ -694,20 +696,25 @@ def api_operator_acknowledge(request, feedback_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_admin_feedback(request):
-    """Admin sees all feedback, especially escalated ones."""
     admin_profile = _get_admin_or_none(request)
     if admin_profile is None:
         return Response({"detail": "Not an admin account."}, status=403)
-    qs = Feedback.objects.all().select_related(
+
+    qs = Feedback.objects.filter(
+        trip__route__departure=admin_profile.rank,
+    ).select_related(
         "trip__route__departure", "trip__route__destination",
         "trip__operator__association", "passenger",
     )
-    # by default show escalated + confirmed
+
     scope = request.query_params.get("scope", "escalated")
     if scope == "escalated":
         qs = qs.filter(status=Feedback.Status.ESCALATED)
-    return Response(FeedbackSerializer(qs, many=True).data)
+    elif scope == "complaints":
+        qs = qs.filter(has_complaint=True)
+    # scope == "all" → no filter
 
+    return Response(FeedbackSerializer(qs, many=True).data)
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
@@ -1176,3 +1183,681 @@ def api_my_active_panic(request):
         status=PanicAlert.Status.ACTIVE,
     ).select_related("booking__trip")
     return Response(PanicAlertSerializer(qs, many=True).data)
+
+# ---------- Admin (rank-scoped) ----------
+
+def _admin_rank(admin_profile):
+    return admin_profile.rank
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_pending_memberships(request):
+    """Pending OperatorAtRank requests for this admin's rank."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    if not admin_profile.rank:
+        return Response({"detail": "You are not assigned to a rank."}, status=400)
+
+    qs = OperatorAtRank.objects.filter(
+        rank=admin_profile.rank,
+        status=OperatorAtRank.Status.PENDING,
+    ).select_related("operator__user", "operator__association", "rank")
+    return Response(OperatorAtRankSerializer(qs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_approve_membership(request, membership_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        m = OperatorAtRank.objects.get(pk=membership_id, rank=admin_profile.rank)
+    except OperatorAtRank.DoesNotExist:
+        return Response({"detail": "Membership not found for your rank."}, status=404)
+
+    m.status = OperatorAtRank.Status.ACTIVE
+    m.approved_by = admin_profile
+    m.approved_at = timezone.now()
+    m.save()
+    return Response(OperatorAtRankSerializer(m).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_reject_membership(request, membership_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        m = OperatorAtRank.objects.get(pk=membership_id, rank=admin_profile.rank)
+    except OperatorAtRank.DoesNotExist:
+        return Response({"detail": "Membership not found for your rank."}, status=404)
+
+    m.status = OperatorAtRank.Status.REJECTED
+    m.notes = request.data.get("notes", m.notes)
+    m.approved_by = admin_profile
+    m.approved_at = timezone.now()
+    m.save()
+    return Response(OperatorAtRankSerializer(m).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_trip_flags(request):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    qs = TripFlag.objects.filter(
+        trip__route__departure=admin_profile.rank,
+    ).select_related(
+        "trip__route__departure", "trip__route__destination",
+        "trip__operator__association", "flagged_by",
+        "trip__driver__user", "trip__vehicle",
+    )
+
+    scope = request.query_params.get("scope", "open")
+    if scope == "open":
+        qs = qs.filter(status=TripFlag.Status.OPEN)
+    # scope == "all" → no filter
+
+    return Response(TripFlagSerializer(qs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_acknowledge_flag(request, flag_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        flag = TripFlag.objects.get(pk=flag_id, trip__route__departure=admin_profile.rank)
+    except TripFlag.DoesNotExist:
+        return Response({"detail": "Flag not found."}, status=404)
+
+    flag.status = TripFlag.Status.ACKNOWLEDGED
+    flag.save()
+    return Response(TripFlagSerializer(flag).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_resolve_flag(request, flag_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        flag = TripFlag.objects.get(pk=flag_id, trip__route__departure=admin_profile.rank)
+    except TripFlag.DoesNotExist:
+        return Response({"detail": "Flag not found."}, status=404)
+
+    flag.status = TripFlag.Status.RESOLVED
+    flag.resolved_by = request.user
+    flag.resolved_at = timezone.now()
+    flag.resolution_notes = request.data.get("notes", "")
+    flag.save()
+    return Response(TripFlagSerializer(flag).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_cancel_trip(request, trip_id):
+    """Admin cancels a trip. Marks all unboarded bookings as cancelled."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, route__departure=admin_profile.rank)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found."}, status=404)
+
+    trip.status = Trip.Status.CANCELLED
+    trip.save()
+
+    trip.bookings.filter(
+        status__in=[Booking.Status.RESERVED, Booking.Status.BOARDED]
+    ).update(status=Booking.Status.CANCELLED)
+
+    return Response(TripSerializer(trip).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_me(request):
+    """Info about the logged-in admin (which rank they manage)."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    return Response({
+        "institution_name": admin_profile.institution_name,
+        "rank": RankSerializer(admin_profile.rank).data if admin_profile.rank else None,
+    })
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_membership_detail(request, membership_id):
+    """Full operator details for admin verification."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        m = OperatorAtRank.objects.get(pk=membership_id, rank=admin_profile.rank)
+    except OperatorAtRank.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+
+    op = m.operator
+    u = op.user
+    return Response({
+        "id": m.id,
+        "status": m.status,
+        "notes": m.notes,
+        "requested_at": m.requested_at,
+        "approved_at": m.approved_at,
+        "rank": RankSerializer(m.rank).data,
+        "operator": {
+            "id": op.id,
+            "name": f"{u.first_name} {u.last_name}".strip() or u.phone,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "phone": u.phone,
+            "email": u.email,
+            "association_code": op.association.code,
+            "association_name": op.association.association_name,
+            "account_created": u.date_joined,
+            "membership_count": OperatorAtRank.objects.filter(operator=op).count(),
+            "active_memberships": OperatorAtRank.objects.filter(
+                operator=op, status=OperatorAtRank.Status.ACTIVE
+            ).count(),
+            "routes_served": Route.objects.filter(
+                trips__operator=op
+            ).distinct().count(),
+            "trips_operated": Trip.objects.filter(operator=op).count(),
+        },
+    })
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_rank_trips(request):
+    """Trips departing from this admin's rank, ordered by date/time = the queue."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    qs = Trip.objects.filter(
+        route__departure=admin_profile.rank,
+    ).select_related(
+        "route__departure", "route__destination",
+        "operator__association", "vehicle", "driver__user",
+    ).order_by("departure_date", "expected_departure_time")
+
+    date_filter = request.query_params.get("date")
+    if date_filter:
+        qs = qs.filter(departure_date=date_filter)
+
+    return Response(TripSerializer(qs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_schedule_trip(request):
+    """Admin schedules a new trip from their rank."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    route_id = request.data.get("route_id")
+    operator_id = request.data.get("operator_id")
+    departure_date = request.data.get("departure_date")
+    time_str = request.data.get("expected_departure_time")  # "HH:MM" or null
+    capacity = request.data.get("seat_capacity", 15)
+    driver_id = request.data.get("driver_id")
+    vehicle_id = request.data.get("vehicle_id")
+    notes = request.data.get("notes", "")
+
+    if not (route_id and operator_id and departure_date):
+        return Response(
+            {"detail": "route_id, operator_id and departure_date are required."},
+            status=400,
+        )
+
+    try:
+        route = Route.objects.get(pk=route_id, departure=admin_profile.rank)
+    except Route.DoesNotExist:
+        return Response({"detail": "Route not found or not from your rank."}, status=404)
+
+    try:
+        operator = OperatorProfile.objects.get(pk=operator_id)
+    except OperatorProfile.DoesNotExist:
+        return Response({"detail": "Operator not found."}, status=404)
+
+    # Operator must be active at this rank
+    if not OperatorAtRank.objects.filter(
+        operator=operator, rank=admin_profile.rank,
+        status=OperatorAtRank.Status.ACTIVE,
+    ).exists():
+        return Response(
+            {"detail": "That operator is not active at your rank."}, status=400
+        )
+
+    # Optional driver and vehicle
+    driver = None
+    if driver_id:
+        from accounts.models import DriverProfile
+        driver = DriverProfile.objects.filter(pk=driver_id).first()
+
+    vehicle = None
+    if vehicle_id:
+        vehicle = Vehicle.objects.filter(pk=vehicle_id).first()
+
+    # Time parsing
+    from datetime import time as dt_time
+    parsed_time = None
+    if time_str:
+        try:
+            hh, mm = time_str.split(":")[:2]
+            parsed_time = dt_time(int(hh), int(mm))
+        except Exception:
+            return Response({"detail": "Invalid time format, use HH:MM."}, status=400)
+
+    trip = Trip.objects.create(
+        operator=operator,
+        route=route,
+        departure_date=departure_date,
+        expected_departure_time=parsed_time,
+        seat_capacity=int(capacity) if capacity else 15,
+        driver=driver,
+        vehicle=vehicle,
+        notes=notes,
+        trip_code=_generate_trip_code(route),
+    )
+    return Response(TripSerializer(trip).data, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_available_for_rank(request):
+    """Data the admin needs to schedule: routes from their rank, active operators,
+    active drivers and vehicles."""
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    routes = Route.objects.filter(departure=admin_profile.rank, active=True)
+    route_data = RouteSerializer(routes, many=True).data
+
+    memberships = OperatorAtRank.objects.filter(
+        rank=admin_profile.rank, status=OperatorAtRank.Status.ACTIVE,
+    ).select_related("operator__user", "operator__association")
+    operator_data = [
+        {
+            "id": m.operator.id,
+            "name": f"{m.operator.user.first_name} {m.operator.user.last_name}".strip()
+                    or m.operator.user.phone,
+            "association": m.operator.association.association_name,
+        }
+        for m in memberships
+    ]
+
+    from accounts.models import DriverProfile
+    drivers = DriverProfile.objects.filter(
+        status=DriverProfile.VerificationStatus.VERIFIED
+    ).select_related("user")
+    driver_data = [
+        {
+            "id": d.id,
+            "name": f"{d.user.first_name} {d.user.last_name}".strip() or d.user.phone,
+            "phone": d.user.phone,
+        }
+        for d in drivers
+    ]
+
+    vehicles = Vehicle.objects.filter(roadworthy=True)
+    vehicle_data = VehicleSerializer(vehicles, many=True).data
+
+    return Response({
+        "routes": route_data,
+        "operators": operator_data,
+        "drivers": driver_data,
+        "vehicles": vehicle_data,
+    })
+
+# ---------- Edit trip ----------
+
+@api_view(["PATCH"])
+@permission_classes([IsAuthenticated])
+def api_admin_edit_trip(request, trip_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, route__departure=admin_profile.rank)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found."}, status=404)
+
+    from datetime import time as dt_time
+    from accounts.models import DriverProfile
+
+    if "route_id" in request.data:
+        r = Route.objects.filter(pk=request.data["route_id"], departure=admin_profile.rank).first()
+        if not r:
+            return Response({"detail": "Route not from your rank."}, status=400)
+        trip.route = r
+    if "departure_date" in request.data:
+        trip.departure_date = request.data["departure_date"]
+    if "expected_departure_time" in request.data:
+        t = request.data["expected_departure_time"]
+        if t:
+            try:
+                hh, mm = t.split(":")[:2]
+                trip.expected_departure_time = dt_time(int(hh), int(mm))
+            except Exception:
+                return Response({"detail": "Invalid time."}, status=400)
+        else:
+            trip.expected_departure_time = None
+    if "seat_capacity" in request.data:
+        trip.seat_capacity = int(request.data["seat_capacity"] or 15)
+    if "driver_id" in request.data:
+        did = request.data["driver_id"]
+        trip.driver = DriverProfile.objects.filter(pk=did).first() if did else None
+    if "vehicle_id" in request.data:
+        vid = request.data["vehicle_id"]
+        trip.vehicle = Vehicle.objects.filter(pk=vid).first() if vid else None
+    if "status" in request.data:
+        valid = [c[0] for c in Trip.Status.choices]
+        if request.data["status"] not in valid:
+            return Response({"detail": "Invalid status."}, status=400)
+        trip.status = request.data["status"]
+    if "notes" in request.data:
+        trip.notes = request.data["notes"]
+
+    trip.save()
+    return Response(TripSerializer(trip).data)
+
+
+# ---------- Manage queue ----------
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_queue(request):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    rank = admin_profile.rank
+
+    if request.method == "GET":
+        qs = QueueEntry.objects.filter(rank=rank, active=True).select_related(
+            "vehicle", "driver__user", "operator__user",
+        )
+        return Response([
+            {
+                "id": e.id,
+                "position": e.position,
+                "vehicle_id": e.vehicle_id,
+                "plate_number": e.vehicle.plate_number,
+                "vehicle_label": f"{e.vehicle.make} {e.vehicle.model}".strip(),
+                "driver_name": (
+                    f"{e.driver.user.first_name} {e.driver.user.last_name}".strip()
+                    if e.driver else None
+                ),
+                "operator_name": (
+                    f"{e.operator.user.first_name} {e.operator.user.last_name}".strip()
+                    if e.operator else None
+                ),
+            }
+            for e in qs
+        ])
+
+    vehicle_id = request.data.get("vehicle_id")
+    if not vehicle_id:
+        return Response({"detail": "vehicle_id is required."}, status=400)
+    vehicle = Vehicle.objects.filter(pk=vehicle_id).first()
+    if not vehicle:
+        return Response({"detail": "Vehicle not found."}, status=404)
+
+    driver_id = request.data.get("driver_id")
+    operator_id = request.data.get("operator_id")
+    from accounts.models import DriverProfile
+    driver = DriverProfile.objects.filter(pk=driver_id).first() if driver_id else None
+    operator = OperatorProfile.objects.filter(pk=operator_id).first() if operator_id else None
+
+    last_pos = QueueEntry.objects.filter(rank=rank, active=True).order_by("-position").first()
+    next_pos = (last_pos.position + 1) if last_pos else 1
+
+    entry = QueueEntry.objects.create(
+        rank=rank, vehicle=vehicle, driver=driver, operator=operator,
+        position=next_pos, added_by=request.user,
+    )
+    return Response({"id": entry.id, "position": entry.position}, status=201)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_queue_remove(request, entry_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        entry = QueueEntry.objects.get(pk=entry_id, rank=admin_profile.rank)
+    except QueueEntry.DoesNotExist:
+        return Response({"detail": "Entry not found."}, status=404)
+
+    entry.active = False
+    entry.save()
+
+    remaining = QueueEntry.objects.filter(
+        rank=admin_profile.rank, active=True,
+    ).order_by("position")
+    for i, e in enumerate(remaining, start=1):
+        if e.position != i:
+            e.position = i
+            e.save()
+    return Response(status=204)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_queue_move(request, entry_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    direction = request.data.get("direction")
+    if direction not in ("up", "down"):
+        return Response({"detail": "direction must be 'up' or 'down'."}, status=400)
+
+    try:
+        entry = QueueEntry.objects.get(pk=entry_id, rank=admin_profile.rank, active=True)
+    except QueueEntry.DoesNotExist:
+        return Response({"detail": "Entry not found."}, status=404)
+
+    current_pos = entry.position
+    target_pos = current_pos - 1 if direction == "up" else current_pos + 1
+
+    swap = QueueEntry.objects.filter(
+        rank=admin_profile.rank, active=True, position=target_pos,
+    ).first()
+    if not swap:
+        return Response({"detail": "Already at boundary."}, status=400)
+
+    entry.position, swap.position = target_pos, current_pos
+    entry.save()
+    swap.save()
+    return Response({"ok": True})
+
+
+# ---------- Account management ----------
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_users(request):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    q = request.query_params.get("q", "").strip()
+    role = request.query_params.get("role", "").strip()
+
+    qs = User.objects.exclude(is_superuser=True)
+    if q:
+        qs = qs.filter(
+            models.Q(phone__icontains=q) |
+            models.Q(first_name__icontains=q) |
+            models.Q(last_name__icontains=q)
+        )
+    if role:
+        qs = qs.filter(role=role)
+
+    qs = qs.order_by("-date_joined")[:50]
+    return Response([
+        {
+            "id": u.id,
+            "phone": u.phone,
+            "name": f"{u.first_name} {u.last_name}".strip() or u.phone,
+            "role": u.role,
+            "account_status": u.account_status,
+            "status_reason": u.status_reason,
+            "date_joined": u.date_joined,
+            "is_active": u.is_active,
+        }
+        for u in qs
+    ])
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_disable_user(request, user_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    if admin_profile.user_id == user_id:
+        return Response({"detail": "You cannot disable your own account."}, status=400)
+
+    try:
+        u = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        return Response({"detail": "User not found."}, status=404)
+
+    u.account_status = User.AccountStatus.DISABLED
+    u.status_reason = request.data.get("reason", "").strip()
+    u.status_changed_at = timezone.now()
+    u.status_changed_by = request.user
+    u.is_active = False
+    u.save()
+
+    from rest_framework.authtoken.models import Token
+    Token.objects.filter(user=u).delete()
+
+    return Response({"ok": True})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_enable_user(request, user_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    try:
+        u = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        return Response({"detail": "User not found."}, status=404)
+
+    u.account_status = User.AccountStatus.ACTIVE
+    u.status_reason = ""
+    u.status_changed_at = timezone.now()
+    u.status_changed_by = request.user
+    u.is_active = True
+    u.save()
+    return Response({"ok": True})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_archive_user(request, user_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None:
+        return Response({"detail": "Not an admin account."}, status=403)
+    if admin_profile.user_id == user_id:
+        return Response({"detail": "You cannot archive your own account."}, status=400)
+    try:
+        u = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        return Response({"detail": "User not found."}, status=404)
+
+    u.account_status = User.AccountStatus.ARCHIVED
+    u.status_reason = request.data.get("reason", "").strip()
+    u.status_changed_at = timezone.now()
+    u.status_changed_by = request.user
+    u.is_active = False
+    u.save()
+
+    from rest_framework.authtoken.models import Token
+    Token.objects.filter(user=u).delete()
+    return Response({"ok": True})
+
+
+# ---------- Extended driver info ----------
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_driver_detail(request, driver_id):
+    admin_profile = _get_admin_or_none(request)
+    operator = _get_operator_or_none(request)
+    if admin_profile is None and operator is None:
+        return Response({"detail": "Admin or operator only."}, status=403)
+
+    from accounts.models import DriverProfile
+    try:
+        d = DriverProfile.objects.select_related("user", "association").get(pk=driver_id)
+    except DriverProfile.DoesNotExist:
+        return Response({"detail": "Driver not found."}, status=404)
+
+    u = d.user
+    trips = Trip.objects.filter(driver=d)
+    trip_count = trips.count()
+    completed = trips.filter(status=Trip.Status.COMPLETED).count()
+
+    from .models import Feedback
+    feedback = Feedback.objects.filter(trip__driver=d)
+    rating_qs = feedback.exclude(rating__isnull=True)
+    avg = rating_qs.aggregate(avg=models.Avg("rating"))["avg"]
+
+    vehicles = DriverVehicle.objects.filter(driver=d, active=True).select_related("vehicle")
+
+    return Response({
+        "id": d.id,
+        "user_id": u.id,
+        "name": f"{u.first_name} {u.last_name}".strip() or u.phone,
+        "phone": u.phone,
+        "email": u.email,
+        "license_number": d.license_number,
+        "id_number": d.id_number,
+        "pdp_number": d.pdp_number,
+        "association_name": d.association.association_name if d.association else None,
+        "association_code": d.association.code if d.association else None,
+        "internal_status": d.status,
+        "external_verification_status": d.external_verification_status,
+        "external_verification_reason": d.external_verification_reason,
+        "account_status": u.account_status,
+        "joined": u.date_joined,
+        "trip_count": trip_count,
+        "completed_trips": completed,
+        "rating_avg": round(avg, 2) if avg else None,
+        "rating_count": rating_qs.count(),
+        "complaints_count": feedback.filter(has_complaint=True).count(),
+        "confirmed_incidents": feedback.filter(
+            status=Feedback.Status.CONFIRMED_INCIDENT
+        ).count(),
+        "vehicles": [
+            {
+                "id": dv.vehicle.id,
+                "plate_number": dv.vehicle.plate_number,
+                "make": dv.vehicle.make,
+                "model": dv.vehicle.model,
+                "roadworthy": dv.vehicle.roadworthy,
+            }
+            for dv in vehicles
+        ],
+    })

@@ -46,6 +46,19 @@ urlpatterns = [
     path("api/admin/feedback/<int:feedback_id>/dismiss/", views.api_admin_dismiss, name="api_admin_dismiss"),
     path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
     path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
+    # Admin (rank-scoped)
+    path("api/admin/me/",                          views.api_admin_me,                       name="api_admin_me"),
+    path("api/admin/pending-memberships/",         views.api_admin_pending_memberships,      name="api_admin_pending_memberships"),
+    path("api/admin/memberships/<int:membership_id>/approve/", views.api_admin_approve_membership, name="api_admin_approve_membership"),
+    path("api/admin/memberships/<int:membership_id>/reject/",  views.api_admin_reject_membership,  name="api_admin_reject_membership"),
+    path("api/admin/trip-flags/",                  views.api_admin_trip_flags,               name="api_admin_trip_flags"),
+    path("api/admin/trip-flags/<int:flag_id>/acknowledge/", views.api_admin_acknowledge_flag, name="api_admin_acknowledge_flag"),
+    path("api/admin/trip-flags/<int:flag_id>/resolve/",     views.api_admin_resolve_flag,     name="api_admin_resolve_flag"),
+    path("api/admin/trips/<int:trip_id>/cancel/",  views.api_admin_cancel_trip,              name="api_admin_cancel_trip"),
+    path("api/admin/memberships/<int:membership_id>/",         views.api_admin_membership_detail,   name="api_admin_membership_detail"),
+    path("api/admin/rank-trips/",                              views.api_admin_rank_trips,          name="api_admin_rank_trips"),
+    path("api/admin/schedule-trip/",                           views.api_admin_schedule_trip,       name="api_admin_schedule_trip"),
+    path("api/admin/available-for-rank/",                      views.api_admin_available_for_rank,  name="api_admin_available_for_rank"),
 
     # Driver
     path("api/driver/profile/",                        views.api_driver_profile,          name="api_driver_profile"),
@@ -66,4 +79,21 @@ urlpatterns = [
     path("api/operator/alerts/<int:alert_id>/acknowledge/", views.api_operator_acknowledge_alert, name="api_operator_acknowledge_alert"),
     path("api/operator/alerts/<int:alert_id>/resolve/",     views.api_operator_resolve_alert,     name="api_operator_resolve_alert"),
 
+
+    # Admin — edit trip
+    path("api/admin/trips/<int:trip_id>/edit/", views.api_admin_edit_trip, name="api_admin_edit_trip"),
+
+    # Admin — queue
+    path("api/admin/queue/", views.api_admin_queue, name="api_admin_queue"),
+    path("api/admin/queue/<int:entry_id>/remove/", views.api_admin_queue_remove, name="api_admin_queue_remove"),
+    path("api/admin/queue/<int:entry_id>/move/", views.api_admin_queue_move, name="api_admin_queue_move"),
+
+    # Admin — accounts
+    path("api/admin/users/", views.api_admin_users, name="api_admin_users"),
+    path("api/admin/users/<int:user_id>/disable/", views.api_admin_disable_user, name="api_admin_disable_user"),
+    path("api/admin/users/<int:user_id>/enable/", views.api_admin_enable_user, name="api_admin_enable_user"),
+    path("api/admin/users/<int:user_id>/archive/", views.api_admin_archive_user, name="api_admin_archive_user"),
+
+    # Admin/operator — driver detail
+    path("api/admin/drivers/<int:driver_id>/", views.api_admin_driver_detail, name="api_admin_driver_detail"),
 ]   

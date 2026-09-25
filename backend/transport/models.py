@@ -435,3 +435,30 @@ class PanicAlert(models.Model):
 
     def __str__(self):
         return f"Panic from {self.passenger} on {self.booking.trip.trip_code} ({self.status})"
+
+class QueueEntry(models.Model):
+    """Ordered vehicle queue at a rank. Set by admin, drawn down by operators."""
+
+    rank = models.ForeignKey(Rank, on_delete=models.CASCADE, related_name="queue_entries")
+    vehicle = models.ForeignKey(Vehicle, on_delete=models.CASCADE, related_name="queue_entries")
+    driver = models.ForeignKey(
+        "accounts.DriverProfile", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="queue_entries",
+    )
+    operator = models.ForeignKey(
+        OperatorProfile, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="queue_entries",
+    )
+    position = models.PositiveIntegerField()
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name="queue_entries_added",
+    )
+    added_at = models.DateTimeField(auto_now_add=True)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["rank", "position"]
+
+    def __str__(self):
+        return f"#{self.position} {self.vehicle.plate_number} @ {self.rank.name}"

@@ -5,6 +5,7 @@ import { useAuth } from './auth';
 const roles = ['passenger', 'driver', 'operator', 'administrator'];
 import api from './api';
 import DriverPage from './pages/DriverPage.jsx';
+import ThembaMap from './components/ThembaMap.jsx';
 
 const demoUsers = {
   passenger: 'Sibusiso Dlamini',
@@ -926,6 +927,7 @@ function RouteMapPanel({ trip }) {
 }
 
 function Passenger({ notify }) {
+  // ----- shared state -----
   const [departure, setDeparture] = useState('');
   const [destination, setDestination] = useState('');
   const [trips, setTrips] = useState([]);
@@ -937,7 +939,9 @@ function Passenger({ notify }) {
   const [ratingFormFor, setRatingFormFor] = useState(null);
   const [announcements, setAnnouncements] = useState([]);
   const [panicAlert, setPanicAlert] = useState(null);
+  const [selectedTrip, setSelectedTrip] = useState(null);
 
+  // ----- loaders -----
   async function loadTrips(params = {}) {
     setLoading(true);
     setError('');
@@ -994,11 +998,12 @@ function Passenger({ notify }) {
     return () => clearInterval(t);
   }, []);
 
+  // ----- actions -----
   async function bookTrip(tripId) {
     setBookingId(tripId);
     try {
       await api.post('/transport/api/my-bookings/', { trip_id: tripId });
-      notify('Booking confirmed.');
+      notify('Booking confirmed. Show up at the rank and tell the operator your name.');
       await loadTrips();
       await loadBookings();
     } catch (err) {
@@ -1009,7 +1014,7 @@ function Passenger({ notify }) {
   }
 
   async function cancelBooking(bId) {
-    if (!window.confirm('Cancel this booking?')) return;
+    if (!window.confirm('Cancel this booking? You can rebook if seats are still available.')) return;
     try {
       await api.post(`/transport/api/my-bookings/${bId}/cancel/`);
       notify('Booking cancelled.');
@@ -1025,7 +1030,7 @@ function Passenger({ notify }) {
     try {
       const { data } = await api.post(`/transport/api/my-bookings/${bId}/panic/`, { message: '' });
       setPanicAlert(data);
-      notify('Panic alert sent.');
+      notify('Panic alert sent. The operator has been notified.');
     } catch (err) {
       notify(err.response?.data?.detail || 'Could not send alert.');
     }
@@ -1033,7 +1038,7 @@ function Passenger({ notify }) {
 
   async function cancelPanic() {
     if (!panicAlert) return;
-    if (!window.confirm('Cancel the panic alert?')) return;
+    if (!window.confirm('Cancel the panic alert? Only do this if it was a mistake.')) return;
     try {
       await api.post(`/transport/api/panic/${panicAlert.id}/cancel/`);
       setPanicAlert(null);
@@ -1044,190 +1049,49 @@ function Passenger({ notify }) {
   }
 
   function searchTrips() {
+    setSelectedTrip(null);
     loadTrips({ from: departure.trim(), to: destination.trim() });
   }
 
+  // ----- render -----
   return (
     <>
-      {panicAlert && (
-        <div className="module module-wide" style={{ borderColor: 'var(--danger)', borderWidth: 2 }}>
-          <div className="module-heading">
-            <span style={{ color: 'var(--danger)' }}>⚠ PANIC ALERT ACTIVE</span>
-          </div>
-          <p className="muted">
-            Your alert was sent to the operator at {new Date(panicAlert.created_at).toLocaleTimeString()}.
-          </p>
-          <button className="secondary-button" onClick={cancelPanic} type="button">
-            Cancel alert (false alarm)
-          </button>
-        </div>
+      <PassengerPanicBanner alert={panicAlert} onCancel={cancelPanic} />
+
+      <PassengerTripSearch
+        departure={departure}
+        destination={destination}
+        setDeparture={setDeparture}
+        setDestination={setDestination}
+        onSearch={searchTrips}
+      />
+
+      <PassengerAnnouncements announcements={announcements} />
+
+      <PassengerBookings
+        bookings={bookings}
+        feedbackList={feedbackList}
+        onRate={setRatingFormFor}
+        onCancel={cancelBooking}
+        onPanic={raisePanic}
+      />
+
+      <PassengerFeedbackList feedbackList={feedbackList} />
+
+      <PassengerUpcomingTrips
+        trips={trips}
+        bookings={bookings}
+        loading={loading}
+        error={error}
+        bookingId={bookingId}
+        onBook={bookTrip}
+        onViewMap={setSelectedTrip}
+        selectedTripId={selectedTrip?.id}
+      />
+
+      {selectedTrip && (
+        <PassengerRouteMap trip={selectedTrip} notify={notify} />
       )}
-
-      <div className="dashboard-grid">
-        <article className="module module-wide">
-          <div className="module-heading">
-            <span>Find a trip</span>
-            <span className="module-number">01</span>
-          </div>
-          <div className="form-grid">
-            <label>
-              From (rank or area)
-              <input value={departure} onChange={(e) => setDeparture(e.target.value)} placeholder="Empangeni" />
-            </label>
-            <label>
-              To (destination)
-              <input value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="Kwa-Dlangezwa" />
-            </label>
-          </div>
-          <button className="primary-button" onClick={searchTrips} type="button">
-            Search trips <span>→</span>
-          </button>
-        </article>
-      </div>
-
-      {announcements.length > 0 && (
-        <article className="module module-wide">
-          <div className="module-heading">
-            <span>Service announcements</span>
-            <span className="module-number">{announcements.length}</span>
-          </div>
-          {announcements.map((a) => (
-            <div key={a.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
-              <strong>{a.title}</strong>
-              <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
-                {a.operator_name}
-                {a.route_label ? ` · ${a.route_label}` : ''}
-                {' · '}{new Date(a.created_at).toLocaleString()}
-              </small>
-              <p className="muted" style={{ marginTop: 6 }}>{a.body}</p>
-            </div>
-          ))}
-        </article>
-      )}
-
-      {bookings.length > 0 && (
-        <article className="module module-wide">
-          <div className="module-heading">
-            <span>My bookings</span>
-            <span className="module-number">{bookings.length}</span>
-          </div>
-          {bookings.map((b) => (
-            <div className="trip-row" key={b.id}>
-              <span>
-                <strong>{b.route_label}</strong>
-                <small>{b.trip_code} · {b.departure_date} · {b.status}</small>
-              </span>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                {b.status === 'completed' && !feedbackList.some((f) => f.booking === b.id) && (
-                  <button className="primary-button" onClick={() => setRatingFormFor(b.id)} type="button">
-                    Rate this trip
-                  </button>
-                )}
-                {(b.status === 'reserved' || b.status === 'boarded') && (
-                  <button className="danger-button" onClick={() => cancelBooking(b.id)} type="button">
-                    Cancel
-                  </button>
-                )}
-                {b.status === 'boarded' && (
-                  <button
-                    className="danger-button"
-                    style={{ background: 'var(--danger)', color: 'white', fontWeight: 700 }}
-                    onClick={() => raisePanic(b.id)}
-                    type="button"
-                  >
-                    PANIC
-                  </button>
-                )}
-                <span className="status-pill">{b.status}</span>
-              </div>
-            </div>
-          ))}
-        </article>
-      )}
-
-      {feedbackList.length > 0 && (
-        <article className="module module-wide">
-          <div className="module-heading">
-            <span>My feedback</span>
-            <span className="module-number">{feedbackList.length}</span>
-          </div>
-          {feedbackList.map((f) => (
-            <div key={f.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-                <span>
-                  <strong>{f.trip_code} · {f.rating}★</strong>
-                  <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
-                    {f.route_label}
-                    {f.has_complaint ? ` · Complaint: ${f.category_label}` : ''}
-                  </small>
-                </span>
-                <span
-                  className="status-pill"
-                  style={{
-                    borderColor: f.status === 'resolved' ? 'var(--success)' : 'var(--accent)',
-                    color: f.status === 'resolved' ? 'var(--success)' : 'var(--accent)',
-                  }}
-                >
-                  {f.status_label}
-                </span>
-              </div>
-              {f.has_complaint && f.description && (
-                <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
-                  <em>You wrote:</em> {f.description}
-                </p>
-              )}
-              {f.operator_response && (
-                <p className="muted" style={{ marginTop: 8, fontSize: 13, paddingLeft: 12, borderLeft: '2px solid var(--success)' }}>
-                  <em>Operator replied:</em> {f.operator_response}
-                </p>
-              )}
-            </div>
-          ))}
-        </article>
-      )}
-
-      <article className="module module-wide">
-        <div className="module-heading">
-          <span>Upcoming trips</span>
-          <span className="module-number">{trips.length}</span>
-        </div>
-        {loading && <p className="muted">Loading trips…</p>}
-        {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
-        {!loading && !error && trips.length === 0 && (
-          <p className="muted">No upcoming trips match.</p>
-        )}
-        {!loading && trips.map((trip) => {
-          const alreadyBooked = bookings.some((b) => b.trip === trip.id);
-          const isFull = trip.seats_available <= 0;
-          return (
-            <div className="trip-row" key={trip.id}>
-              <span>
-                <strong>{trip.route.departure.name} → {trip.route.destination.name}</strong>
-                <small>
-                  {trip.trip_code} · {trip.departure_date}
-                  {trip.expected_departure_time ? ` · ${trip.expected_departure_time.slice(0, 5)}` : ''}
-                  {' · '}{trip.operator_name}
-                  {' · '}{trip.seats_available} seats
-                </small>
-              </span>
-              {alreadyBooked ? (
-                <span className="status-pill">Booked</span>
-              ) : isFull ? (
-                <span className="status-pill" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }}>Full</span>
-              ) : (
-                <button
-                  className="primary-button"
-                  onClick={() => bookTrip(trip.id)}
-                  disabled={bookingId === trip.id}
-                  type="button"
-                >
-                  {bookingId === trip.id ? 'Booking…' : 'Book seat'}
-                </button>
-              )}
-            </div>
-          );
-        })}
-      </article>
 
       {ratingFormFor && (
         <RatingModal
@@ -1240,6 +1104,318 @@ function Passenger({ notify }) {
     </>
   );
 }
+
+function PassengerPanicBanner({ alert, onCancel }) {
+  if (!alert) return null;
+  return (
+    <div className="module module-wide" style={{ borderColor: 'var(--danger)', borderWidth: 2 }}>
+      <div className="module-heading">
+        <span style={{ color: 'var(--danger)' }}>⚠ PANIC ALERT ACTIVE</span>
+      </div>
+      <p className="muted">
+        Your alert was sent to the operator at {new Date(alert.created_at).toLocaleTimeString()}.
+        Stay where you are if it's safe to do so.
+      </p>
+      <button className="secondary-button" onClick={onCancel} type="button">
+        Cancel alert (false alarm)
+      </button>
+    </div>
+  );
+}
+
+function PassengerTripSearch({ departure, destination, setDeparture, setDestination, onSearch }) {
+  return (
+    <div className="dashboard-grid">
+      <article className="module module-wide">
+        <div className="module-heading">
+          <span>Find a trip</span>
+          <span className="module-number">01</span>
+        </div>
+        <div className="form-grid">
+          <label>
+            From (rank or area)
+            <input
+              value={departure}
+              onChange={(e) => setDeparture(e.target.value)}
+              placeholder="Empangeni"
+            />
+          </label>
+          <label>
+            To (destination)
+            <input
+              value={destination}
+              onChange={(e) => setDestination(e.target.value)}
+              placeholder="Kwa-Dlangezwa"
+            />
+          </label>
+        </div>
+        <button className="primary-button" onClick={onSearch} type="button">
+          Search trips <span>→</span>
+        </button>
+      </article>
+    </div>
+  );
+}
+
+function PassengerAnnouncements({ announcements }) {
+  if (!announcements.length) return null;
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Service announcements</span>
+        <span className="module-number">{announcements.length}</span>
+      </div>
+      {announcements.map((a) => (
+        <div key={a.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+          <strong>{a.title}</strong>
+          <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+            {a.operator_name}
+            {a.route_label ? ` · ${a.route_label}` : ''}
+            {' · '}{new Date(a.created_at).toLocaleString()}
+          </small>
+          <p className="muted" style={{ marginTop: 6 }}>{a.body}</p>
+        </div>
+      ))}
+    </article>
+  );
+}
+
+function PassengerBookings({ bookings, feedbackList, onRate, onCancel, onPanic }) {
+  if (!bookings.length) return null;
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>My bookings</span>
+        <span className="module-number">{bookings.length}</span>
+      </div>
+      {bookings.map((b) => {
+        const alreadyRated = feedbackList.some((f) => f.booking === b.id);
+        return (
+          <div className="trip-row" key={b.id}>
+            <span>
+              <strong>{b.route_label}</strong>
+              <small>{b.trip_code} · {b.departure_date} · {b.status}</small>
+            </span>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              {b.status === 'completed' && !alreadyRated && (
+                <button className="primary-button" onClick={() => onRate(b.id)} type="button">
+                  Rate this trip
+                </button>
+              )}
+              {(b.status === 'reserved' || b.status === 'boarded') && (
+                <button className="danger-button" onClick={() => onCancel(b.id)} type="button">
+                  Cancel
+                </button>
+              )}
+              {b.status === 'boarded' && (
+                <button
+                  className="danger-button"
+                  style={{ background: 'var(--danger)', color: 'white', fontWeight: 700 }}
+                  onClick={() => onPanic(b.id)}
+                  type="button"
+                >
+                  PANIC
+                </button>
+              )}
+              <span className="status-pill">{b.status}</span>
+            </div>
+          </div>
+        );
+      })}
+    </article>
+  );
+}
+
+function PassengerFeedbackList({ feedbackList }) {
+  if (!feedbackList.length) return null;
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>My feedback</span>
+        <span className="module-number">{feedbackList.length}</span>
+      </div>
+      {feedbackList.map((f) => (
+        <div key={f.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+            <span>
+              <strong>{f.trip_code} · {f.rating}★</strong>
+              <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+                {f.route_label}
+                {f.has_complaint ? ` · Complaint: ${f.category_label}` : ''}
+              </small>
+            </span>
+            <span
+              className="status-pill"
+              style={{
+                borderColor: f.status === 'resolved' ? 'var(--success)' :
+                             f.status === 'confirmed_incident' ? 'var(--danger)' : 'var(--accent)',
+                color: f.status === 'resolved' ? 'var(--success)' :
+                       f.status === 'confirmed_incident' ? 'var(--danger)' : 'var(--accent)',
+              }}
+            >
+              {f.status_label}
+            </span>
+          </div>
+          {f.has_complaint && f.description && (
+            <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
+              <em>You wrote:</em> {f.description}
+            </p>
+          )}
+          {f.operator_response && (
+            <p className="muted" style={{ marginTop: 8, fontSize: 13, paddingLeft: 12, borderLeft: '2px solid var(--success)' }}>
+              <em>Operator replied:</em> {f.operator_response}
+            </p>
+          )}
+          {f.admin_response && (
+            <p className="muted" style={{ marginTop: 8, fontSize: 13, paddingLeft: 12, borderLeft: '2px solid var(--danger)' }}>
+              <em>Admin:</em> {f.admin_response}
+            </p>
+          )}
+        </div>
+      ))}
+    </article>
+  );
+}
+
+function PassengerUpcomingTrips({
+  trips, bookings, loading, error, bookingId, onBook, onViewMap, selectedTripId,
+}) {
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Upcoming trips</span>
+        <span className="module-number">{trips.length}</span>
+      </div>
+
+      {loading && <p className="muted">Loading trips…</p>}
+      {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+      {!loading && !error && trips.length === 0 && (
+        <p className="muted">No upcoming trips match. Try clearing the search.</p>
+      )}
+
+      {!loading && trips.map((trip) => {
+        const alreadyBooked = bookings.some((b) => b.trip === trip.id);
+        const isFull = trip.seats_available <= 0;
+        const isSelected = selectedTripId === trip.id;
+        return (
+          <div
+            className={isSelected ? 'trip-row active' : 'trip-row'}
+            key={trip.id}
+            style={{ alignItems: 'center' }}
+          >
+            <span>
+              <strong>
+                {trip.route.departure.name} → {trip.route.destination.name}
+              </strong>
+              <small>
+                {trip.trip_code} · {trip.departure_date}
+                {trip.expected_departure_time ? ` · ${trip.expected_departure_time.slice(0, 5)}` : ''}
+                {' · '}{trip.operator_name}
+                {' · '}{trip.seats_available} seats
+                {trip.fare ? ` · R${trip.fare}` : ''}
+              </small>
+            </span>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <button
+                className="secondary-button"
+                onClick={() => onViewMap(trip)}
+                type="button"
+              >
+                {isSelected ? 'Hide route' : 'View route'}
+              </button>
+              {alreadyBooked ? (
+                <span className="status-pill">Booked</span>
+              ) : isFull ? (
+                <span className="status-pill" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }}>
+                  Full
+                </span>
+              ) : (
+                <button
+                  className="primary-button"
+                  onClick={() => onBook(trip.id)}
+                  disabled={bookingId === trip.id}
+                  type="button"
+                >
+                  {bookingId === trip.id ? 'Booking…' : 'Book seat'}
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </article>
+  );
+}
+
+function PassengerRouteMap({ trip, notify }) {
+  const [geometry, setGeometry] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const dep = trip.route.departure;
+  const dest = trip.route.destination;
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+
+    (async () => {
+      try {
+        const { data } = await api.post('/transport/api/routing/directions/', {
+          origin: { lat: Number(dep.latitude), lng: Number(dep.longitude) },
+          destination: { lat: Number(dest.latitude), lng: Number(dest.longitude) },
+        });
+        if (!cancelled) setGeometry(data.geometry || []);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.response?.data?.detail || 'Could not load route.');
+          notify?.('Route preview unavailable.');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [trip.id]);
+
+  const markers = [
+    { id: 'dep', lat: Number(dep.latitude), lng: Number(dep.longitude), kind: 'rank', label: dep.name },
+    { id: 'dest', lat: Number(dest.latitude), lng: Number(dest.longitude), kind: 'destination', label: dest.name },
+  ];
+
+  const polylines = geometry.length >= 2
+    ? [{ id: 'route', positions: geometry, color: '#e3a441', weight: 5 }]
+    : [];
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Route preview</span>
+        <span className="module-number">{dep.name} → {dest.name}</span>
+      </div>
+      <p className="muted">
+        {trip.operator_name} · {trip.departure_date}
+        {trip.expected_departure_time ? ` at ${trip.expected_departure_time.slice(0, 5)}` : ''}
+        {trip.fare ? ` · R${trip.fare}` : ''}
+      </p>
+
+      {loading && <p className="muted">Loading route…</p>}
+      {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+
+      {!loading && !error && (
+        <ThembaMap
+          markers={markers}
+          polylines={polylines}
+          height="360px"
+          fitKey={`trip-${trip.id}`}
+        />
+      )}
+    </article>
+  );
+}
+
 function RatingModal({ bookingId, onClose, onDone, notify }) {
   const [rating, setRating] = useState(5);
   const [hasComplaint, setHasComplaint] = useState(false);
@@ -2301,56 +2477,632 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
 }
 
 function Administrator({ notify }) {
+  const [adminInfo, setAdminInfo] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get('/transport/api/admin/me/');
+        setAdminInfo(data);
+      } catch {
+        setAdminInfo(null);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  if (loading) {
+    return <article className="module module-wide"><p className="muted">Loading admin data…</p></article>;
+  }
+
+  if (!adminInfo || !adminInfo.rank) {
+    return (
+      <article className="module module-wide">
+        <p className="danger-button" style={{ display: 'block' }}>
+          You are not assigned to a rank. Contact a superuser.
+        </p>
+      </article>
+    );
+  }
+
   return (
     <div className="dashboard-grid">
       <article className="module module-wide">
         <div className="module-heading">
-          <span>Trip management</span>
-          <span className="module-number">01</span>
+          <span>Managing</span>
+          <span className="module-number">{adminInfo.rank.name}</span>
         </div>
         <p className="muted">
-          Create, edit, cancel and assign structured trips while preserving the audit history.
+          Institution: <strong>{adminInfo.institution_name}</strong> · Rank area:{' '}
+          <strong>{adminInfo.rank.area}</strong>
         </p>
-        <button className="primary-button" onClick={() => notify('Trip management opened.')} type="button">
-          Manage trips <span>→</span>
-        </button>
       </article>
 
-      <article className="module">
-        <div className="module-heading">
-          <span>Approvals</span>
-          <span className="module-number">02 pending</span>
-        </div>
-        <p className="muted">Driver and operator applications awaiting review.</p>
-        <button className="secondary-button" onClick={() => notify('Approval queue opened.')} type="button">
-          Review approvals
-        </button>
-      </article>
-
-      <article className="module">
-        <div className="module-heading">
-          <span>Escalations</span>
-          <span className="module-number">03 open</span>
-        </div>
-        <p className="muted">
-          Review escalated complaints and formally confirm safety incidents only after investigation.
-        </p>
-        <button className="secondary-button" onClick={() => notify('Safety incident review opened.')} type="button">
-          Review incidents
-        </button>
-      </article>
-
-      <article className="module">
-        <div className="module-heading">
-          <span>Queue and vehicles</span>
-          <span className="module-number">04</span>
-        </div>
-        <p className="muted">Manage queue order, roadworthiness status and driver/vehicle assignments.</p>
-        <button className="secondary-button" onClick={() => notify('Queue management opened.')} type="button">
-          Manage queue
-        </button>
-      </article>
+      <AdminMemberships notify={notify} />
+      <AdminScheduleTrip notify={notify} />
+      <AdminFeedback notify={notify} />
+      <AdminFlags notify={notify} />
+      <AdminTrips notify={notify} />
     </div>
+  );
+}
+
+function AdminApplicantModal({ membershipId, onClose, onApprove, onReject }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get(`/transport/api/admin/memberships/${membershipId}/`);
+        setData(data);
+      } catch (err) {
+        setError(err.response?.data?.detail || 'Could not load.');
+      }
+    })();
+  }, [membershipId]);
+
+  return (
+    <div className="settings-overlay" onClick={onClose}>
+      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="settings-header">
+          <h3>Applicant details</h3>
+          <button className="text-button" onClick={onClose} type="button">Close</button>
+        </div>
+
+        {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+        {!data && !error && <p className="muted">Loading…</p>}
+
+        {data && (
+          <>
+            <div className="settings-section">
+              <div className="section-title">Identity</div>
+              <div className="route-summary">
+                <div><span className="route-label">Name</span><strong>{data.operator.name}</strong></div>
+                <div><span className="route-label">Phone</span><strong>{data.operator.phone}</strong></div>
+                <div><span className="route-label">Email</span><strong>{data.operator.email || '—'}</strong></div>
+                <div><span className="route-label">Account created</span><strong>{new Date(data.operator.account_created).toLocaleDateString()}</strong></div>
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <div className="section-title">Association</div>
+              <div className="route-summary">
+                <div><span className="route-label">Code</span><strong>{data.operator.association_code}</strong></div>
+                <div><span className="route-label">Name</span><strong>{data.operator.association_name}</strong></div>
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <div className="section-title">Platform history</div>
+              <div className="route-summary">
+                <div><span className="route-label">Total memberships</span><strong>{data.operator.membership_count}</strong></div>
+                <div><span className="route-label">Active memberships</span><strong>{data.operator.active_memberships}</strong></div>
+                <div><span className="route-label">Routes served</span><strong>{data.operator.routes_served}</strong></div>
+                <div><span className="route-label">Trips operated</span><strong>{data.operator.trips_operated}</strong></div>
+              </div>
+            </div>
+
+            {data.notes && (
+              <div className="settings-section">
+                <div className="section-title">Application notes</div>
+                <p className="muted">{data.notes}</p>
+              </div>
+            )}
+
+            <div className="settings-section">
+              <div className="section-title">Request</div>
+              <p className="muted">
+                Requested {new Date(data.requested_at).toLocaleString()}
+                {' · '}Rank: <strong>{data.rank.name}</strong>
+                {' · '}Status: <strong>{data.status}</strong>
+              </p>
+            </div>
+
+            <div className="settings-actions">
+              <button className="secondary-button" onClick={onClose} type="button">Close</button>
+              <button className="danger-button" onClick={() => { onReject(membershipId); onClose(); }} type="button">
+                Reject
+              </button>
+              <button className="primary-button" onClick={() => { onApprove(membershipId); onClose(); }} type="button">
+                Approve
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AdminMemberships({ notify }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [detailId, setDetailId] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/transport/api/admin/pending-memberships/');
+      setItems(data);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function approve(id) {
+    try {
+      await api.post(`/transport/api/admin/memberships/${id}/approve/`);
+      notify('Operator approved.');
+      load();
+    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+  }
+
+  async function reject(id) {
+    const notes = window.prompt('Reason for rejection (optional):');
+    if (notes === null) return;
+    try {
+      await api.post(`/transport/api/admin/memberships/${id}/reject/`, { notes });
+      notify('Operator rejected.');
+      load();
+    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+  }
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Pending operator applications</span>
+        <span className="module-number">{items.length}</span>
+      </div>
+      <p className="muted">Click View details to verify an applicant before deciding.</p>
+      {loading && <p className="muted">Loading…</p>}
+      {!loading && items.length === 0 && <p className="muted">No pending applications.</p>}
+      {items.map((m) => (
+        <div className="trip-row" key={m.id}>
+          <span>
+            <strong>{m.operator_name}</strong>
+            <small>{m.rank.name} · requested {new Date(m.requested_at || Date.now()).toLocaleDateString()}</small>
+          </span>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="secondary-button" onClick={() => setDetailId(m.id)} type="button">View details</button>
+            <button className="primary-button" onClick={() => approve(m.id)} type="button">Approve</button>
+            <button className="danger-button" onClick={() => reject(m.id)} type="button">Reject</button>
+          </div>
+        </div>
+      ))}
+
+      {detailId && (
+        <AdminApplicantModal
+          membershipId={detailId}
+          onClose={() => setDetailId(null)}
+          onApprove={approve}
+          onReject={reject}
+        />
+      )}
+    </article>
+  );
+}
+
+function AdminScheduleTrip({ notify }) {
+  const [data, setData] = useState(null);
+  const [showForm, setShowForm] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const [routeId, setRouteId] = useState('');
+  const [operatorId, setOperatorId] = useState('');
+  const [departureDate, setDepartureDate] = useState('');
+  const [timeStr, setTimeStr] = useState('');
+  const [capacity, setCapacity] = useState('15');
+  const [driverId, setDriverId] = useState('');
+  const [vehicleId, setVehicleId] = useState('');
+  const [notes, setNotes] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/transport/api/admin/available-for-rank/');
+      setData(data);
+      if (data.routes[0]) setRouteId(data.routes[0].id);
+      if (data.operators[0]) setOperatorId(data.operators[0].id);
+      if (data.drivers[0]) setDriverId(data.drivers[0].id);
+      if (data.vehicles[0]) setVehicleId(data.vehicles[0].id);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function submit() {
+    if (!routeId || !operatorId || !departureDate) {
+      notify('Route, operator and date are required.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.post('/transport/api/admin/schedule-trip/', {
+        route_id: Number(routeId),
+        operator_id: Number(operatorId),
+        departure_date: departureDate,
+        expected_departure_time: timeStr || null,
+        seat_capacity: Number(capacity) || 15,
+        driver_id: driverId ? Number(driverId) : null,
+        vehicle_id: vehicleId ? Number(vehicleId) : null,
+        notes,
+      });
+      notify('Trip scheduled and added to the queue.');
+      setShowForm(false);
+      setDepartureDate(''); setTimeStr(''); setNotes('');
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Failed to schedule.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (loading) return <article className="module module-wide"><p className="muted">Loading…</p></article>;
+  if (!data) return null;
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Schedule a trip</span>
+        <span className="module-number">Adds to queue</span>
+      </div>
+      <p className="muted">
+        Add a new departure from your rank. Trips appear in the queue ordered by time.
+      </p>
+
+      {!showForm && (
+        <button className="primary-button" onClick={() => setShowForm(true)} type="button">
+          Schedule new trip
+        </button>
+      )}
+
+      {showForm && (
+        <>
+          <div className="form-grid">
+            <label>
+              Route
+              <select value={routeId} onChange={(e) => setRouteId(e.target.value)}>
+                {data.routes.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.departure.name} → {r.destination.name} (R{r.fare})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Operator
+              <select value={operatorId} onChange={(e) => setOperatorId(e.target.value)}>
+                {data.operators.map((o) => (
+                  <option key={o.id} value={o.id}>{o.name} ({o.association})</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Departure date
+              <input type="date" value={departureDate} onChange={(e) => setDepartureDate(e.target.value)} />
+            </label>
+            <label>
+              Expected time (optional)
+              <input type="time" value={timeStr} onChange={(e) => setTimeStr(e.target.value)} />
+            </label>
+            <label>
+              Seat capacity
+              <input type="number" min="1" max="35" value={capacity} onChange={(e) => setCapacity(e.target.value)} />
+            </label>
+            <label>
+              Driver (optional)
+              <select value={driverId} onChange={(e) => setDriverId(e.target.value)}>
+                <option value="">— Unassigned —</option>
+                {data.drivers.map((d) => (
+                  <option key={d.id} value={d.id}>{d.name} ({d.phone})</option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Vehicle (optional)
+              <select value={vehicleId} onChange={(e) => setVehicleId(e.target.value)}>
+                <option value="">— Unassigned —</option>
+                {data.vehicles.map((v) => (
+                  <option key={v.id} value={v.id}>{v.plate_number} · {v.make} {v.model}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label>
+            Notes
+            <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="e.g. Saturday special" />
+          </label>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button className="secondary-button" onClick={() => setShowForm(false)} type="button">Cancel</button>
+            <button className="primary-button" onClick={submit} disabled={busy} type="button">
+              {busy ? 'Scheduling…' : 'Schedule trip'}
+            </button>
+          </div>
+        </>
+      )}
+    </article>
+  );
+}
+
+function AdminFeedback({ notify }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [scope, setScope] = useState('escalated');
+  const [respondingTo, setRespondingTo] = useState(null);
+  const [responseText, setResponseText] = useState('');
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { data } = await api.get(`/transport/api/admin/feedback/?scope=${scope}`);
+      setItems(data);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, [scope]);
+
+  async function confirm(id) {
+    if (!responseText.trim()) { notify('Write a response first.'); return; }
+    try {
+      await api.post(`/transport/api/admin/feedback/${id}/confirm-incident/`, { admin_response: responseText });
+      notify('Confirmed as safety incident.');
+      setRespondingTo(null); setResponseText(''); load();
+    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+  }
+
+  async function dismiss(id) {
+    if (!responseText.trim()) { notify('Write a response first.'); return; }
+    try {
+      await api.post(`/transport/api/admin/feedback/${id}/dismiss/`, { admin_response: responseText });
+      notify('Dismissed.');
+      setRespondingTo(null); setResponseText(''); load();
+    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+  }
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Passenger feedback</span>
+        <span className="module-number">{items.length}</span>
+      </div>
+
+      <div className="role-picker" style={{ marginBottom: 16 }}>
+        {[
+          { key: 'escalated', label: 'Escalated' },
+          { key: 'complaints', label: 'All complaints' },
+          { key: 'all', label: 'Everything' },
+        ].map((s) => (
+          <button
+            key={s.key}
+            className={scope === s.key ? 'selected' : ''}
+            onClick={() => setScope(s.key)}
+            type="button"
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {loading && <p className="muted">Loading…</p>}
+      {!loading && items.length === 0 && <p className="muted">No feedback in this view.</p>}
+      {items.map((f) => (
+        <div key={f.id} style={{ padding: '14px 0', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span>
+              <strong>{f.trip_code} · {f.rating}★</strong>
+              <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+                {f.passenger_name} · {f.passenger_phone} · {f.route_label}
+              </small>
+            </span>
+            <span className="status-pill" style={{
+              borderColor: f.status === 'resolved' ? 'var(--success)' :
+                           f.status === 'confirmed_incident' ? 'var(--danger)' :
+                           f.status === 'escalated' ? 'var(--danger)' : 'var(--accent)',
+              color: f.status === 'resolved' ? 'var(--success)' :
+                     f.status === 'confirmed_incident' ? 'var(--danger)' :
+                     f.status === 'escalated' ? 'var(--danger)' : 'var(--accent)',
+            }}>
+              {f.status_label}
+            </span>
+          </div>
+          {f.has_complaint && (
+            <div style={{ marginTop: 10, paddingLeft: 12, borderLeft: '2px solid var(--accent)' }}>
+              <small style={{ opacity: 0.7 }}>{f.category_label}</small>
+              <p className="muted" style={{ marginTop: 4 }}>{f.description}</p>
+            </div>
+          )}
+          {f.operator_response && (
+            <p className="muted" style={{ marginTop: 8, fontSize: 13 }}>
+              <em>Operator said:</em> {f.operator_response}
+            </p>
+          )}
+          {f.admin_response && (
+            <p className="muted" style={{ marginTop: 8, fontSize: 13, paddingLeft: 12, borderLeft: '2px solid var(--danger)' }}>
+              <em>You said:</em> {f.admin_response}
+            </p>
+          )}
+          {f.has_complaint && (f.status === 'escalated' || f.status === 'under_review' || f.status === 'submitted') && (
+            <>
+              {respondingTo === f.id ? (
+                <div style={{ marginTop: 12 }}>
+                  <textarea
+                    value={responseText}
+                    onChange={(e) => setResponseText(e.target.value)}
+                    rows={3}
+                    placeholder="Your response to the passenger…"
+                    style={{
+                      width: '100%', padding: 10, borderRadius: 6,
+                      border: '1px solid var(--border)', background: 'var(--surface)',
+                      color: 'var(--text)', fontFamily: 'inherit',
+                    }}
+                  />
+                  <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                    <button className="secondary-button" onClick={() => setRespondingTo(null)} type="button">Cancel</button>
+                    <button className="primary-button" onClick={() => confirm(f.id)} type="button">Confirm incident</button>
+                    <button className="danger-button" onClick={() => dismiss(f.id)} type="button">Dismiss</button>
+                  </div>
+                </div>
+              ) : (
+                <button className="primary-button" style={{ marginTop: 10 }} onClick={() => { setRespondingTo(f.id); setResponseText(''); }} type="button">
+                  Review
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      ))}
+    </article>
+  );
+}
+
+function AdminFlags({ notify }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [scope, setScope] = useState('open');
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { data } = await api.get(`/transport/api/admin/trip-flags/?scope=${scope}`);
+      setItems(data);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, [scope]);
+
+  async function acknowledge(id) {
+    try {
+      await api.post(`/transport/api/admin/trip-flags/${id}/acknowledge/`);
+      notify('Flag acknowledged.');
+      load();
+    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+  }
+
+  async function resolve(id) {
+    const notes = window.prompt('Resolution notes:');
+    if (notes === null) return;
+    try {
+      await api.post(`/transport/api/admin/trip-flags/${id}/resolve/`, { notes });
+      notify('Flag resolved.');
+      load();
+    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+  }
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Trip flags from operators</span>
+        <span className="module-number">{items.length}</span>
+      </div>
+
+      <div className="role-picker" style={{ marginBottom: 16 }}>
+        {[
+          { key: 'open', label: 'Open' },
+          { key: 'all', label: 'All' },
+        ].map((s) => (
+          <button
+            key={s.key}
+            className={scope === s.key ? 'selected' : ''}
+            onClick={() => setScope(s.key)}
+            type="button"
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      <p className="muted">Issues operators reported on trips departing from your rank.</p>
+      {loading && <p className="muted">Loading…</p>}
+      {!loading && items.length === 0 && <p className="muted">No flags in this view.</p>}
+      {items.map((flag) => (
+        <div key={flag.id} style={{ padding: '14px 0', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span>
+              <strong>{flag.category_label}</strong>
+              <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+                Reported by {flag.flagged_by_name} · {new Date(flag.flagged_at).toLocaleString()}
+              </small>
+            </span>
+            <span className="status-pill" style={{
+              borderColor: flag.status === 'resolved' ? 'var(--success)' :
+                           flag.status === 'open' ? 'var(--danger)' : 'var(--accent)',
+              color: flag.status === 'resolved' ? 'var(--success)' :
+                     flag.status === 'open' ? 'var(--danger)' : 'var(--accent)',
+            }}>
+              {flag.status_label}
+            </span>
+          </div>
+          <p className="muted" style={{ marginTop: 8 }}>{flag.notes}</p>
+          {flag.status === 'open' && (
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button className="secondary-button" onClick={() => acknowledge(flag.id)} type="button">Acknowledge</button>
+              <button className="primary-button" onClick={() => resolve(flag.id)} type="button">Resolve</button>
+            </div>
+          )}
+        </div>
+      ))}
+    </article>
+  );
+}
+
+function AdminTrips({ notify }) {
+  const [trips, setTrips] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/transport/api/admin/trips/');
+      setTrips(data);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function cancelTrip(id) {
+    if (!window.confirm('Cancel this trip? All unboarded passengers will be marked cancelled.')) return;
+    try {
+      await api.post(`/transport/api/admin/trips/${id}/cancel/`);
+      notify('Trip cancelled.');
+      load();
+    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+  }
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Trip management</span>
+        <span className="module-number">{trips.length}</span>
+      </div>
+      <p className="muted">All trips scheduled in the system. Cancel to halt a trip.</p>
+      {loading && <p className="muted">Loading…</p>}
+      {!loading && trips.length === 0 && <p className="muted">No trips scheduled.</p>}
+      {trips.slice(0, 30).map((t) => (
+        <div className="trip-row" key={t.id}>
+          <span>
+            <strong>{t.trip_code} · {t.route.departure.name} → {t.route.destination.name}</strong>
+            <small>
+              {t.operator_name} · {t.departure_date} · {t.seats_taken}/{t.seat_capacity} seats · {t.status}
+            </small>
+          </span>
+          {t.status !== 'cancelled' && t.status !== 'completed' && (
+            <button className="danger-button" onClick={() => cancelTrip(t.id)} type="button">
+              Cancel trip
+            </button>
+          )}
+        </div>
+      ))}
+    </article>
   );
 }
 
