@@ -182,12 +182,19 @@ class BookingSerializer(serializers.ModelSerializer):
         read_only_fields = ["booked_at", "boarded_at"]
 
     def get_verification_code(self, obj):
-        vc = getattr(obj, "verification_code", None)
+        """
+        Safe reverse OneToOne access — Django raises RelatedObjectDoesNotExist
+        when a Booking has no VerificationCode row.
+        """
+        try:
+            vc = obj.verification_code
+        except Exception:
+            return None
         return vc.code if vc else None
 
 
 class BookingCreateSerializer(serializers.Serializer):
-    trip_id = serializers.IntegerField()
+    trip_id = serializers.IntegerField(required=False)
     trip_code = serializers.CharField(required=False, allow_blank=True)
 
 
@@ -272,7 +279,20 @@ class DriverComplaintSerializer(serializers.ModelSerializer):
 
 
 class DriverNotificationSerializer(serializers.ModelSerializer):
+    trip_id = serializers.IntegerField(source="link_trip_id", read_only=True)
+    booking_id = serializers.IntegerField(source="link_booking_id", read_only=True)
+
     class Meta:
         model = DriverNotification
-        fields = ["id", "driver", "title", "body", "read", "created_at"]
+        fields = [
+            "id",
+            "driver",
+            "title",
+            "body",
+            "read",
+            "created_at",
+            "trip_id",
+            "booking_id",
+            "meta",
+        ]
         read_only_fields = ["created_at"]

@@ -83,6 +83,13 @@ export const api = {
   me: () => request('/auth/me/', { auth: true }),
   logout: () => request('/auth/logout/', { method: 'POST', auth: true }),
 
+  registerPassenger: (body) =>
+    request('/auth/register/passenger/', { method: 'POST', body }),
+  registerDriver: (body) =>
+    request('/auth/register/driver/', { method: 'POST', body }),
+  registerOperator: (body) =>
+    request('/auth/register/operator/', { method: 'POST', body }),
+
   listTrips: (params = {}) => {
     const q = new URLSearchParams(params).toString();
     return request(`/trips/${q ? `?${q}` : ''}`);
@@ -91,15 +98,18 @@ export const api = {
   tripDetail: (tripId) => request(`/trips/${tripId}/`),
   tripLive: (tripId) => request(`/trips/${tripId}/live/`, { auth: true }),
 
-  createBooking: (tripId, tripCode) =>
+  createBooking: (tripId, tripCode, extra = {}) =>
     request('/bookings/', {
       method: 'POST',
       auth: true,
-      body: { trip_id: tripId, trip_code: tripCode },
+      body: {
+        ...(tripId != null ? { trip_id: tripId } : {}),
+        ...(tripCode ? { trip_code: tripCode } : {}),
+        ...extra,
+      },
     }),
   myBookings: () => request('/bookings/mine/', { auth: true }),
 
-  // Operator
   myTrips: () => request('/my-trips/', { auth: true }),
   manifest: (tripId) => request(`/my-trips/${tripId}/manifest/`, { auth: true }),
   engage: (tripId) =>
@@ -115,7 +125,6 @@ export const api = {
       body: { code },
     }),
 
-  // Driver
   myVehicle: () => request('/vehicles/mine/', { auth: true }),
   postLocation: (vehicleId, payload) =>
     request(`/vehicles/${vehicleId}/location/`, {
@@ -125,23 +134,13 @@ export const api = {
     }),
   driverTrips: () => request('/driver/trips/', { auth: true }),
   driverProfile: () => request('/driver/profile/', { auth: true }),
+  notificationsMarkRead: (id) =>
+    request(`/driver/notifications/${id}/read/`, { method: 'POST', auth: true }),
   confirmTrip: (tripCode) =>
     request('/driver/confirm-trip/', {
       method: 'POST',
       auth: true,
       body: { trip_code: tripCode },
-    }),
-  notificationsMarkRead: (id) =>
-    request(`/driver/notifications/${id}/read/`, {
-      method: 'POST',
-      auth: true,
-      body: {},
-    }),
-  notificationsMarkAllRead: () =>
-    request('/driver/notifications/read-all/', {
-      method: 'POST',
-      auth: true,
-      body: {},
     }),
 
   fleet: () => request('/fleet/', { auth: true }),

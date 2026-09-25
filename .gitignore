@@ -44,3 +44,7 @@ yarn-error.log*
 
 # --- Logs ---
 *.log
+# Env / secrets
+.env
+.env.*
+!.env.example

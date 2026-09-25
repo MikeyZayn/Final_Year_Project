@@ -1,11 +1,15 @@
 /**
  * Passenger hub UI — 3 stages: Desk → Route → Active.
- * - Desk: search trips, local fares, verify code, My bookings
+ * - Desk: search trips, local fares, verify code, My bookings, announcements
  * - Route: route preview on map (distance/time/fare)
- * - Active: verified trip — live vehicle map + info + panic
+ * - Active: verified trip — live vehicle map + info + panic + feedback
  *
  * search-first: GPS → chosen departure (dashed blue)
  *               chosen departure → destination (amber solid)
+ *
+ * Ride request flow:
+ * - Request ride → POST /api/bookings/ (with passenger GPS) → driver notified
+ * - My bookings row click → opens trip info panel + loads verify code
  */
 import { useEffect, useMemo, useState } from 'react';
 import { api, getUser } from '../api';
@@ -24,6 +28,28 @@ import { useGeolocation } from '../hooks/useGeolocation';
 import '../styles/passengerMapDashboard.css';
 
 const PLACES = PREDETERMINED_PLACES;
+
+/** Frontend-only announcements (until backend endpoint exists). */
+const PASSENGER_ANNOUNCEMENTS = [
+  {
+    id: 'a1',
+    title: 'Route delay — Ongoye line',
+    body: 'Expect delays of 20–35 min on Ongoye → Empangeni due to roadworks near Esikhawini.',
+    when: 'Today',
+  },
+  {
+    id: 'a2',
+    title: 'Booking confirmed',
+    body: 'Your verification code is shown after Request ride. Keep it ready at boarding.',
+    when: 'System',
+  },
+  {
+    id: 'a3',
+    title: 'Fare notice',
+    body: 'Official local fares apply (R). Search trip to see the fixed fare for your pair.',
+    when: 'System',
+  },
+];
 
 function placeByName(name) {
   return PLACES.find((p) => p.name === name) || null;
@@ -70,6 +96,9 @@ export default function PassengerMapDashboard({ notify, onExit }) {
   const [booking, setBooking] = useState(false);
   const [nearestHint, setNearestHint] = useState(null);
   const [panicOpen, setPanicOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [feedbackText, setFeedbackText] = useState('');
+  const [selectedBookingId, setSelectedBookingId] = useState(null);
   const [booked, setBooked] = useState(null);
   const [myBookings, setMyBookings] = useState([]);
   const [adhocLine, setAdhocLine] = useState(null);
@@ -179,14 +208,22 @@ export default function PassengerMapDashboard({ notify, onExit }) {
     }
   }
 
-  async function confirmBooking() {
+  // "Request ride" — same endpoint, friendlier label; sends GPS so driver sees pickup
+  async function requestRide() {
     if (!selected?.raw?.id) {
-      notify?.('Select a live trip (not the fare-only row) to book.');
+      notify?.('Select a live trip (not the fare-only row) to request a ride.');
       return;
     }
     setBooking(true);
     try {
-      const b = await api.createBooking(selected.raw.id);
+      const extra = {};
+      if (geo.position) {
+        extra.lat = geo.position.lat;
+        extra.lng = geo.position.lng;
+      } else {
+        geo.requestOnce?.();
+      }
+      const b = await api.createBooking(selected.raw.id, selected.trip_code, extra);
       const code = b.verification_code || null;
       setBooked({
         booking_id: b.id,
@@ -195,19 +232,68 @@ export default function PassengerMapDashboard({ notify, onExit }) {
         trip_id: b.trip || selected.raw?.id,
         status: b.status,
       });
+      try {
+        const rows = await api.myBookings();
+        setMyBookings(rows || []);
+      } catch {
+        /* ignore */
+      }
       if (code) {
         setVerifyInput(code);
         notify?.(
-          `Booked ${selected.trip_code}. Verification code: ${code} — show at boarding.`
+          `Ride requested for ${selected.trip_code}. Driver notified. Code: ${code}`
         );
       } else {
-        notify?.(`Booking #${b.id} confirmed for ${selected.trip_code}.`);
+        notify?.(
+          `Ride request #${b.id} recorded for ${selected.trip_code}. Driver notified if assigned.`
+        );
       }
+      // Open the trip information panel (same as verified active view)
+      setVerifiedTrip({
+        ...(selected || {}),
+        verification_code: code,
+        booking_id: b.id,
+        trip_code: b.trip_code || selected.trip_code,
+        status: b.status || 'reserved',
+      });
+      if (selected.raw?.id) {
+        await loadLiveForTrip(selected.raw.id);
+      }
+      setViewMode('active');
     } catch (e) {
       notify?.(e.message);
     } finally {
       setBooking(false);
     }
+  }
+
+  /** Open trip information panel from a My bookings row. */
+  async function openBookingDetails(b) {
+    setSelectedBookingId(b.id);
+    if (b.verification_code) {
+      setVerifyInput(String(b.verification_code).toUpperCase());
+    }
+    const tripId = b.trip || b.trip_id;
+    setVerifiedTrip({
+      id: tripId,
+      trip_code: b.trip_code,
+      origin: b.route_from || departure,
+      destination: b.route_to || destination,
+      status: b.status,
+      verification_code: b.verification_code,
+      booking_id: b.id,
+      fare: b.fare_paid != null ? `R${b.fare_paid}` : selected?.fare,
+      raw: selected?.raw || { id: tripId },
+    });
+    if (tripId) {
+      try {
+        await loadLiveForTrip(tripId);
+      } catch {
+        /* ignore */
+      }
+    }
+    setViewMode('active');
+    notify?.(`Opened trip ${b.trip_code || b.id}`);
   }
 
   async function previewRoadRoute() {
@@ -318,7 +404,9 @@ export default function PassengerMapDashboard({ notify, onExit }) {
     }
 
     if (!matchedBooking) {
-      notify?.('Code not found on your bookings.');
+      notify?.(
+        'Code not found on your bookings. Book a trip first, or use the code shown after Request ride.'
+      );
       return;
     }
 
@@ -574,17 +662,69 @@ export default function PassengerMapDashboard({ notify, onExit }) {
                   <span className="pmd-pill muted">MONITORING ON</span>
                 </div>
                 <p className="pmd-hint">Emergency assistance available 24/7</p>
-                <button
-                  type="button"
-                  className="pmd-btn danger block"
-                  onClick={() => setPanicOpen(true)}
-                >
-                  PANIC / GET HELP
-                </button>
+                <div className="pmd-btn-row">
+                  <button
+                    type="button"
+                    className="pmd-btn danger"
+                    onClick={() => setPanicOpen(true)}
+                  >
+                    PANIC / GET HELP
+                  </button>
+                  <button
+                    type="button"
+                    className="pmd-btn ghost"
+                    onClick={() => setFeedbackOpen(true)}
+                  >
+                    Feedback
+                  </button>
+                </div>
               </section>
             </div>
           </div>
         </div>
+
+        {feedbackOpen && (
+          <div className="pmd-modal-backdrop" role="presentation">
+            <div className="pmd-modal" role="dialog">
+              <h3>Trip feedback</h3>
+              <p>
+                Share feedback about this verified trip (frontend only — not stored until an API is
+                wired).
+              </p>
+              <textarea
+                className="pmd-textarea"
+                value={feedbackText}
+                onChange={(e) => setFeedbackText(e.target.value)}
+                rows={4}
+                placeholder="How was the ride, driver, vehicle…?"
+              />
+              <div className="pmd-modal-actions">
+                <button
+                  type="button"
+                  className="pmd-btn ghost"
+                  onClick={() => setFeedbackOpen(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="pmd-btn primary"
+                  onClick={() => {
+                    if (!feedbackText.trim()) {
+                      notify?.('Write a short note, then submit.');
+                      return;
+                    }
+                    notify?.('Thank you — feedback captured on this device.');
+                    setFeedbackText('');
+                    setFeedbackOpen(false);
+                  }}
+                >
+                  Submit feedback
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {panicOpen && (
           <div className="pmd-modal-backdrop" role="presentation">
@@ -846,10 +986,10 @@ export default function PassengerMapDashboard({ notify, onExit }) {
                       <button
                         type="button"
                         className="pmd-btn primary block"
-                        onClick={confirmBooking}
+                        onClick={requestRide}
                         disabled={booking}
                       >
-                        {booking ? 'Booking…' : 'Confirm booking'}
+                        {booking ? 'Requesting…' : 'Request ride'}
                       </button>
                     ) : (
                       <div className="pmd-code-banner">
@@ -871,7 +1011,9 @@ export default function PassengerMapDashboard({ notify, onExit }) {
 
           <section className="pmd-card">
             <h3>Verify a booked trip</h3>
-            <p className="pmd-hint">Use the verification code from your booking confirmation.</p>
+            <p className="pmd-hint">
+              Use the verification code from your booking confirmation.
+            </p>
             <label className="pmd-label">
               Trip verification code
               <input
@@ -890,22 +1032,79 @@ export default function PassengerMapDashboard({ notify, onExit }) {
           </section>
         </div>
 
-        {myBookings.length > 0 && (
+        <div className="pmd-desk-grid pmd-desk-lower">
           <section className="pmd-card pmd-bookings">
-            <h3>My bookings</h3>
+            <div className="pmd-card-head">
+              <h3>My bookings</h3>
+              <span className="pmd-pill muted">
+                {(myBookings || []).length} upcoming
+              </span>
+            </div>
+            <p className="pmd-hint">
+              Tap a booking to load its code, or Request ride on a matching trip.
+            </p>
+            {(myBookings || []).length === 0 && (
+              <p className="pmd-hint">No bookings yet. Search a trip and use Request ride.</p>
+            )}
             <ul className="pmd-booking-list">
-              {myBookings.map((b) => (
+              {(myBookings || []).map((b) => (
                 <li key={b.id}>
-                  <strong>{b.trip_code || b.id}</strong>
-                  <span>
-                    {b.status}
-                    {b.verification_code ? ` · ${b.verification_code}` : ''}
-                  </span>
+                  <button
+                    type="button"
+                    className={
+                      selectedBookingId === b.id
+                        ? 'pmd-booking-row active'
+                        : 'pmd-booking-row'
+                    }
+                    onClick={() => openBookingDetails(b)}
+                  >
+                    <span>
+                      <strong>{b.trip_code || `BK-${b.id}`}</strong>
+                      <small>
+                        {b.status}
+                        {b.verification_code ? ` · code ${b.verification_code}` : ''}
+                      </small>
+                    </span>
+                    <span
+                      className="pmd-btn ghost"
+                      style={{ padding: '6px 10px', fontSize: '0.75rem' }}
+                    >
+                      View details
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {selectedBookingId && selected && !selected.isInfoOnly && (
+              <button
+                type="button"
+                className="pmd-btn primary block"
+                onClick={requestRide}
+                disabled={booking}
+              >
+                {booking ? 'Requesting…' : 'Request ride for selected trip'}
+              </button>
+            )}
+          </section>
+
+          <section className="pmd-card">
+            <div className="pmd-card-head">
+              <h3>Notifications</h3>
+              <span className="pmd-pill muted">{PASSENGER_ANNOUNCEMENTS.length}</span>
+            </div>
+            <p className="pmd-hint">Announcements & alerts</p>
+            <ul className="pmd-notif-list">
+              {PASSENGER_ANNOUNCEMENTS.map((n) => (
+                <li key={n.id}>
+                  <small>
+                    {n.when} · {n.title}
+                  </small>
+                  <p>{n.body}</p>
                 </li>
               ))}
             </ul>
           </section>
-        )}
+        </div>
       </div>
 
       {panicOpen && (

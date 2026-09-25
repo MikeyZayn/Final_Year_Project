@@ -141,10 +141,7 @@ def api_trip_detail(request, trip_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_trip_live_tracking(request, trip_id):
-    """
-    GET /api/trips/<id>/live/
-    Trip summary + latest vehicle GPS for a booked passenger.
-    """
+    """GET /api/trips/<id>/live/ — trip summary + latest vehicle GPS."""
     try:
         trip = Trip.objects.select_related(
             "route__departure",
@@ -165,8 +162,7 @@ def api_trip_live_tracking(request, trip_id):
         ).exists()
         if not has:
             return Response(
-                {"detail": "Book this trip before tracking."},
-                status=403,
+                {"detail": "Book this trip before tracking."}, status=403
             )
 
     data = TripSerializer(trip).data
@@ -233,6 +229,46 @@ def api_create_booking(request):
     )
     code = get_random_string(6).upper()
     VerificationCode.objects.create(booking=booking, code=code)
+
+    # Notify assigned driver of ride request (passenger → driver)
+    passenger_lat = request.data.get("lat") or request.data.get("passenger_lat")
+    passenger_lng = request.data.get("lng") or request.data.get("passenger_lng")
+    try:
+        plat = float(passenger_lat) if passenger_lat is not None else None
+        plng = float(passenger_lng) if passenger_lng is not None else None
+    except (TypeError, ValueError):
+        plat, plng = None, None
+
+    if trip.driver_id:
+        pname = ""
+        if request.user:
+            pname = (
+                f"{request.user.first_name} {request.user.last_name}".strip()
+                or request.user.phone
+                or request.user.username
+            )
+        from_name = getattr(getattr(trip.route, "departure", None), "name", "") or ""
+        to_name = getattr(getattr(trip.route, "destination", None), "name", "") or ""
+        DriverNotification.objects.create(
+            driver=trip.driver,
+            title="Ride request",
+            body=(
+                f"{pname or 'Passenger'} requested a seat on {trip.trip_code} "
+                f"({from_name} → {to_name}). Code {code}."
+            ),
+            link_trip=trip,
+            link_booking=booking,
+            meta={
+                "type": "ride_request",
+                "trip_id": trip.id,
+                "trip_code": trip.trip_code,
+                "booking_id": booking.id,
+                "passenger_name": pname,
+                "passenger_lat": plat,
+                "passenger_lng": plng,
+            },
+        )
+
     data = BookingSerializer(booking).data
     data["verification_code"] = code
     return Response(data, status=201)
@@ -241,9 +277,17 @@ def api_create_booking(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_my_bookings(request):
+    """
+    Passenger booking list for My bookings UI.
+    Each row includes verification_code so the desk can load it into Verify.
+    """
     qs = (
         Booking.objects.filter(passenger=request.user)
-        .select_related("trip__route__departure", "trip__route__destination")
+        .select_related(
+            "trip__route__departure",
+            "trip__route__destination",
+            "verification_code",
+        )
         .order_by("-booked_at")
     )
     return Response(BookingSerializer(qs, many=True).data)
@@ -580,6 +624,9 @@ def api_driver_profile(request):
                     "body": n.body,
                     "read": n.read,
                     "created_at": n.created_at,
+                    "trip_id": n.link_trip_id,
+                    "booking_id": n.link_booking_id,
+                    "meta": n.meta or {},
                 }
                 for n in dp.notifications.order_by("-created_at")[:30]
             ],

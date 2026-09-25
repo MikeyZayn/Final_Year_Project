@@ -3,12 +3,6 @@
  *   Stage 1: Ready for dispatch (verification, trip code, My trips, notifications)
  *   Stage 2: Selected trip map panel (route polyline, trip info, dot bar)
  *   Stage 3: Selected route point (sidebar list + floating point card)
- *
- * Transitions:
- *   Stage 1 → 2 : openTrip(trip)   (click a My-trips row)
- *   Stage 2 → 3 : selectPoint(p)   (dot bar, marker click, list)
- *   Stage 3 → 2 : backToTripInfo() (× on card, "Back to trip info")
- *   Stage 2/3 → 1 : backToList()   (← in header)
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, getUser } from '../api';
@@ -132,15 +126,11 @@ export default function DriverPage({ notify }) {
   const [matchedCode, setMatchedCode] = useState('');
   const [confirming, setConfirming] = useState(false);
 
-  // ---- Stage control ----
-  // selectedTrip === null                                  → Stage 1
-  // selectedTrip !== null && selectedPoint === null        → Stage 2
-  // selectedTrip !== null && selectedPoint !== null        → Stage 3
   const [selectedTrip, setSelectedTrip] = useState(null);
   const [selectedPoint, setSelectedPoint] = useState(null);
-
   const [tracking, setTracking] = useState(false);
   const [lastGps, setLastGps] = useState(null);
+  const [passengerPickup, setPassengerPickup] = useState(null);
 
   const watchRef = useRef(null);
   const timerRef = useRef(null);
@@ -180,7 +170,6 @@ export default function DriverPage({ notify }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---------- Notifications ----------
   async function markNotificationRead(id) {
     try {
       await api.notificationsMarkRead(id);
@@ -219,7 +208,6 @@ export default function DriverPage({ notify }) {
     }
   }
 
-  // ---------- GPS ----------
   function stopTracking() {
     if (watchRef.current != null && navigator.geolocation) {
       navigator.geolocation.clearWatch(watchRef.current);
@@ -288,7 +276,6 @@ export default function DriverPage({ notify }) {
     notify?.('Live GPS sharing started for this shift.');
   }
 
-  // ---------- Stage 1 action: confirm trip code ----------
   async function handleConfirmTrip() {
     const code = tripCodeInput.trim();
     if (!code) {
@@ -311,10 +298,10 @@ export default function DriverPage({ notify }) {
     }
   }
 
-  // ---------- Stage transitions ----------
-  function openTrip(trip) {
+  function openTrip(trip, pickup = null) {
     setSelectedTrip(trip);
     setSelectedPoint(null);
+    setPassengerPickup(pickup);
   }
 
   function selectPoint(point) {
@@ -328,6 +315,58 @@ export default function DriverPage({ notify }) {
   function backToList() {
     setSelectedTrip(null);
     setSelectedPoint(null);
+    setPassengerPickup(null);
+  }
+
+  async function openNotification(n) {
+    const meta = n.meta || {};
+    const tripId = n.trip_id || meta.trip_id;
+    try {
+      if (n.id && !n.read && api.notificationsMarkRead) {
+        await api.notificationsMarkRead(n.id);
+        setProfile((prev) =>
+          prev
+            ? {
+                ...prev,
+                notifications: (prev.notifications || []).map((x) =>
+                  x.id === n.id ? { ...x, read: true } : x
+                ),
+              }
+            : prev
+        );
+      }
+    } catch {
+      /* ignore */
+    }
+    let trip =
+      (trips || []).find((x) => x.id === tripId) ||
+      (profile?.trips || []).find((x) => x.id === tripId);
+    if (!trip && tripId) {
+      const rows = await refreshTrips();
+      trip = (rows || []).find((x) => x.id === tripId);
+    }
+    const pickup =
+      meta.passenger_lat != null && meta.passenger_lng != null
+        ? {
+            lat: Number(meta.passenger_lat),
+            lng: Number(meta.passenger_lng),
+            name: meta.passenger_name || 'Passenger',
+            booking_id: n.booking_id || meta.booking_id,
+          }
+        : null;
+    if (trip) {
+      openTrip(trip, pickup);
+      notify?.(
+        pickup
+          ? `Opened ${trip.trip_code} — passenger location on map.`
+          : `Opened ${trip.trip_code} from notification.`
+      );
+    } else {
+      notify?.(
+        n.body || 'Notification opened. Confirm the trip code if this trip is not yet in My trips.'
+      );
+      if (meta.trip_code) setTripCodeInput(String(meta.trip_code));
+    }
   }
 
   const routePoints = useMemo(
@@ -376,8 +415,19 @@ export default function DriverPage({ notify }) {
       });
     }
 
+    if (passengerPickup?.lat != null && passengerPickup?.lng != null) {
+      markers.push({
+        id: 'passenger-pickup',
+        lat: passengerPickup.lat,
+        lng: passengerPickup.lng,
+        label: `${passengerPickup.name || 'Passenger'} (pickup)`,
+        kind: 'user',
+        color: '#38bdf8',
+      });
+    }
+
     return { polylines, markers };
-  }, [selectedTrip, routePoints, selectedPoint, lastGps]);
+  }, [selectedTrip, routePoints, selectedPoint, lastGps, passengerPickup]);
 
   const progressPct = useMemo(() => {
     if (!routePoints.length || !selectedPoint) {
@@ -389,7 +439,7 @@ export default function DriverPage({ notify }) {
     return Math.round((selectedPoint.order / routePoints.length) * 100);
   }, [routePoints, selectedPoint, selectedTrip]);
 
-  /* ================= Stage 2 & 3 — Selected trip map panel ================= */
+  /* ================= Stage 2 & 3 ================= */
   if (selectedTrip) {
     const from = selectedTrip.route?.departure?.name || '—';
     const to = selectedTrip.route?.destination?.name || '—';
@@ -442,10 +492,33 @@ export default function DriverPage({ notify }) {
         <div className="drv-trip-layout">
           <aside className="drv-side">
             {!selectedPoint ? (
-              /* ---------- Stage 2 sidebar ---------- */
               <>
                 <p className="drv-kicker">ACTIVE ASSIGNMENT</p>
                 <h2>Trip information</h2>
+                {passengerPickup && (
+                  <div
+                    className="drv-card"
+                    style={{
+                      marginBottom: 12,
+                      padding: 10,
+                      background: 'rgba(56,189,248,0.06)',
+                      border: '1px solid rgba(56,189,248,0.28)',
+                      borderRadius: 10,
+                    }}
+                  >
+                    <small className="drv-kicker" style={{ color: '#38bdf8' }}>
+                      PASSENGER PICKUP
+                    </small>
+                    <p style={{ margin: '6px 0 0' }}>
+                      <strong>{passengerPickup.name || 'Passenger'}</strong>
+                      <br />
+                      <span className="drv-muted">
+                        {Number(passengerPickup.lat).toFixed(5)},{' '}
+                        {Number(passengerPickup.lng).toFixed(5)}
+                      </span>
+                    </p>
+                  </div>
+                )}
                 <dl className="drv-dl">
                   <div>
                     <dt>Driver</dt>
@@ -504,19 +577,20 @@ export default function DriverPage({ notify }) {
                 </div>
               </>
             ) : (
-              /* ---------- Stage 3 sidebar ---------- */
               <>
                 <p className="drv-kicker">Route points</p>
                 <p className="drv-muted">
-                  Point {String(selectedPoint.order).padStart(2, '0')} selected. Choose another dot
-                  to inspect.
+                  Point {String(selectedPoint.order).padStart(2, '0')} selected. Choose another
+                  dot to inspect.
                 </p>
                 <ul className="drv-point-list">
                   {routePoints.map((p) => (
                     <li key={p.id}>
                       <button
                         type="button"
-                        className={selectedPoint.id === p.id ? 'drv-point active' : 'drv-point'}
+                        className={
+                          selectedPoint.id === p.id ? 'drv-point active' : 'drv-point'
+                        }
                         onClick={() => selectPoint(p)}
                       >
                         <span className="drv-point-num">
@@ -542,7 +616,7 @@ export default function DriverPage({ notify }) {
               polylines={mapOverlays.polylines}
               markers={mapOverlays.markers}
               height="100%"
-              fitKey={`${selectedTrip.id}-${selectedPoint?.id || ''}-${lastGps?.at || ''}`}
+              fitKey={`${selectedTrip.id}-${selectedPoint?.id || ''}-${lastGps?.at || ''}-${passengerPickup?.lat || ''}`}
               onMapClick={() => {}}
               onMarkerClick={(m) => {
                 const point = routePoints.find((p) => `rp-${p.id}` === m.id);
@@ -588,15 +662,13 @@ export default function DriverPage({ notify }) {
                 </div>
               </div>
             )}
-
-           
           </main>
         </div>
       </div>
     );
   }
 
-  /* ================= Stage 1 — Ready for dispatch ================= */
+  /* ================= Stage 1 ================= */
   const unreadCount = (profile?.notifications || []).filter((n) => !n.read).length;
 
   return (
@@ -762,20 +834,28 @@ export default function DriverPage({ notify }) {
                 <li
                   key={n.id}
                   className={n.read ? 'drv-notif read' : 'drv-notif unread'}
-                  onClick={() => !n.read && markNotificationRead(n.id)}
-                  style={{ cursor: n.read ? 'default' : 'pointer' }}
+                  style={{ cursor: 'pointer' }}
                 >
-                  <small>
-                    {n.created_at
-                      ? new Date(n.created_at).toLocaleTimeString([], {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                        })
-                      : ''}{' '}
-                    · {n.title}
-                    {!n.read && <span className="drv-notif-dot" />}
-                  </small>
-                  <p>{n.body}</p>
+                  <button
+                    type="button"
+                    className="drv-notif-btn"
+                    onClick={() => openNotification(n)}
+                  >
+                    <small>
+                      {n.created_at
+                        ? new Date(n.created_at).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })
+                        : ''}{' '}
+                      · {n.title}
+                      {!n.read && <span className="drv-notif-dot" />}
+                    </small>
+                    <p>{n.body}</p>
+                    {(n.trip_id || n.meta?.trip_id) && (
+                      <span className="drv-notif-cta">Open route →</span>
+                    )}
+                  </button>
                 </li>
               ))}
             </ul>

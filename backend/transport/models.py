@@ -10,7 +10,8 @@ Decisions applied:
 - Operator scope: FYP OperatorAtRank + OperatorProfile.
 - Fares: fixed Route.fare for corridors; TaxiFareRule for Google/ORS ad-hoc routes.
 - Duplicate engaged_* fields from FYP source fixed (single pair).
-- Driver profile support: ratings, complaints, notifications (new).
+- Driver profile support: ratings, complaints, notifications.
+- DriverNotification: link_trip, link_booking, meta (for ride-request deep links).
 """
 from django.conf import settings
 from django.db import models
@@ -88,7 +89,6 @@ class Route(models.Model):
     """
     Shared corridor: Rank → Destination with fixed fare (FYP),
     plus road geometry and tracking fields (themba-search-first).
-    No separate routing-plan entity — geometry lives on this row.
     """
 
     class ServiceCategory(models.TextChoices):
@@ -118,7 +118,6 @@ class Route(models.Model):
     )
     typical_duration_minutes = models.PositiveIntegerField(null=True, blank=True)
 
-    # --- from themba-search-first (map / deviation) ---
     geometry = models.JSONField(
         default=list,
         blank=True,
@@ -157,7 +156,7 @@ class Route(models.Model):
 
 
 class RouteStop(models.Model):
-    """Ordered stop along a route (boarding + ETA). From search-first."""
+    """Ordered stop along a route (boarding + ETA)."""
 
     route = models.ForeignKey(Route, related_name="stops", on_delete=models.CASCADE)
     name = models.CharField(max_length=120)
@@ -217,10 +216,7 @@ class DriverVehicle(models.Model):
 
 
 class VehicleLocation(models.Model):
-    """
-    Live + historical GPS pings (themba-search-first), attached to FYP Vehicle.
-    Optional trip_id links pings to an engaged trip for passenger/operator views.
-    """
+    """Live + historical GPS pings attached to a Vehicle."""
 
     class Source(models.TextChoices):
         GPS = "gps", "Real GPS"
@@ -260,11 +256,7 @@ class VehicleLocation(models.Model):
 
 
 class Trip(models.Model):
-    """
-    FYP Trip = source of truth.
-    Specific departure: operator runs route on date/time with capacity,
-    optional driver/vehicle, engage/release, trip_code.
-    """
+    """FYP Trip = source of truth."""
 
     class Status(models.TextChoices):
         SCHEDULED = "scheduled", "Scheduled"
@@ -333,10 +325,7 @@ class Trip(models.Model):
 
 
 class Booking(models.Model):
-    """
-    Passenger on a trip (FYP). Replaces search-first Boarding.
-    Registered user (passenger FK) or walk-in fields.
-    """
+    """Passenger on a trip (FYP). Registered user or walk-in fields."""
 
     class Status(models.TextChoices):
         RESERVED = "reserved", "Reserved"
@@ -389,7 +378,7 @@ class Booking(models.Model):
 
 
 class VerificationCode(models.Model):
-    """Per-booking verification for boarding / trip-verified feedback (FYP)."""
+    """Per-booking verification for boarding / trip-verified feedback."""
 
     booking = models.OneToOneField(
         Booking, on_delete=models.CASCADE, related_name="verification_code"
@@ -506,10 +495,7 @@ class TripAssetChange(models.Model):
 
 
 class TaxiFareRule(models.Model):
-    """
-    Ad-hoc fare formula for Google/ORS-calculated routes that are not a
-    predetermined corridor (themba-search-first). Corridor trips use Route.fare.
-    """
+    """Ad-hoc fare formula for Google/ORS-calculated routes."""
 
     DEMONSTRATION_NOTICE = (
         "Demonstration configuration — not official South African taxi fares."
@@ -546,7 +532,7 @@ class TaxiFareRule(models.Model):
 
 
 class PanicAlert(models.Model):
-    """Persisted panic/emergency from passenger (search-first endpoint + audit)."""
+    """Persisted panic/emergency from passenger."""
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -579,12 +565,12 @@ class PanicAlert(models.Model):
 
 
 # ---------------------------------------------------------------------------
-# Driver profile support: ratings, complaints, notifications (NEW)
+# Driver profile support: ratings, complaints, notifications
 # ---------------------------------------------------------------------------
 
 
 class DriverRating(models.Model):
-    """Passenger rating of a driver (1–5 stars), optionally tied to a trip."""
+    """Passenger rating of a driver (1–5 stars)."""
 
     driver = models.ForeignKey(
         "accounts.DriverProfile",
@@ -617,7 +603,7 @@ class DriverRating(models.Model):
 
 
 class DriverComplaint(models.Model):
-    """Complaint raised against a driver, optionally tied to a trip."""
+    """Complaint raised against a driver."""
 
     class Status(models.TextChoices):
         OPEN = "open", "Open"
@@ -669,6 +655,26 @@ class DriverNotification(models.Model):
     body = models.TextField(blank=True)
     read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+    # Ride-request / deep-link payload (passenger → driver)
+    link_trip = models.ForeignKey(
+        "Trip",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="driver_notifications",
+    )
+    link_booking = models.ForeignKey(
+        "Booking",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="driver_notifications",
+    )
+    meta = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Optional: passenger_lat, passenger_lng, passenger_name, trip_code",
+    )
 
     class Meta:
         ordering = ["-created_at"]

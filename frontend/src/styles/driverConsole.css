@@ -552,3 +552,48 @@
     bottom: 64px;
   }
 }
+/* Clickable notification row (ride request) */
+.drv-notif-list li.drv-notif.unread {
+  border-left: 2px solid #e6a841;
+  padding-left: 10px;
+  background: rgba(230, 168, 65, 0.06);
+}
+.drv-notif-list li.drv-notif.read {
+  opacity: 0.75;
+}
+.drv-notif-btn {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  padding: 6px 0;
+  font: inherit;
+}
+.drv-notif-btn small {
+  color: #8b9bb0;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+}
+.drv-notif-btn p {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+  color: #e8eef2;
+}
+.drv-notif-cta {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 0.75rem;
+  color: #e6a841;
+  font-weight: 600;
+}
+.drv-notif-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e6a841;
+  margin-left: 6px;
+  vertical-align: middle;
+}
