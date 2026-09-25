@@ -29,8 +29,8 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault("is_staff", False)
         extra_fields.setdefault("is_superuser", False)
 
-        # username kept unique for AbstractUser; prefer phone, else email
-        username = phone or email
+        # username kept unique for AbstractUser; prefer explicit username, then phone, else email
+        username = extra_fields.pop("username", phone or email)
         user = self.model(
             phone=phone or None,
             email=email or "",
