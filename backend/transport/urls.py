@@ -54,4 +54,16 @@ urlpatterns = [
     path("api/driver/trips/confirm/",                  views.api_driver_confirm_trip,     name="api_driver_confirm_trip"),
     path("api/routing/directions/", views.api_routing_directions, name="api_routing_directions"),
     path("api/driver/vehicle/<int:vehicle_id>/location/", views.api_driver_post_location, name="api_driver_post_location"),
+    # Announcements
+    path("api/announcements/",                            views.api_list_announcements,    name="api_list_announcements"),
+    path("api/my-announcements/",                         views.api_my_announcements,      name="api_my_announcements"),
+    path("api/my-announcements/<int:announcement_id>/",   views.api_announcement_detail,   name="api_announcement_detail"),
+    # Panic alerts
+    path("api/my-bookings/<int:booking_id>/panic/",        views.api_trigger_panic,             name="api_trigger_panic"),
+    path("api/panic/<int:alert_id>/cancel/",               views.api_cancel_panic,              name="api_cancel_panic"),
+    path("api/my-panic/",                                  views.api_my_active_panic,           name="api_my_active_panic"),
+    path("api/operator/alerts/",                           views.api_operator_alerts,           name="api_operator_alerts"),
+    path("api/operator/alerts/<int:alert_id>/acknowledge/", views.api_operator_acknowledge_alert, name="api_operator_acknowledge_alert"),
+    path("api/operator/alerts/<int:alert_id>/resolve/",     views.api_operator_resolve_alert,     name="api_operator_resolve_alert"),
+
 ]   

@@ -369,3 +369,69 @@ class Feedback(models.Model):
     def __str__(self):
         kind = "complaint" if self.has_complaint else "rating"
         return f"{kind} {self.rating}★ for {self.trip.trip_code} ({self.status})"
+
+class Announcement(models.Model):
+    """A service update published by an operator or admin.
+    Optionally tied to a specific route."""
+
+    operator = models.ForeignKey(
+        OperatorProfile, on_delete=models.CASCADE, null=True, blank=True,
+        related_name="announcements",
+    )
+    route = models.ForeignKey(
+        Route, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="announcements",
+    )
+    title = models.CharField(max_length=150)
+    body = models.TextField()
+    active = models.BooleanField(default=True)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True,
+        related_name="announcements_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.title} — {self.operator or 'admin'}"
+
+class PanicAlert(models.Model):
+    """Emergency alert raised by a passenger on an active trip."""
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        ACKNOWLEDGED = "acknowledged", "Acknowledged"
+        RESOLVED = "resolved", "Resolved"
+        CANCELLED = "cancelled", "Cancelled (false alarm)"
+
+    booking = models.ForeignKey(
+        Booking, on_delete=models.CASCADE, related_name="panic_alerts"
+    )
+    passenger = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="panic_alerts",
+    )
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    message = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    acknowledged_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="panic_alerts_acknowledged",
+    )
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolution_notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Panic from {self.passenger} on {self.booking.trip.trip_code} ({self.status})"

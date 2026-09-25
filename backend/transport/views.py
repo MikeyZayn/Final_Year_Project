@@ -10,14 +10,15 @@ from accounts.models import OperatorProfile
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
     Vehicle, Trip, Booking, VerificationCode, TripFlag, TripAssetChange,
-    Feedback, DriverVehicle,
+    Feedback, DriverVehicle, Announcement, PanicAlert,
 )
 from .serializers import (
     RankSerializer, DestinationSerializer, OperatorAtRankSerializer,
     RouteSerializer, RouteWriteSerializer, VehicleSerializer,
     TripSerializer, TripWriteSerializer, BookingSerializer,
     VerificationCodeSerializer, TripFlagSerializer, TripAssetChangeSerializer,
-    FeedbackSerializer, FeedbackRespondSerializer, FeedbackSubmitSerializer
+    FeedbackSerializer, FeedbackRespondSerializer, FeedbackSubmitSerializer,
+    AnnouncementSerializer, AnnouncementWriteSerializer, PanicAlertSerializer,
 )
 
 
@@ -998,3 +999,180 @@ def api_routing_directions(request):
         )
 
     return Response(result)
+
+
+# ---------- Announcements ----------
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_list_announcements(request):
+    """Public feed of active announcements."""
+    qs = Announcement.objects.filter(active=True).select_related(
+        "operator__association", "route__departure", "route__destination", "created_by",
+    ).order_by("-created_at")[:50]
+    return Response(AnnouncementSerializer(qs, many=True).data)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def api_my_announcements(request):
+    """Operator's own announcements — list or create."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+
+    if request.method == "GET":
+        qs = Announcement.objects.filter(operator=op).select_related(
+            "route__departure", "route__destination", "created_by",
+        )
+        return Response(AnnouncementSerializer(qs, many=True).data)
+
+    s = AnnouncementWriteSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+    data = s.validated_data
+    route_id = data.pop("route_id", None)
+    route = Route.objects.filter(pk=route_id).first() if route_id else None
+
+    ann = Announcement.objects.create(
+        operator=op, route=route,
+        created_by=request.user,
+        **data,
+    )
+    return Response(AnnouncementSerializer(ann).data, status=201)
+
+
+@api_view(["PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def api_announcement_detail(request, announcement_id):
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        ann = Announcement.objects.get(pk=announcement_id, operator=op)
+    except Announcement.DoesNotExist:
+        return Response({"detail": "Announcement not found."}, status=404)
+
+    if request.method == "DELETE":
+        ann.active = False
+        ann.save()
+        return Response(status=204)
+
+    for field in ["title", "body", "active"]:
+        if field in request.data:
+            setattr(ann, field, request.data[field])
+    if "route_id" in request.data:
+        rid = request.data["route_id"]
+        ann.route = Route.objects.filter(pk=rid).first() if rid else None
+    ann.save()
+    return Response(AnnouncementSerializer(ann).data)
+
+# ---------- Panic alerts ----------
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_trigger_panic(request, booking_id):
+    """Passenger raises a panic alert on their active trip."""
+    try:
+        booking = Booking.objects.get(pk=booking_id, passenger=request.user)
+    except Booking.DoesNotExist:
+        return Response({"detail": "Booking not found."}, status=404)
+
+    if booking.status != Booking.Status.BOARDED:
+        return Response(
+            {"detail": "Panic button is only available while you are boarded."},
+            status=400,
+        )
+
+    # prevent duplicate active alerts
+    existing = booking.panic_alerts.filter(status=PanicAlert.Status.ACTIVE).first()
+    if existing:
+        return Response(PanicAlertSerializer(existing).data, status=200)
+
+    alert = PanicAlert.objects.create(
+        booking=booking,
+        passenger=request.user,
+        latitude=request.data.get("latitude"),
+        longitude=request.data.get("longitude"),
+        message=request.data.get("message", ""),
+    )
+    return Response(PanicAlertSerializer(alert).data, status=201)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_cancel_panic(request, alert_id):
+    """Passenger cancels their own alert (false alarm)."""
+    try:
+        alert = PanicAlert.objects.get(pk=alert_id, passenger=request.user)
+    except PanicAlert.DoesNotExist:
+        return Response({"detail": "Alert not found."}, status=404)
+
+    if alert.status != PanicAlert.Status.ACTIVE:
+        return Response({"detail": "Alert is no longer active."}, status=400)
+
+    alert.status = PanicAlert.Status.CANCELLED
+    alert.resolved_at = timezone.now()
+    alert.resolution_notes = "Cancelled by passenger."
+    alert.save()
+    return Response(PanicAlertSerializer(alert).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_alerts(request):
+    """Operator sees active alerts on their trips."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    qs = PanicAlert.objects.filter(
+        booking__trip__operator=op,
+        status=PanicAlert.Status.ACTIVE,
+    ).select_related("booking__trip", "passenger")
+    return Response(PanicAlertSerializer(qs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_operator_acknowledge_alert(request, alert_id):
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        alert = PanicAlert.objects.get(pk=alert_id, booking__trip__operator=op)
+    except PanicAlert.DoesNotExist:
+        return Response({"detail": "Alert not found."}, status=404)
+
+    alert.status = PanicAlert.Status.ACKNOWLEDGED
+    alert.acknowledged_by = request.user
+    alert.acknowledged_at = timezone.now()
+    alert.save()
+    return Response(PanicAlertSerializer(alert).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_operator_resolve_alert(request, alert_id):
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        alert = PanicAlert.objects.get(pk=alert_id, booking__trip__operator=op)
+    except PanicAlert.DoesNotExist:
+        return Response({"detail": "Alert not found."}, status=404)
+
+    alert.status = PanicAlert.Status.RESOLVED
+    alert.resolved_at = timezone.now()
+    alert.resolution_notes = request.data.get("notes", "")
+    alert.save()
+    return Response(PanicAlertSerializer(alert).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_active_panic(request):
+    """Passenger checks if they have an active alert on any of their bookings."""
+    qs = PanicAlert.objects.filter(
+        passenger=request.user,
+        status=PanicAlert.Status.ACTIVE,
+    ).select_related("booking__trip")
+    return Response(PanicAlertSerializer(qs, many=True).data)

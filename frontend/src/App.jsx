@@ -934,7 +934,9 @@ function Passenger({ notify }) {
   const [error, setError] = useState('');
   const [bookingId, setBookingId] = useState(null);
   const [feedbackList, setFeedbackList] = useState([]);
-  const [ratingFormFor, setRatingFormFor] = useState(null); // booking id
+  const [ratingFormFor, setRatingFormFor] = useState(null);
+  const [announcements, setAnnouncements] = useState([]);
+  const [panicAlert, setPanicAlert] = useState(null);
 
   async function loadTrips(params = {}) {
     setLoading(true);
@@ -946,7 +948,7 @@ function Passenger({ notify }) {
       const qs = query.toString() ? `?${query.toString()}` : '';
       const { data } = await api.get(`/transport/api/trips/${qs}`);
       setTrips(data);
-    } catch (err) {
+    } catch {
       setError('Could not load trips. Is the backend running?');
       setTrips([]);
     } finally {
@@ -958,22 +960,45 @@ function Passenger({ notify }) {
     try {
       const { data } = await api.get('/transport/api/my-bookings/');
       setBookings(data);
-    } catch {
-      // ignore — passenger may not have any yet
-    }
+    } catch { /* ignore */ }
+  }
+
+  async function loadFeedback() {
+    try {
+      const { data } = await api.get('/transport/api/my-feedback/');
+      setFeedbackList(data);
+    } catch { /* ignore */ }
+  }
+
+  async function loadAnnouncements() {
+    try {
+      const { data } = await api.get('/transport/api/announcements/');
+      setAnnouncements(data);
+    } catch { /* ignore */ }
+  }
+
+  async function loadPanic() {
+    try {
+      const { data } = await api.get('/transport/api/my-panic/');
+      setPanicAlert(data[0] || null);
+    } catch { /* ignore */ }
   }
 
   useEffect(() => {
     loadTrips();
     loadBookings();
     loadFeedback();
+    loadAnnouncements();
+    loadPanic();
+    const t = setInterval(loadAnnouncements, 30000);
+    return () => clearInterval(t);
   }, []);
 
   async function bookTrip(tripId) {
     setBookingId(tripId);
     try {
       await api.post('/transport/api/my-bookings/', { trip_id: tripId });
-      notify('Booking confirmed. Show up at the rank and tell the operator your name.');
+      notify('Booking confirmed.');
       await loadTrips();
       await loadBookings();
     } catch (err) {
@@ -982,18 +1007,11 @@ function Passenger({ notify }) {
       setBookingId(null);
     }
   }
-  async function loadFeedback() {
+
+  async function cancelBooking(bId) {
+    if (!window.confirm('Cancel this booking?')) return;
     try {
-      const { data } = await api.get('/transport/api/my-feedback/');
-      setFeedbackList(data);
-    } catch {
-      /* ignore */
-    }
-  }
-  async function cancelBooking(bookingId) {
-    if (!window.confirm('Cancel this booking? You can rebook if seats are still available.')) return;
-    try {
-      await api.post(`/transport/api/my-bookings/${bookingId}/cancel/`);
+      await api.post(`/transport/api/my-bookings/${bId}/cancel/`);
       notify('Booking cancelled.');
       await loadBookings();
       await loadTrips();
@@ -1001,30 +1019,56 @@ function Passenger({ notify }) {
       notify(err.response?.data?.detail || 'Cancellation failed.');
     }
   }
-  async function cancelBooking(bookingId) {
-    if (!window.confirm('Cancel this booking? You can rebook if seats are still available.')) return;
+
+  async function raisePanic(bId) {
+    if (!window.confirm('Raise a panic alert? The operator will be notified immediately.')) return;
     try {
-      await api.post(`/transport/api/my-bookings/${bookingId}/cancel/`);
-      notify('Booking cancelled.');
-      await loadBookings();
-      await loadTrips();
+      const { data } = await api.post(`/transport/api/my-bookings/${bId}/panic/`, { message: '' });
+      setPanicAlert(data);
+      notify('Panic alert sent.');
     } catch (err) {
-      notify(err.response?.data?.detail || 'Cancellation failed.');
+      notify(err.response?.data?.detail || 'Could not send alert.');
     }
   }
+
+  async function cancelPanic() {
+    if (!panicAlert) return;
+    if (!window.confirm('Cancel the panic alert?')) return;
+    try {
+      await api.post(`/transport/api/panic/${panicAlert.id}/cancel/`);
+      setPanicAlert(null);
+      notify('Alert cancelled.');
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Could not cancel.');
+    }
+  }
+
   function searchTrips() {
     loadTrips({ from: departure.trim(), to: destination.trim() });
   }
 
   return (
     <>
+      {panicAlert && (
+        <div className="module module-wide" style={{ borderColor: 'var(--danger)', borderWidth: 2 }}>
+          <div className="module-heading">
+            <span style={{ color: 'var(--danger)' }}>⚠ PANIC ALERT ACTIVE</span>
+          </div>
+          <p className="muted">
+            Your alert was sent to the operator at {new Date(panicAlert.created_at).toLocaleTimeString()}.
+          </p>
+          <button className="secondary-button" onClick={cancelPanic} type="button">
+            Cancel alert (false alarm)
+          </button>
+        </div>
+      )}
+
       <div className="dashboard-grid">
         <article className="module module-wide">
           <div className="module-heading">
             <span>Find a trip</span>
             <span className="module-number">01</span>
           </div>
-
           <div className="form-grid">
             <label>
               From (rank or area)
@@ -1035,12 +1079,31 @@ function Passenger({ notify }) {
               <input value={destination} onChange={(e) => setDestination(e.target.value)} placeholder="Kwa-Dlangezwa" />
             </label>
           </div>
-
           <button className="primary-button" onClick={searchTrips} type="button">
             Search trips <span>→</span>
           </button>
         </article>
       </div>
+
+      {announcements.length > 0 && (
+        <article className="module module-wide">
+          <div className="module-heading">
+            <span>Service announcements</span>
+            <span className="module-number">{announcements.length}</span>
+          </div>
+          {announcements.map((a) => (
+            <div key={a.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+              <strong>{a.title}</strong>
+              <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+                {a.operator_name}
+                {a.route_label ? ` · ${a.route_label}` : ''}
+                {' · '}{new Date(a.created_at).toLocaleString()}
+              </small>
+              <p className="muted" style={{ marginTop: 6 }}>{a.body}</p>
+            </div>
+          ))}
+        </article>
+      )}
 
       {bookings.length > 0 && (
         <article className="module module-wide">
@@ -1055,7 +1118,7 @@ function Passenger({ notify }) {
                 <small>{b.trip_code} · {b.departure_date} · {b.status}</small>
               </span>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                {b.status === 'completed' && !feedbackList.some(f => f.booking === b.id) && (
+                {b.status === 'completed' && !feedbackList.some((f) => f.booking === b.id) && (
                   <button className="primary-button" onClick={() => setRatingFormFor(b.id)} type="button">
                     Rate this trip
                   </button>
@@ -1063,6 +1126,16 @@ function Passenger({ notify }) {
                 {(b.status === 'reserved' || b.status === 'boarded') && (
                   <button className="danger-button" onClick={() => cancelBooking(b.id)} type="button">
                     Cancel
+                  </button>
+                )}
+                {b.status === 'boarded' && (
+                  <button
+                    className="danger-button"
+                    style={{ background: 'var(--danger)', color: 'white', fontWeight: 700 }}
+                    onClick={() => raisePanic(b.id)}
+                    type="button"
+                  >
+                    PANIC
                   </button>
                 )}
                 <span className="status-pill">{b.status}</span>
@@ -1091,12 +1164,8 @@ function Passenger({ notify }) {
                 <span
                   className="status-pill"
                   style={{
-                    borderColor: f.status === 'resolved' ? 'var(--success)' :
-                                f.status === 'confirmed_incident' ? 'var(--danger)' :
-                                'var(--accent)',
-                    color: f.status === 'resolved' ? 'var(--success)' :
-                          f.status === 'confirmed_incident' ? 'var(--danger)' :
-                          'var(--accent)',
+                    borderColor: f.status === 'resolved' ? 'var(--success)' : 'var(--accent)',
+                    color: f.status === 'resolved' ? 'var(--success)' : 'var(--accent)',
                   }}
                 >
                   {f.status_label}
@@ -1112,44 +1181,33 @@ function Passenger({ notify }) {
                   <em>Operator replied:</em> {f.operator_response}
                 </p>
               )}
-              {f.admin_response && (
-                <p className="muted" style={{ marginTop: 8, fontSize: 13, paddingLeft: 12, borderLeft: '2px solid var(--danger)' }}>
-                  <em>Admin:</em> {f.admin_response}
-                </p>
-              )}
             </div>
           ))}
         </article>
       )}
-
 
       <article className="module module-wide">
         <div className="module-heading">
           <span>Upcoming trips</span>
           <span className="module-number">{trips.length}</span>
         </div>
-
         {loading && <p className="muted">Loading trips…</p>}
         {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
         {!loading && !error && trips.length === 0 && (
-          <p className="muted">No upcoming trips match. Try clearing the search.</p>
+          <p className="muted">No upcoming trips match.</p>
         )}
-
         {!loading && trips.map((trip) => {
           const alreadyBooked = bookings.some((b) => b.trip === trip.id);
           const isFull = trip.seats_available <= 0;
           return (
             <div className="trip-row" key={trip.id}>
               <span>
-                <strong>
-                  {trip.route.departure.name} → {trip.route.destination.name}
-                </strong>
+                <strong>{trip.route.departure.name} → {trip.route.destination.name}</strong>
                 <small>
                   {trip.trip_code} · {trip.departure_date}
                   {trip.expected_departure_time ? ` · ${trip.expected_departure_time.slice(0, 5)}` : ''}
                   {' · '}{trip.operator_name}
                   {' · '}{trip.seats_available} seats
-                  {trip.fare ? ` · R${trip.fare}` : ''}
                 </small>
               </span>
               {alreadyBooked ? (
@@ -1170,6 +1228,7 @@ function Passenger({ notify }) {
           );
         })}
       </article>
+
       {ratingFormFor && (
         <RatingModal
           bookingId={ratingFormFor}
@@ -1181,7 +1240,6 @@ function Passenger({ notify }) {
     </>
   );
 }
-
 function RatingModal({ bookingId, onClose, onDone, notify }) {
   const [rating, setRating] = useState(5);
   const [hasComplaint, setHasComplaint] = useState(false);
@@ -1400,23 +1458,218 @@ function Operator({ notify }) {
 
   return (
     <div className="dashboard-grid">
+      <OperatorAlerts notify={notify} />
+      <OperatorAnnouncements notify={notify} />
       <OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} />
       <OperatorFeedback notify={notify} />
       <OperatorMemberships memberships={memberships} />
       <OperatorRequestRank notify={notify} onRequested={load} />
 
-      {/* Placeholder modules kept for SDD reference */}
       <article className="module module-wide" style={{ opacity: 0.55 }}>
         <div className="module-heading">
           <span>Complaints</span>
           <span className="module-number">UI preview</span>
         </div>
         <p className="muted">
-          Central contribution tier — Section 5.2.3 of the proposal. Review passenger feedback
-          for trips you operated.
+          Central contribution tier — Section 5.2.3 of the proposal.
         </p>
       </article>
     </div>
+  );
+}
+
+function OperatorAlerts({ notify }) {
+  const [alerts, setAlerts] = useState([]);
+
+  async function load() {
+    try {
+      const { data } = await api.get('/transport/api/operator/alerts/');
+      setAlerts(data);
+    } catch { /* ignore */ }
+  }
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function acknowledge(id) {
+    try {
+      await api.post(`/transport/api/operator/alerts/${id}/acknowledge/`);
+      notify('Alert acknowledged.');
+      load();
+    } catch { notify('Failed.'); }
+  }
+
+  async function resolve(id) {
+    const notes = window.prompt('Resolution notes:');
+    if (notes === null) return;
+    try {
+      await api.post(`/transport/api/operator/alerts/${id}/resolve/`, { notes });
+      notify('Alert resolved.');
+      load();
+    } catch { notify('Failed.'); }
+  }
+
+  if (alerts.length === 0) return null;
+
+  return (
+    <article
+      className="module module-wide"
+      style={{ borderColor: 'var(--danger)', borderWidth: 2 }}
+    >
+      <div className="module-heading">
+        <span style={{ color: 'var(--danger)' }}>⚠ ACTIVE PANIC ALERTS</span>
+        <span className="module-number">{alerts.length}</span>
+      </div>
+      {alerts.map((a) => (
+        <div key={a.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+          <strong>{a.passenger_name} · {a.trip_code}</strong>
+          <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+            {a.passenger_phone} · {new Date(a.created_at).toLocaleString()}
+          </small>
+          {a.message && <p className="muted" style={{ marginTop: 6 }}>{a.message}</p>}
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            {a.status === 'active' && (
+              <button className="primary-button" onClick={() => acknowledge(a.id)} type="button">
+                Acknowledge
+              </button>
+            )}
+            <button className="secondary-button" onClick={() => resolve(a.id)} type="button">
+              Mark resolved
+            </button>
+          </div>
+        </div>
+      ))}
+    </article>
+  );
+}
+
+function OperatorAnnouncements({ notify }) {
+  const [items, setItems] = useState([]);
+  const [showForm, setShowForm] = useState(false);
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [routes, setRoutes] = useState([]);
+  const [routeId, setRouteId] = useState('');
+
+  async function load() {
+    try {
+      const [aRes, rRes] = await Promise.all([
+        api.get('/transport/api/my-announcements/'),
+        api.get('/transport/api/my-trips/'),
+      ]);
+      setItems(aRes.data);
+      // build unique route list from trips
+      const seen = new Map();
+      rRes.data.forEach((t) => {
+        if (!seen.has(t.route.id)) seen.set(t.route.id, t.route);
+      });
+      setRoutes([...seen.values()]);
+    } catch { /* ignore */ }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function submit() {
+    if (!title.trim() || !body.trim()) { notify('Title and body required.'); return; }
+    try {
+      await api.post('/transport/api/my-announcements/', {
+        title, body, route_id: routeId ? Number(routeId) : null, active: true,
+      });
+      notify('Announcement published.');
+      setTitle(''); setBody(''); setRouteId(''); setShowForm(false);
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Failed to publish.');
+    }
+  }
+
+  async function deactivate(id) {
+    if (!window.confirm('Deactivate this announcement?')) return;
+    try {
+      await api.delete(`/transport/api/my-announcements/${id}/`);
+      notify('Deactivated.');
+      load();
+    } catch { notify('Failed.'); }
+  }
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Announcements</span>
+        <span className="module-number">{items.filter(i => i.active).length} active</span>
+      </div>
+      <p className="muted">Publish service updates. Passengers see these on their dashboard.</p>
+
+      {!showForm && (
+        <button className="primary-button" onClick={() => setShowForm(true)} type="button">
+          New announcement
+        </button>
+      )}
+
+      {showForm && (
+        <>
+          <label>
+            Title
+            <input value={title} onChange={(e) => setTitle(e.target.value)} />
+          </label>
+          <label>
+            Body
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={3}
+              style={{
+                width: '100%', padding: 10, borderRadius: 6,
+                border: '1px solid var(--border)', background: 'var(--surface)',
+                color: 'var(--text)', fontFamily: 'inherit', marginTop: 7,
+              }}
+            />
+          </label>
+          <label>
+            Link to route (optional)
+            <select value={routeId} onChange={(e) => setRouteId(e.target.value)}>
+              <option value="">All routes</option>
+              {routes.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.departure.name} → {r.destination.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button className="secondary-button" onClick={() => setShowForm(false)} type="button">Cancel</button>
+            <button className="primary-button" onClick={submit} type="button">Publish</button>
+          </div>
+        </>
+      )}
+
+      {items.length > 0 && (
+        <>
+          <div className="section-title" style={{ marginTop: 20 }}>Published</div>
+          {items.map((a) => (
+            <div key={a.id} className="trip-row">
+              <span>
+                <strong>{a.title}</strong>
+                <small>
+                  {new Date(a.created_at).toLocaleDateString()}
+                  {a.route_label ? ` · ${a.route_label}` : ''}
+                </small>
+              </span>
+              {a.active ? (
+                <button className="danger-button" onClick={() => deactivate(a.id)} type="button">
+                  Deactivate
+                </button>
+              ) : (
+                <span className="status-pill">inactive</span>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+    </article>
   );
 }
 

@@ -1,7 +1,8 @@
 from django.contrib import admin
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
-    Vehicle, DriverVehicle, Trip, Booking, VerificationCode, TripFlag, Feedback,
+    Vehicle, DriverVehicle, Trip, Booking, VerificationCode,
+    TripFlag, Feedback, Announcement, PanicAlert,
 )
 
 
@@ -118,3 +119,16 @@ class FeedbackAdmin(admin.ModelAdmin):
     list_filter = ("status", "category", "has_complaint", "rating")
     search_fields = ("passenger__phone", "trip__trip_code")
     readonly_fields = ("created_at", "reviewed_at", "resolved_at")
+
+@admin.register(Announcement)
+class AnnouncementAdmin(admin.ModelAdmin):
+    list_display = ("title", "operator", "route", "active", "created_at")
+    list_filter = ("active", "operator__association")
+    search_fields = ("title", "body")
+
+@admin.register(PanicAlert)
+class PanicAlertAdmin(admin.ModelAdmin):
+    list_display = ("booking", "passenger", "status", "created_at", "acknowledged_by")
+    list_filter = ("status",)
+    search_fields = ("passenger__phone", "booking__trip__trip_code")
+    readonly_fields = ("created_at", "acknowledged_at", "resolved_at")

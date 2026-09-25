@@ -3,7 +3,7 @@ from .models import (
     Rank, Destination, OperatorAtRank, Route,
     Vehicle, DriverVehicle, Trip, Booking,
     VerificationCode, TripFlag, TripAssetChange,
-    Feedback,
+    Feedback, Announcement, PanicAlert,
 )
 
 
@@ -271,3 +271,65 @@ class FeedbackSubmitSerializer(serializers.Serializer):
 
 class FeedbackRespondSerializer(serializers.Serializer):
     operator_response = serializers.CharField()
+
+
+class AnnouncementSerializer(serializers.ModelSerializer):
+    route_label = serializers.SerializerMethodField()
+    operator_name = serializers.CharField(
+        source="operator.association.association_name", read_only=True
+    )
+    created_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Announcement
+        fields = [
+            "id", "title", "body", "active", "route", "route_label",
+            "operator_name", "created_by_name",
+            "created_at", "updated_at", "expires_at",
+        ]
+
+    def get_route_label(self, obj):
+        if not obj.route:
+            return None
+        return f"{obj.route.departure.name} → {obj.route.destination.name}"
+
+    def get_created_by_name(self, obj):
+        if not obj.created_by:
+            return "System"
+        u = obj.created_by
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+
+class AnnouncementWriteSerializer(serializers.ModelSerializer):
+    route_id = serializers.IntegerField(required=False, allow_null=True)
+
+    class Meta:
+        model = Announcement
+        fields = ["title", "body", "route_id", "active", "expires_at"]
+
+class PanicAlertSerializer(serializers.ModelSerializer):
+    trip_code = serializers.CharField(source="booking.trip.trip_code", read_only=True)
+    passenger_name = serializers.SerializerMethodField()
+    passenger_phone = serializers.CharField(source="passenger.phone", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    acknowledged_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PanicAlert
+        fields = [
+            "id", "trip_code", "passenger_name", "passenger_phone",
+            "latitude", "longitude", "message", "status", "status_label",
+            "created_at", "acknowledged_at", "acknowledged_by_name",
+            "resolved_at", "resolution_notes",
+        ]
+
+    def get_passenger_name(self, obj):
+        u = obj.passenger
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def get_acknowledged_by_name(self, obj):
+        if not obj.acknowledged_by:
+            return None
+        u = obj.acknowledged_by
+        return f"{u.first_name} {u.last_name}".strip() or u.phone
+
