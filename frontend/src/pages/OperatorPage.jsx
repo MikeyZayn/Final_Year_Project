@@ -3,6 +3,8 @@
  * My trips → engage → manifest → verify bookings → walk-in + verification code.
  * Rank memberships + request rank.
  * Wired to integrated /api/ endpoints.
+ *
+ * Legacy console — RankFlowOperatorPage.jsx is the primary operator UI.
  */
 import { useEffect, useState } from 'react';
 import { api } from '../api';
@@ -11,11 +13,7 @@ import '../styles/operatorFyp.css';
 export default function OperatorPage({ notify, isAdmin }) {
   const [trips, setTrips] = useState([]);
   const [selectedTripId, setSelectedTripId] = useState(null);
-  const [selectedDriverId, setSelectedDriverId] = useState(null);
   const [memberships, setMemberships] = useState([]);
-  const [announcements, setAnnouncements] = useState([]);
-  const [drivers, setDrivers] = useState([]);
-  const [complaints, setComplaints] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -23,21 +21,15 @@ export default function OperatorPage({ notify, isAdmin }) {
     setLoading(true);
     setError('');
     try {
-      const [t, m, a, d, c] = await Promise.all([
+      const [t, m] = await Promise.all([
         api.myTrips().catch(async (err) => {
           if (isAdmin) return api.listTrips();
           throw err;
         }),
         api.myMemberships().catch(() => []),
-        api.listAnnouncements().catch(() => []),
-        api.listOperatorDrivers().catch(() => []),
-        api.listOperatorComplaints().catch(() => []),
       ]);
       setTrips(Array.isArray(t) ? t : []);
       setMemberships(Array.isArray(m) ? m : []);
-      setAnnouncements(Array.isArray(a) ? a : []);
-      setDrivers(Array.isArray(d) ? d : []);
-      setComplaints(Array.isArray(c) ? c : []);
     } catch (err) {
       setError(err.message || 'Could not load operator data.');
     } finally {
@@ -52,7 +44,7 @@ export default function OperatorPage({ notify, isAdmin }) {
 
   if (loading) {
     return (
-      <div className="fyp-operator">
+      <div className="app light fyp-operator">
         <article className="module module-wide">
           <p className="muted">Loading operator data…</p>
         </article>
@@ -62,7 +54,7 @@ export default function OperatorPage({ notify, isAdmin }) {
 
   if (error) {
     return (
-      <div className="fyp-operator">
+      <div className="app light fyp-operator">
         <article className="module module-wide">
           <p style={{ color: 'var(--danger)' }}>{error}</p>
           <button type="button" className="secondary-button" onClick={load}>
@@ -75,7 +67,7 @@ export default function OperatorPage({ notify, isAdmin }) {
 
   if (selectedTripId) {
     return (
-      <div className="fyp-operator">
+      <div className="app light fyp-operator">
         <OperatorTripDetail
           tripId={selectedTripId}
           onBack={() => {
@@ -88,29 +80,21 @@ export default function OperatorPage({ notify, isAdmin }) {
     );
   }
 
-  if (selectedDriverId) {
-    return (
-      <div className="fyp-operator">
-        <OperatorDriverDetail
-          driverId={selectedDriverId}
-          onBack={() => setSelectedDriverId(null)}
-        />
-      </div>
-    );
-  }
-
   return (
-    <div className="fyp-operator">
+    <div className="app light fyp-operator">
       <div className="dashboard-grid">
         <OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} />
         <OperatorMemberships memberships={memberships} />
         <OperatorRequestRank notify={notify} onRequested={load} />
-        <OperatorAnnouncements announcements={announcements} onSaved={load} />
-        <OperatorDriversList drivers={drivers} onSelectDriver={setSelectedDriverId} />
-        <OperatorComplaintsList complaints={complaints} onResolve={async (id, status) => {
-          await api.resolveOperatorComplaint(id, status);
-          await load();
-        }} />
+        <article className="module module-wide" style={{ opacity: 0.55 }}>
+          <div className="module-heading">
+            <span>Complaints</span>
+            <span className="module-number">UI preview</span>
+          </div>
+          <p className="muted">
+            Central contribution — review passenger feedback for trips you operated (SRS).
+          </p>
+        </article>
       </div>
     </div>
   );
@@ -305,7 +289,9 @@ function OperatorRequestRank({ notify, onRequested }) {
 
       {showForm &&
         (availableRanks.length === 0 ? (
-          <p className="muted">You already cover all available ranks, or none are seeded.</p>
+          <p className="muted">
+            You already cover all available ranks, or none are seeded.
+          </p>
         ) : (
           <>
             <label>
@@ -320,257 +306,32 @@ function OperatorRequestRank({ notify, onRequested }) {
             </label>
             <label>
               Notes
-              <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional" />
+              <input
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Optional"
+              />
             </label>
             {error && <p style={{ color: 'var(--danger)' }}>{error}</p>}
             <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => setShowForm(false)}
+              >
                 Cancel
               </button>
-              <button className="primary-button" type="button" onClick={submit} disabled={busy}>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={submit}
+                disabled={busy}
+              >
                 {busy ? 'Submitting…' : 'Submit request'}
               </button>
             </div>
           </>
         ))}
-    </article>
-  );
-}
-
-function OperatorAnnouncements({ announcements = [], onSaved }) {
-  const [title, setTitle] = useState('');
-  const [message, setMessage] = useState('');
-  const [audience, setAudience] = useState('all');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  async function submit() {
-    setError('');
-    if (!title.trim() || !message.trim()) {
-      setError('Title and message are required.');
-      return;
-    }
-
-    setBusy(true);
-    try {
-      await api.createAnnouncement({ title, message, audience });
-      setTitle('');
-      setMessage('');
-      setAudience('all');
-      onSaved?.();
-    } catch (err) {
-      setError(err.message || 'Could not create announcement.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <article className="module module-wide">
-      <div className="module-heading">
-        <span>Announcements</span>
-        <span className="module-number">{announcements.length}</span>
-      </div>
-
-      <div className="form-grid" style={{ display: 'grid', gap: 8, maxWidth: 520 }}>
-        <label>
-          Title
-          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Route update" />
-        </label>
-        <label>
-          Audience
-          <select value={audience} onChange={(e) => setAudience(e.target.value)}>
-            <option value="all">All users</option>
-            <option value="operators">Operators</option>
-            <option value="drivers">Drivers</option>
-            <option value="passengers">Passengers</option>
-          </select>
-        </label>
-        <label>
-          Message
-          <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={3} placeholder="Share route, weather, or service updates" />
-        </label>
-      </div>
-      {error && <p style={{ color: 'var(--danger)' }}>{error}</p>}
-      <button className="primary-button" type="button" onClick={submit} disabled={busy} style={{ marginTop: 8 }}>
-        {busy ? 'Posting…' : 'Post announcement'}
-      </button>
-
-      {announcements.length > 0 && (
-        <>
-          <div className="section-title" style={{ marginTop: 18 }}>Recent announcements</div>
-          {announcements.slice(0, 4).map((a) => (
-            <div className="trip-row" key={a.id}>
-              <span>
-                <strong>{a.title}</strong>
-                <small>
-                  {a.audience} · {a.created_by_name || 'Operator'} ·{' '}
-                  {new Date(a.created_at).toLocaleString()}
-                </small>
-              </span>
-              <span className="status-pill" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }}>
-                {a.audience}
-              </span>
-            </div>
-          ))}
-        </>
-      )}
-    </article>
-  );
-}
-
-function OperatorDriversList({ drivers = [], onSelectDriver }) {
-  return (
-    <article className="module module-wide">
-      <div className="module-heading">
-        <span>Association drivers</span>
-        <span className="module-number">{drivers.length}</span>
-      </div>
-      {drivers.length === 0 && <p className="muted">No drivers are assigned to your association yet.</p>}
-      {drivers.map((d) => (
-        <button key={d.id} type="button" className="trip-row" onClick={() => onSelectDriver(d.id)}>
-          <span>
-            <strong>
-              {d.user?.first_name || ''} {d.user?.last_name || ''} {(!d.user?.first_name && !d.user?.last_name) ? d.user?.username || 'Driver' : ''}
-            </strong>
-            <small>
-              {d.user?.phone || 'No phone'} · license {d.license_number || '—'} · {d.status}
-            </small>
-          </span>
-          <span className="status-pill" style={{ borderColor: d.status === 'verified' ? 'var(--success)' : 'var(--accent)', color: d.status === 'verified' ? 'var(--success)' : 'var(--accent)' }}>
-            {d.status}
-          </span>
-        </button>
-      ))}
-    </article>
-  );
-}
-
-function OperatorComplaintRow({ complaint, onResolve }) {
-  return (
-    <div className="trip-row" key={complaint.id}>
-      <span>
-        <strong>{complaint.category}</strong>
-        <small>
-          {complaint.driver_name || 'Driver'} · {complaint.trip_code || 'Trip'} · {complaint.status}
-        </small>
-        <small>{complaint.description}</small>
-      </span>
-      <button
-        type="button"
-        className="secondary-button"
-        onClick={() => onResolve?.(complaint.id, 'resolved')}
-        disabled={complaint.status === 'resolved'}
-      >
-        {complaint.status === 'resolved' ? 'Resolved' : 'Resolve'}
-      </button>
-    </div>
-  );
-}
-
-function OperatorComplaintsList({ complaints = [], onResolve }) {
-  return (
-    <article className="module module-wide">
-      <div className="module-heading">
-        <span>Complaints</span>
-        <span className="module-number">{complaints.length}</span>
-      </div>
-      {complaints.length === 0 && <p className="muted">No complaints recorded for your association.</p>}
-      {complaints.map((complaint) => (
-        <OperatorComplaintRow key={complaint.id} complaint={complaint} onResolve={onResolve} />
-      ))}
-    </article>
-  );
-}
-
-function OperatorDriverDetail({ driverId, onBack }) {
-  const [driver, setDriver] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let ignore = false;
-    async function load() {
-      setLoading(true);
-      try {
-        const data = await api.getOperatorDriver(driverId);
-        if (!ignore) setDriver(data);
-      } catch {
-        if (!ignore) setDriver(null);
-      } finally {
-        if (!ignore) setLoading(false);
-      }
-    }
-    load();
-    return () => { ignore = true; };
-  }, [driverId]);
-
-  if (loading) {
-    return (
-      <article className="module module-wide">
-        <p className="muted">Loading driver details…</p>
-        <button type="button" className="secondary-button" onClick={onBack}>← Back</button>
-      </article>
-    );
-  }
-
-  if (!driver) {
-    return (
-      <article className="module module-wide">
-        <p className="muted">Driver not found.</p>
-        <button type="button" className="secondary-button" onClick={onBack}>← Back</button>
-      </article>
-    );
-  }
-
-  return (
-    <article className="module module-wide">
-      <div className="module-heading">
-        <span>{driver.user?.first_name || 'Driver'} {driver.user?.last_name || ''}</span>
-        <button type="button" className="secondary-button" onClick={onBack}>← Back</button>
-      </div>
-
-      <div className="route-summary">
-        <div>
-          <span className="route-label">Phone</span>
-          <strong>{driver.user?.phone || '—'}</strong>
-        </div>
-        <div>
-          <span className="route-label">Email</span>
-          <strong>{driver.user?.email || '—'}</strong>
-        </div>
-        <div>
-          <span className="route-label">License</span>
-          <strong>{driver.license_number || '—'}</strong>
-        </div>
-        <div>
-          <span className="route-label">ID</span>
-          <strong>{driver.id_number || '—'}</strong>
-        </div>
-        <div>
-          <span className="route-label">Status</span>
-          <strong>{driver.status || '—'}</strong>
-        </div>
-        <div>
-          <span className="route-label">Trips</span>
-          <strong>{driver.trip_count || 0}</strong>
-        </div>
-      </div>
-
-      <div className="section-title" style={{ marginTop: 18 }}>Recent trips</div>
-      {(driver.recent_trips || []).length === 0 ? (
-        <p className="muted">No trip history yet.</p>
-      ) : (
-        (driver.recent_trips || []).map((trip) => (
-          <div className="trip-row" key={trip.id}>
-            <span>
-              <strong>{trip.trip_code}</strong>
-              <small>
-                {trip.route?.departure?.name || '—'} → {trip.route?.destination?.name || '—'} · {trip.departure_date} · {trip.status}
-              </small>
-            </span>
-          </div>
-        ))
-      )}
     </article>
   );
 }
@@ -582,8 +343,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   const [walkInPhone, setWalkInPhone] = useState('');
   const [walkInNokName, setWalkInNokName] = useState('');
   const [walkInNokPhone, setWalkInNokPhone] = useState('');
-  const [flagCategory, setFlagCategory] = useState('delay');
-  const [flagDescription, setFlagDescription] = useState('');
   const [lastWalkInCode, setLastWalkInCode] = useState(null);
   const [verifyingId, setVerifyingId] = useState(null);
 
@@ -670,24 +429,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     }
   }
 
-  async function flagTrip() {
-    if (!flagDescription.trim()) {
-      notify?.('Please add a description for the trip issue.');
-      return;
-    }
-    try {
-      await api.flagTrip(tripId, {
-        category: flagCategory,
-        description: flagDescription,
-      });
-      notify?.('Trip issue flagged successfully.');
-      setFlagDescription('');
-      setFlagCategory('delay');
-    } catch (err) {
-      notify?.(err.message || 'Unable to flag trip.');
-    }
-  }
-
   if (loading || !trip) {
     return (
       <article className="module module-wide">
@@ -699,7 +440,12 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     );
   }
 
-  const engaged = Boolean(trip.is_engaged || trip.engaged_at || trip.status === 'boarding' || trip.status === 'in_progress');
+  const engaged = Boolean(
+    trip.is_engaged ||
+      trip.engaged_at ||
+      trip.status === 'boarding' ||
+      trip.status === 'in_progress'
+  );
 
   if (!engaged) {
     return (
@@ -721,7 +467,9 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
             </div>
             <div>
               <span className="route-label">Time</span>
-              <strong>{String(trip.expected_departure_time || '—').slice(0, 5)}</strong>
+              <strong>
+                {String(trip.expected_departure_time || '—').slice(0, 5)}
+              </strong>
             </div>
             <div>
               <span className="route-label">Driver</span>
@@ -787,7 +535,9 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
           </div>
           <div>
             <span className="route-label">Time</span>
-            <strong>{String(trip.expected_departure_time || '—').slice(0, 5)}</strong>
+            <strong>
+              {String(trip.expected_departure_time || '—').slice(0, 5)}
+            </strong>
           </div>
           <div>
             <span className="route-label">Driver</span>
@@ -850,22 +600,37 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
         <p className="muted">
           Passengers without the app — added to the manifest with a next-of-kin record (FYP).
         </p>
-        <div className="form-grid" style={{ display: 'grid', gap: 8, maxWidth: 480 }}>
+        <div
+          className="form-grid"
+          style={{ display: 'grid', gap: 8, maxWidth: 480 }}
+        >
           <label>
             Full name
-            <input value={walkInName} onChange={(e) => setWalkInName(e.target.value)} />
+            <input
+              value={walkInName}
+              onChange={(e) => setWalkInName(e.target.value)}
+            />
           </label>
           <label>
             Phone
-            <input value={walkInPhone} onChange={(e) => setWalkInPhone(e.target.value)} />
+            <input
+              value={walkInPhone}
+              onChange={(e) => setWalkInPhone(e.target.value)}
+            />
           </label>
           <label>
             Next of kin — name
-            <input value={walkInNokName} onChange={(e) => setWalkInNokName(e.target.value)} />
+            <input
+              value={walkInNokName}
+              onChange={(e) => setWalkInNokName(e.target.value)}
+            />
           </label>
           <label>
             Next of kin — phone
-            <input value={walkInNokPhone} onChange={(e) => setWalkInNokPhone(e.target.value)} />
+            <input
+              value={walkInNokPhone}
+              onChange={(e) => setWalkInNokPhone(e.target.value)}
+            />
           </label>
         </div>
         <button
@@ -911,31 +676,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
             ))}
           </>
         )}
-      </article>
-
-      <article className="module module-wide">
-        <div className="module-heading">
-          <span>Trip incident flag</span>
-        </div>
-        <div className="form-grid" style={{ display: 'grid', gap: 8, maxWidth: 520 }}>
-          <label>
-            Category
-            <select value={flagCategory} onChange={(e) => setFlagCategory(e.target.value)}>
-              <option value="safety">Safety</option>
-              <option value="delay">Delay</option>
-              <option value="misconduct">Misconduct</option>
-              <option value="vehicle">Vehicle issue</option>
-              <option value="other">Other</option>
-            </select>
-          </label>
-          <label>
-            Description
-            <textarea value={flagDescription} onChange={(e) => setFlagDescription(e.target.value)} rows={3} placeholder="Describe the issue requiring admin attention" />
-          </label>
-        </div>
-        <button type="button" className="primary-button" onClick={flagTrip} style={{ marginTop: 12 }}>
-          Flag this trip
-        </button>
       </article>
     </>
   );

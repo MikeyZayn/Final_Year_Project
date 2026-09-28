@@ -19,7 +19,6 @@ function statusLabel(s) {
   return String(s || 'scheduled').replace(/_/g, ' ');
 }
 
-/** Route points: real RouteStop rows → else departure/destination + geometry samples. */
 function buildRoutePoints(trip) {
   const route = trip?.route;
   if (!route) return [];
@@ -58,7 +57,10 @@ function buildRoutePoints(trip) {
 
   const geom = Array.isArray(route.geometry) ? route.geometry : [];
   if (geom.length > 4) {
-    const midIdx = [Math.floor(geom.length * 0.33), Math.floor(geom.length * 0.66)];
+    const midIdx = [
+      Math.floor(geom.length * 0.33),
+      Math.floor(geom.length * 0.66),
+    ];
     midIdx.forEach((idx, n) => {
       const g = geom[idx];
       if (!Array.isArray(g) || g.length < 2) return;
@@ -86,29 +88,6 @@ function buildRoutePoints(trip) {
     });
   }
 
-  if (!pts.length && dep?.name && dest?.name) {
-    pts.push(
-      {
-        id: 'dep',
-        order: 1,
-        name: `${dep.name} depot`,
-        lat: Number(dep.latitude) || -28.854,
-        lng: Number(dep.longitude) || 31.846,
-        scheduled: trip.expected_departure_time,
-        note: 'Departure rank',
-      },
-      {
-        id: 'dest',
-        order: 2,
-        name: `${dest.name} terminus`,
-        lat: Number(dest.latitude) || -28.7808,
-        lng: Number(dest.longitude) || 31.8925,
-        scheduled: null,
-        note: 'Destination rank',
-      }
-    );
-  }
-
   return pts;
 }
 
@@ -127,6 +106,8 @@ export default function DriverPage({ notify }) {
   const [confirming, setConfirming] = useState(false);
 
   const [selectedTrip, setSelectedTrip] = useState(null);
+  const [rideRequestPanel, setRideRequestPanel] = useState(null);
+  const [rideRequestBusy, setRideRequestBusy] = useState(false);
   const [selectedPoint, setSelectedPoint] = useState(null);
   const [tracking, setTracking] = useState(false);
   const [lastGps, setLastGps] = useState(null);
@@ -185,6 +166,75 @@ export default function DriverPage({ notify }) {
       );
     } catch (e) {
       notify?.(e.message);
+    }
+  }
+
+  async function openRideRequestFromNotification(n) {
+    const meta = n.meta || {};
+    if (meta.expired || meta.rejected_by_me) {
+      notify?.('This request is no longer available.');
+      return;
+    }
+    const requestId = meta.request_id;
+    if (!requestId) {
+      notify?.('No ride request id on this notification.');
+      return;
+    }
+    try {
+      if (n.id) await api.notificationsMarkRead(n.id);
+    } catch {
+      /* ignore */
+    }
+    let detail = null;
+    try {
+      detail = await api.getRideRequest(requestId);
+    } catch {
+      detail = null;
+    }
+    setRideRequestPanel({
+      requestId,
+      notificationId: n.id,
+      passenger_name:
+        detail?.passenger_name || meta.passenger_name || 'Passenger',
+      passenger_lat: detail?.passenger_lat ?? meta.passenger_lat,
+      passenger_lng: detail?.passenger_lng ?? meta.passenger_lng,
+      trip_code: detail?.trip_code || meta.trip_code,
+      status: detail?.status || 'pending',
+    });
+  }
+
+  async function acceptRideRequest() {
+    if (!rideRequestPanel?.requestId) return;
+    setRideRequestBusy(true);
+    try {
+      await api.acceptRideRequest(rideRequestPanel.requestId);
+      notify?.('Trip accepted — passenger will see Driver incoming.');
+      setRideRequestPanel(null);
+      try {
+        const prof = await api.driverProfile();
+        setProfile(prof);
+      } catch {
+        /* ignore */
+      }
+    } catch (e) {
+      notify?.(e.message || 'Could not accept (maybe another driver took it).');
+      setRideRequestPanel(null);
+    } finally {
+      setRideRequestBusy(false);
+    }
+  }
+
+  async function rejectRideRequest() {
+    if (!rideRequestPanel?.requestId) return;
+    setRideRequestBusy(true);
+    try {
+      await api.rejectRideRequest(rideRequestPanel.requestId);
+      notify?.('Request rejected.');
+    } catch (e) {
+      notify?.(e.message || 'Could not reject.');
+    } finally {
+      setRideRequestBusy(false);
+      setRideRequestPanel(null);
     }
   }
 
@@ -320,9 +370,13 @@ export default function DriverPage({ notify }) {
 
   async function openNotification(n) {
     const meta = n.meta || {};
+    if (meta.type === 'ride_request' || meta.request_id) {
+      await openRideRequestFromNotification(n);
+      return;
+    }
     const tripId = n.trip_id || meta.trip_id;
     try {
-      if (n.id && !n.read && api.notificationsMarkRead) {
+      if (n.id && !n.read) {
         await api.notificationsMarkRead(n.id);
         setProfile((prev) =>
           prev
@@ -345,25 +399,13 @@ export default function DriverPage({ notify }) {
       const rows = await refreshTrips();
       trip = (rows || []).find((x) => x.id === tripId);
     }
-    const pickup =
-      meta.passenger_lat != null && meta.passenger_lng != null
-        ? {
-            lat: Number(meta.passenger_lat),
-            lng: Number(meta.passenger_lng),
-            name: meta.passenger_name || 'Passenger',
-            booking_id: n.booking_id || meta.booking_id,
-          }
-        : null;
     if (trip) {
-      openTrip(trip, pickup);
-      notify?.(
-        pickup
-          ? `Opened ${trip.trip_code} — passenger location on map.`
-          : `Opened ${trip.trip_code} from notification.`
-      );
+      openTrip(trip, null);
+      notify?.(`Opened ${trip.trip_code} from notification.`);
     } else {
       notify?.(
-        n.body || 'Notification opened. Confirm the trip code if this trip is not yet in My trips.'
+        n.body ||
+          'Notification opened. Confirm the trip code if this trip is not yet in My trips.'
       );
       if (meta.trip_code) setTripCodeInput(String(meta.trip_code));
     }
@@ -439,7 +481,85 @@ export default function DriverPage({ notify }) {
     return Math.round((selectedPoint.order / routePoints.length) * 100);
   }, [routePoints, selectedPoint, selectedTrip]);
 
-  /* ================= Stage 2 & 3 ================= */
+  // ---- Trip request panel (Accept / Reject) ----
+  if (rideRequestPanel) {
+    const lat = Number(rideRequestPanel.passenger_lat);
+    const lng = Number(rideRequestPanel.passenger_lng);
+    const hasLoc = Number.isFinite(lat) && Number.isFinite(lng);
+    const markers = hasLoc
+      ? [
+          {
+            id: 'passenger',
+            lat,
+            lng,
+            label: `${rideRequestPanel.passenger_name || 'Passenger'} (live GPS)`,
+            kind: 'user',
+          },
+        ]
+      : [];
+    return (
+      <div className="drv-shell drv-trip-request">
+        <div className="drv-request-layout">
+          <aside className="drv-request-side">
+            <p className="drv-request-kicker">Trip request</p>
+            <div className="drv-request-brand">
+              <span className="drv-brand-dot" />
+            </div>
+            <h1 className="drv-request-name">
+              {(rideRequestPanel.passenger_name || 'Passenger').split(' ')[0]}
+              <br />
+              <span>
+                {(rideRequestPanel.passenger_name || '')
+                  .split(' ')
+                  .slice(1)
+                  .join(' ') || ''}
+              </span>
+            </h1>
+            <p className="drv-muted">
+              Map shows passenger <strong>live GPS</strong>
+              {Number.isFinite(Number(rideRequestPanel.passenger_lat))
+                ? ` (${Number(rideRequestPanel.passenger_lat).toFixed(
+                    5
+                  )}, ${Number(rideRequestPanel.passenger_lng).toFixed(5)})`
+                : ''}
+            </p>
+            {rideRequestPanel.trip_code && (
+              <p className="drv-muted">Trip context: {rideRequestPanel.trip_code}</p>
+            )}
+            <div className="drv-request-actions">
+              <button
+                type="button"
+                className="drv-btn primary drv-accept"
+                disabled={rideRequestBusy}
+                onClick={acceptRideRequest}
+              >
+                {rideRequestBusy ? '…' : 'ACCEPT TRIP'}
+              </button>
+              <button
+                type="button"
+                className="drv-btn ghost drv-reject"
+                disabled={rideRequestBusy}
+                onClick={rejectRideRequest}
+              >
+                REJECT TRIP
+              </button>
+            </div>
+          </aside>
+          <div className="drv-request-map">
+            <ThembaMap
+              markers={markers}
+              polylines={[]}
+              initialCenter={hasLoc ? [lat, lng] : undefined}
+              initialZoom={14}
+              fitKey={`rr-${rideRequestPanel.requestId}-${lat}-${lng}`}
+              height="100%"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (selectedTrip) {
     const from = selectedTrip.route?.departure?.name || '—';
     const to = selectedTrip.route?.destination?.name || '—';
@@ -466,7 +586,12 @@ export default function DriverPage({ notify }) {
         </header>
 
         <div className="drv-trip-header">
-          <button type="button" className="drv-back" onClick={backToList} title="Back to trips">
+          <button
+            type="button"
+            className="drv-back"
+            onClick={backToList}
+            title="Back to trips"
+          >
             ←
           </button>
           <div>
@@ -692,15 +817,18 @@ export default function DriverPage({ notify }) {
           <div>
             <p className="drv-kicker">
               SHIFT CONTROL ·{' '}
-              {new Date().toLocaleDateString(undefined, {
-                weekday: 'short',
-                day: 'numeric',
-                month: 'short',
-              }).toUpperCase()}
+              {new Date()
+                .toLocaleDateString(undefined, {
+                  weekday: 'short',
+                  day: 'numeric',
+                  month: 'short',
+                })
+                .toUpperCase()}
             </p>
             <h1>Ready for dispatch</h1>
             <p className="drv-muted">
-              Verify your identity and select an assigned trip to open live routing.
+              Verify your identity and select an assigned trip to open live routing. The
+              operator issues your trip verification code at booking time.
             </p>
           </div>
           <span className="drv-badge">{trips.length} TRIPS ASSIGNED</span>
@@ -756,7 +884,8 @@ export default function DriverPage({ notify }) {
             </button>
             {matchedCode && (
               <p className="drv-muted" style={{ marginTop: 8 }}>
-                Assigned route confirmed for this shift: <strong>{matchedCode}</strong>
+                Assigned route confirmed for this shift:{' '}
+                <strong>{matchedCode}</strong>
               </p>
             )}
           </section>
@@ -770,8 +899,8 @@ export default function DriverPage({ notify }) {
             </div>
             {trips.length === 0 && (
               <p className="drv-muted">
-                No trips assigned yet. Enter a trip code above to claim an assigned trip, or wait
-                for the operator to assign you.
+                No trips assigned yet. Enter a trip code above to claim an assigned trip, or
+                wait for the operator to assign you.
               </p>
             )}
             <ul className="drv-trip-list">
@@ -852,9 +981,13 @@ export default function DriverPage({ notify }) {
                       {!n.read && <span className="drv-notif-dot" />}
                     </small>
                     <p>{n.body}</p>
-                    {(n.trip_id || n.meta?.trip_id) && (
-                      <span className="drv-notif-cta">Open route →</span>
+                    {(n.meta?.type === 'ride_request' || n.meta?.request_id) && (
+                      <span className="drv-notif-cta">Open request →</span>
                     )}
+                    {!(n.meta?.type === 'ride_request' || n.meta?.request_id) &&
+                      (n.trip_id || n.meta?.trip_id) && (
+                        <span className="drv-notif-cta">Open route →</span>
+                      )}
                   </button>
                 </li>
               ))}

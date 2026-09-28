@@ -1,6 +1,6 @@
 /**
  * Passenger hub UI — 3 stages: Desk → Route → Active.
- * - Desk: search trips, local fares, verify code, My bookings, announcements
+ * - Desk: search trips, Request ride (10 km drivers), verify/book separate, slim notifications
  * - Route: route preview on map (distance/time/fare)
  * - Active: verified trip — live vehicle map + info + panic + feedback
  *
@@ -8,7 +8,7 @@
  *               chosen departure → destination (amber solid)
  *
  * Ride request flow:
- * - Request ride → POST /api/bookings/ (with passenger GPS) → driver notified
+ * - Request ride → POST /api/ride-requests/ (GPS only, NO booking) → drivers within 10 km
  * - My bookings row click → opens trip info panel + loads verify code
  */
 import { useEffect, useMemo, useState } from 'react';
@@ -28,6 +28,14 @@ import { useGeolocation } from '../hooks/useGeolocation';
 import '../styles/passengerMapDashboard.css';
 
 const PLACES = PREDETERMINED_PLACES;
+const OFFICIAL_PLACE_NAMES = new Set(PLACES.map((p) => p.name.toLowerCase()));
+
+function isOfficialCorridor(origin, destination) {
+  const o = String(origin || '').toLowerCase();
+  const d = String(destination || '').toLowerCase();
+  return OFFICIAL_PLACE_NAMES.has(o) && OFFICIAL_PLACE_NAMES.has(d);
+}
+
 
 /** Frontend-only announcements (until backend endpoint exists). */
 const PASSENGER_ANNOUNCEMENTS = [
@@ -40,7 +48,7 @@ const PASSENGER_ANNOUNCEMENTS = [
   {
     id: 'a2',
     title: 'Booking confirmed',
-    body: 'Your verification code is shown after Request ride. Keep it ready at boarding.',
+    body: 'Request ride alerts drivers within 10 km. Booking/verify stays separate.',
     when: 'System',
   },
   {
@@ -58,7 +66,11 @@ function placeByName(name) {
 function mapApiTrip(t) {
   const origin = t.route?.departure?.name || '—';
   const destination = t.route?.destination?.name || '—';
-  const fareNum = t.route?.fare != null ? Number(t.route.fare) : null;
+  let fareNum = t.route?.fare != null ? Number(t.route.fare) : null;
+  if (fareNum == null && origin && destination) {
+    const local = lookupLocalFare(origin, destination);
+    if (local != null) fareNum = Number(local);
+  }
   return {
     id: t.id,
     trip_code: t.trip_code,
@@ -101,6 +113,7 @@ export default function PassengerMapDashboard({ notify, onExit }) {
   const [selectedBookingId, setSelectedBookingId] = useState(null);
   const [booked, setBooked] = useState(null);
   const [myBookings, setMyBookings] = useState([]);
+  const [passengerNotes, setPassengerNotes] = useState([]);
   const [adhocLine, setAdhocLine] = useState(null);
   const [toRankGeometry, setToRankGeometry] = useState([]);
   const [taxiGeometry, setTaxiGeometry] = useState([]);
@@ -160,7 +173,7 @@ export default function PassengerMapDashboard({ notify, onExit }) {
   async function searchTrip() {
     if (departure === destination) {
       notify?.('Departure and destination must be different.');
-      setResults([]);
+      setResults((Array.isArray([]) ? [] : []).filter((x) => isOfficialCorridor(x.origin, x.destination)));
       return;
     }
     setLoading(true);
@@ -198,96 +211,157 @@ export default function PassengerMapDashboard({ notify, onExit }) {
         notify?.('No trips found for that route.');
       }
 
-      setResults(matched);
-      if (matched.length && matched[0].raw) setSelected(matched[0]);
+      setResults((Array.isArray(matched) ? matched : []).filter((x) => isOfficialCorridor(x.origin, x.destination)));
+      if (matched.length) {
+        const pick = matched.find((m) => m.raw) || matched[0];
+        setSelected(pick);
+      }
     } catch (e) {
       notify?.(e.message);
-      setResults([]);
+      setResults((Array.isArray([]) ? [] : []).filter((x) => isOfficialCorridor(x.origin, x.destination)));
     } finally {
       setLoading(false);
     }
   }
 
-  // "Request ride" — same endpoint, friendlier label; sends GPS so driver sees pickup
+
+  /**
+   * Always prefer the device GPS for ride requests so the driver sees the
+   * passenger live position — never the departure rank as a substitute.
+   */
+  function isSecureGeoContext() {
+    // Browsers allow geolocation on localhost / HTTPS only — NOT on http://192.168.x.x
+    try {
+      if (typeof window !== 'undefined' && window.isSecureContext) return true;
+      const h = window.location.hostname;
+      return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+    } catch {
+      return false;
+    }
+  }
+
+  function rankFallbackLocation() {
+    const name = selected?.origin || departure || 'Ongoye';
+    const place =
+      (PREDETERMINED_PLACES || []).find(
+        (pl) => String(pl.name).toLowerCase() === String(name).toLowerCase()
+      ) ||
+      (PREDETERMINED_PLACES || []).find(
+        (pl) => String(pl.name).toLowerCase() === 'ongoye'
+      ) || { lat: -28.854, lng: 31.846 };
+    return {
+      lat: Number(place.lat),
+      lng: Number(place.lng),
+      source: 'rank_fallback',
+    };
+  }
+
+  function readGpsOnce(timeoutMs = 12000) {
+    return new Promise((resolve) => {
+      if (!navigator.geolocation || !isSecureGeoContext()) {
+        resolve(null);
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          resolve({
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            accuracy: pos.coords.accuracy,
+            source: 'gps',
+          });
+        },
+        () => resolve(null),
+        { enableHighAccuracy: true, timeout: timeoutMs, maximumAge: 5000 }
+      );
+    });
+  }
+
+  // Request ride — GPS when allowed; on LAN http://192.168.x.x use rank coords so demo works.
   async function requestRide() {
-    if (!selected?.raw?.id) {
-      notify?.('Select a live trip (not the fare-only row) to request a ride.');
-      return;
+    if (!selected?.raw?.id && !selected?.trip_code && !selected?.origin) {
+      notify?.('Search and select a trip first, then request a ride.');
+      return false;
     }
     setBooking(true);
     try {
-      const extra = {};
-      if (geo.position) {
-        extra.lat = geo.position.lat;
-        extra.lng = geo.position.lng;
-      } else {
-        geo.requestOnce?.();
+      let loc = null;
+      if (geo.position?.lat != null && geo.position?.lng != null) {
+        loc = {
+          lat: Number(geo.position.lat),
+          lng: Number(geo.position.lng),
+          source: 'gps',
+        };
       }
-      const b = await api.createBooking(selected.raw.id, selected.trip_code, extra);
-      const code = b.verification_code || null;
-      setBooked({
-        booking_id: b.id,
-        verification_code: code,
-        trip_code: b.trip_code || selected.trip_code,
-        trip_id: b.trip || selected.raw?.id,
-        status: b.status,
-      });
+      if (!loc && isSecureGeoContext()) {
+        loc = await readGpsOnce(12000);
+      }
+      if (!loc || loc.lat == null || loc.lng == null) {
+        // http://192.168.* is not a secure context — GPS is blocked by the browser
+        loc = rankFallbackLocation();
+      }
+      const payload = {
+        lat: loc.lat,
+        lng: loc.lng,
+        trip_id: selected.raw?.id || undefined,
+        location_source: loc.source || 'gps',
+      };
+      const res = await api.createRideRequest(payload);
+      const n = res.drivers_notified ?? 0;
+      if (loc.source === 'rank_fallback') {
+        notify?.(
+          n > 0
+            ? `Request sent to ${n} driver(s). GPS unavailable on this address — used departure area for the map.`
+            : 'Request recorded (departure area pin). Open driver_demo to view it.'
+        );
+      } else {
+        notify?.(
+          n > 0
+            ? `Request sent with your live GPS to ${n} driver${n === 1 ? '' : 's'}.`
+            : 'Request recorded with your live GPS. Open driver_demo to see it.'
+        );
+      }
       try {
-        const rows = await api.myBookings();
-        setMyBookings(rows || []);
+        const notes = await api.passengerNotifications();
+        setPassengerNotes(notes || []);
       } catch {
         /* ignore */
       }
-      if (code) {
-        setVerifyInput(code);
-        notify?.(
-          `Ride requested for ${selected.trip_code}. Driver notified. Code: ${code}`
-        );
-      } else {
-        notify?.(
-          `Ride request #${b.id} recorded for ${selected.trip_code}. Driver notified if assigned.`
-        );
-      }
-      // Open the trip information panel (same as verified active view)
-      setVerifiedTrip({
-        ...(selected || {}),
-        verification_code: code,
-        booking_id: b.id,
-        trip_code: b.trip_code || selected.trip_code,
-        status: b.status || 'reserved',
-      });
-      if (selected.raw?.id) {
-        await loadLiveForTrip(selected.raw.id);
-      }
-      setViewMode('active');
+      return true;
     } catch (e) {
-      notify?.(e.message);
+      notify?.(e.message || 'Could not send ride request.');
+      return false;
     } finally {
       setBooking(false);
     }
   }
 
-  /** Open trip information panel from a My bookings row. */
+  /** Open trip information panel from a My bookings row (after verify / back). */
   async function openBookingDetails(b) {
     setSelectedBookingId(b.id);
-    if (b.verification_code) {
-      setVerifyInput(String(b.verification_code).toUpperCase());
-    }
-    const tripId = b.trip || b.trip_id;
-    setVerifiedTrip({
-      id: tripId,
-      trip_code: b.trip_code,
-      origin: b.route_from || departure,
-      destination: b.route_to || destination,
-      status: b.status,
-      verification_code: b.verification_code,
+    const tripId = b.trip_id || b.trip || b.trip?.id;
+    setBooked({
       booking_id: b.id,
-      fare: b.fare_paid != null ? `R${b.fare_paid}` : selected?.fare,
-      raw: selected?.raw || { id: tripId },
+      trip_id: tripId,
+      verification_code: b.verification_code,
+      trip_code: b.trip_code,
+    });
+    setVerifiedTrip({
+      origin: b.route_from || '—',
+      destination: b.route_to || '—',
+      trip_code: b.trip_code,
+      status: b.status,
+      fare: b.fare_paid != null ? `R${b.fare_paid}` : undefined,
+      driver: b.driver_name,
+      operator: b.operator_name,
+      departure: b.departure_date || '',
+      raw: { id: tripId, trip_code: b.trip_code },
     });
     if (tripId) {
       try {
-        await loadLiveForTrip(tripId);
+        if (typeof loadLiveForTrip === 'function') {
+          await loadLiveForTrip(tripId);
+        }
       } catch {
         /* ignore */
       }
@@ -374,58 +448,73 @@ export default function PassengerMapDashboard({ notify, onExit }) {
   }
 
   async function confirmVerifyCode() {
-    const cleaned = verifyInput.trim();
+    const cleaned = verifyInput.trim().toUpperCase();
     if (!cleaned) {
-      notify?.('Enter the verification code from your booking.');
+      notify?.('Enter the verification code from the operator.');
       return;
     }
 
-    let matchedBooking = null;
-    let tripId = selected?.raw?.id || null;
+    try {
+      // Backend: claim operator walk-in / code → attach booking to this passenger
+      const data = await api.verifyBookingCode(cleaned);
 
-    if (booked?.verification_code && cleaned === booked.verification_code) {
-      matchedBooking = booked;
-      tripId = selected?.raw?.id || booked.trip_id || tripId;
-    } else {
-      const fromMine = myBookings.find(
-        (b) =>
-          String(b.verification_code || '').toLowerCase() === cleaned.toLowerCase() ||
-          String(b.trip_code || '').toLowerCase() === cleaned.toLowerCase()
-      );
-      if (fromMine) {
-        matchedBooking = {
-          booking_id: fromMine.id,
-          verification_code: fromMine.verification_code || cleaned,
-          trip_code: fromMine.trip_code,
-          status: fromMine.status,
-        };
-        tripId = fromMine.trip || fromMine.trip_id || tripId;
+      const tripId = data.trip_id || data.trip?.id;
+      const origin = data.origin || data.route?.departure?.name || '—';
+      const destination = data.destination || data.route?.destination?.name || '—';
+      const fare =
+        data.fare_paid != null
+          ? `R${data.fare_paid}`
+          : data.route?.fare != null
+            ? `R${data.route.fare}`
+            : undefined;
+
+      setBooked({
+        booking_id: data.booking_id || data.id,
+        trip_id: tripId,
+        verification_code: data.verification_code || cleaned,
+        trip_code: data.trip_code,
+      });
+
+      setVerifiedTrip({
+        origin,
+        destination,
+        trip_code: data.trip_code,
+        fare,
+        driver: data.driver_name,
+        operator: data.operator_name,
+        status: data.trip_status || data.status,
+        departure: [data.departure_date, data.expected_departure_time || '']
+          .filter(Boolean)
+          .join(' '),
+        raw: {
+          id: tripId,
+          trip_code: data.trip_code,
+          status: data.trip_status,
+          route: data.route,
+          driver_name: data.driver_name,
+          operator_name: data.operator_name,
+          seat_capacity: data.seat_capacity,
+          seats_taken: data.seats_taken,
+        },
+      });
+
+      setSelectedBookingId(data.booking_id || data.id);
+      setViewMode('active');
+
+      // Refresh My bookings so the trip appears after Back
+      try {
+        const mine = await api.myBookings();
+        setMyBookings(Array.isArray(mine) ? mine : []);
+      } catch {
+        /* keep current list */
       }
-    }
 
-    if (!matchedBooking) {
-      notify?.(
-        'Code not found on your bookings. Book a trip first, or use the code shown after Request ride.'
-      );
-      return;
-    }
-
-    setVerifiedTrip({
-      ...(selected || {}),
-      verification_code: matchedBooking.verification_code || cleaned,
-      booking_id: matchedBooking.booking_id,
-      trip_code: matchedBooking.trip_code || selected?.trip_code,
-      status: matchedBooking.status,
-    });
-    setViewMode('active');
-
-    if (tripId) {
-      await loadLiveForTrip(tripId);
-      notify?.('Code confirmed — showing trip details and live vehicle location.');
-    } else {
-      notify?.('Code recognised, but trip id is missing.');
+      notify?.(data.message || 'Trip verified — added to My bookings.');
+    } catch (err) {
+      notify?.(err.message || 'Invalid or expired verification code.');
     }
   }
+
 
   async function sendPanic() {
     const ok = window.confirm(
@@ -651,7 +740,7 @@ export default function PassengerMapDashboard({ notify, onExit }) {
                   </div>
                   <div>
                     <dt>Code</dt>
-                    <dd>{vt.verification_code || verifyInput || '—'}</dd>
+                    <dd>Verified</dd>
                   </div>
                 </dl>
               </section>
@@ -949,6 +1038,14 @@ export default function PassengerMapDashboard({ notify, onExit }) {
                   <span>Matching trips</span>
                   <span>{results.length}</span>
                 </div>
+                <div className="pmd-fare-block pmd-fare-auto">
+                  <span>OFFICIAL TRIP FARE</span>
+                  <strong>
+                    {(selected && selected.fare) ||
+                      results[0]?.fare ||
+                      (localFare != null ? `R${localFare}` : '—')}
+                  </strong>
+                </div>
                 {results.map((trip) => (
                   <button
                     key={trip.id ?? `${trip.origin}-${trip.destination}-${trip.trip_code}`}
@@ -959,7 +1056,7 @@ export default function PassengerMapDashboard({ notify, onExit }) {
                         (trip.isInfoOnly &&
                           selected.isInfoOnly &&
                           selected.origin === trip.origin))
-                        ? 'pmd-trip active'
+                        ? 'pmd-trip is-selected'
                         : 'pmd-trip'
                     }
                     onClick={() => setSelected(trip)}
@@ -969,42 +1066,24 @@ export default function PassengerMapDashboard({ notify, onExit }) {
                     </strong>
                     <small>
                       {trip.operator} · {trip.trip_code}
+                      {trip.fare ? ` · ${trip.fare}` : ''}
                     </small>
                     <div className="pmd-trip-meta">
                       <span>{trip.departure}</span>
                       <span className="pmd-status">{trip.status}</span>
+                      <span className="pmd-trip-fare">{trip.fare || '—'}</span>
                     </div>
                   </button>
                 ))}
-                {selected && !selected.isInfoOnly && (
-                  <>
-                    <div className="pmd-fare-block">
-                      <span>OFFICIAL FARE</span>
-                      <strong>{selected.fare}</strong>
-                    </div>
-                    {!booked ? (
-                      <button
-                        type="button"
-                        className="pmd-btn primary block"
-                        onClick={requestRide}
-                        disabled={booking}
-                      >
-                        {booking ? 'Requesting…' : 'Request ride'}
-                      </button>
-                    ) : (
-                      <div className="pmd-code-banner">
-                        Booked · code <strong>{booked.verification_code || '—'}</strong>
-                        <small>Enter this code under Verify a booked trip</small>
-                      </div>
-                    )}
-                  </>
-                )}
-                {selected && selected.isInfoOnly && (
-                  <div className="pmd-fare-block">
-                    <span>LOCAL FARE (no live trip yet)</span>
-                    <strong>{selected.fare}</strong>
-                  </div>
-                )}
+                <button
+                  type="button"
+                  className="pmd-btn primary block"
+                  style={{ marginTop: 12 }}
+                  onClick={requestRide}
+                  disabled={booking || !selected}
+                >
+                  {booking ? 'Requesting…' : 'Request a trip'}
+                </button>
               </div>
             )}
           </section>
@@ -1012,7 +1091,7 @@ export default function PassengerMapDashboard({ notify, onExit }) {
           <section className="pmd-card">
             <h3>Verify a booked trip</h3>
             <p className="pmd-hint">
-              Use the verification code from your booking confirmation.
+              Enter the verification code from the operator (or your booking). This books you onto that trip and opens live routing — independent of the search result above.
             </p>
             <label className="pmd-label">
               Trip verification code
@@ -1041,10 +1120,10 @@ export default function PassengerMapDashboard({ notify, onExit }) {
               </span>
             </div>
             <p className="pmd-hint">
-              Tap a booking to load its code, or Request ride on a matching trip.
+              Verified trips appear here. Tap a row to open trip details again.
             </p>
             {(myBookings || []).length === 0 && (
-              <p className="pmd-hint">No bookings yet. Search a trip and use Request ride.</p>
+              <p className="pmd-hint">No trips yet. Enter the operator verification code above to join a trip.</p>
             )}
             <ul className="pmd-booking-list">
               {(myBookings || []).map((b) => (
@@ -1062,7 +1141,7 @@ export default function PassengerMapDashboard({ notify, onExit }) {
                       <strong>{b.trip_code || `BK-${b.id}`}</strong>
                       <small>
                         {b.status}
-                        {b.verification_code ? ` · code ${b.verification_code}` : ''}
+                        
                       </small>
                     </span>
                     <span
@@ -1075,29 +1154,31 @@ export default function PassengerMapDashboard({ notify, onExit }) {
                 </li>
               ))}
             </ul>
-            {selectedBookingId && selected && !selected.isInfoOnly && (
-              <button
-                type="button"
-                className="pmd-btn primary block"
-                onClick={requestRide}
-                disabled={booking}
-              >
-                {booking ? 'Requesting…' : 'Request ride for selected trip'}
-              </button>
-            )}
+
           </section>
 
           <section className="pmd-card">
             <div className="pmd-card-head">
               <h3>Notifications</h3>
-              <span className="pmd-pill muted">{PASSENGER_ANNOUNCEMENTS.length}</span>
+              <span className="pmd-pill muted">
+                {(passengerNotes || []).filter((n) => !n.read).length}
+              </span>
             </div>
-            <p className="pmd-hint">Announcements & alerts</p>
+            <p className="pmd-hint">Status only (e.g. Driver incoming) — no active trip dump</p>
             <ul className="pmd-notif-list">
-              {PASSENGER_ANNOUNCEMENTS.map((n) => (
-                <li key={n.id}>
+              {(passengerNotes || []).length === 0 && (
+                <li className="pmd-muted">No messages yet. After a driver accepts, you will see Driver incoming here.</li>
+              )}
+              {(passengerNotes || []).slice(0, 8).map((n) => (
+                <li key={n.id} className={n.read ? 'pmd-notif read' : 'pmd-notif unread'}>
                   <small>
-                    {n.when} · {n.title}
+                    {n.created_at
+                      ? new Date(n.created_at).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })
+                      : ''}{' '}
+                    · {n.title}
                   </small>
                   <p>{n.body}</p>
                 </li>
@@ -1106,7 +1187,6 @@ export default function PassengerMapDashboard({ notify, onExit }) {
           </section>
         </div>
       </div>
-
       {panicOpen && (
         <div className="pmd-modal-backdrop" role="presentation">
           <div className="pmd-modal" role="dialog">

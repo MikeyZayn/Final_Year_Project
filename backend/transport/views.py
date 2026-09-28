@@ -4,6 +4,21 @@ Merged API views: FYP trip/booking/operator + search-first routing/GPS/panic.
 import logging
 import math
 
+# RankFlow models (lazy-safe names used in admin ops)
+from .models import (  # noqa: E402
+    Announcement,
+    AuditLog,
+    SafetyIncident,
+    OperatorNotification,
+    PassengerNotification,
+    DriverComplaint,
+    DriverRating,
+    DriverNotification,
+    PanicAlert,
+    OperatorAtRank,
+)
+
+
 import requests
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -16,14 +31,13 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from accounts.models import DriverProfile, OperatorProfile
+from accounts.models import OperatorProfile
 from accounts.serializers import UserPublicSerializer
 
 from .models import (
-    Announcement,
+    RideRequest,
     Booking,
     Destination,
-    DriverComplaint,
     OperatorAtRank,
     PanicAlert,
     Rank,
@@ -38,11 +52,11 @@ from .models import (
     DriverNotification,
 )
 from .serializers import (
-    AnnouncementSerializer,
     BookingSerializer,
     DestinationSerializer,
-    DriverComplaintSerializer,
     PanicAlertSerializer,
+    RideRequestSerializer,
+    PassengerNotificationSerializer,
     RankSerializer,
     RouteSerializer,
     TripSerializer,
@@ -69,6 +83,29 @@ def _operator(request):
 
 @api_view(["GET"])
 @permission_classes([AllowAny])
+
+def _operator_can_access_trip(op, trip):
+    if trip.operator_id == op.id:
+        return True
+    rank_ids = set(
+        OperatorAtRank.objects.filter(
+            operator=op, status=OperatorAtRank.Status.ACTIVE
+        ).values_list("rank_id", flat=True)
+    )
+    return trip.route_id and trip.route.departure_id in rank_ids
+
+
+def _get_operator_trip(op, trip_id):
+    try:
+        trip = Trip.objects.select_related(
+            "route__departure", "route__destination", "driver__user", "vehicle", "operator__user"
+        ).get(pk=trip_id)
+    except Trip.DoesNotExist:
+        return None
+    if not _operator_can_access_trip(op, trip):
+        return None
+    return trip
+
 def api_list_ranks(request):
     return Response(RankSerializer(Rank.objects.all(), many=True).data)
 
@@ -142,10 +179,19 @@ def api_trip_detail(request, trip_id):
     return Response(TripSerializer(trip).data)
 
 
+# ---------- Passenger booking ----------
+
+
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_trip_live_tracking(request, trip_id):
-    """GET /api/trips/<id>/live/ — trip summary + latest vehicle GPS."""
+    """
+    Passenger: trip summary + latest vehicle GPS for a trip they booked
+    (or any authenticated user after verification flow).
+    GET /api/trips/<id>/live/
+    """
     try:
         trip = Trip.objects.select_related(
             "route__departure",
@@ -157,6 +203,7 @@ def api_trip_live_tracking(request, trip_id):
     except Trip.DoesNotExist:
         return Response({"detail": "Trip not found."}, status=404)
 
+    # Prefer passengers with a booking; operators/drivers still allowed
     role = getattr(request.user, "role", "") or ""
     if role == "passenger":
         has = Booking.objects.filter(
@@ -166,7 +213,8 @@ def api_trip_live_tracking(request, trip_id):
         ).exists()
         if not has:
             return Response(
-                {"detail": "Book this trip before tracking."}, status=403
+                {"detail": "Book this trip (or enter your verification code) before tracking."},
+                status=403,
             )
 
     data = TripSerializer(trip).data
@@ -183,18 +231,22 @@ def api_trip_live_tracking(request, trip_id):
     data["has_live_location"] = loc is not None
     return Response(data)
 
-
-# ---------- Passenger booking ----------
-
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_create_booking(request):
+    """
+    Passenger books a trip seat.
+
+    Requires either trip_id or trip_code (or both, which must match).
+    The trip_code is the trip verification code the passenger must know.
+    """
     trip_id = request.data.get("trip_id")
     trip_code = (request.data.get("trip_code") or "").strip().upper()
 
     if not trip_id and not trip_code:
-        return Response({"detail": "trip_id or trip_code is required."}, status=400)
+        return Response(
+            {"detail": "trip_id or trip_code is required."}, status=400
+        )
 
     if trip_code:
         trip = (
@@ -203,9 +255,13 @@ def api_create_booking(request):
             .first()
         )
         if not trip:
-            return Response({"detail": "Invalid trip verification code."}, status=404)
+            return Response(
+                {"detail": "Invalid trip verification code."}, status=404
+            )
         if trip_id and int(trip_id) != trip.id:
-            return Response({"detail": "trip_id does not match trip_code."}, status=400)
+            return Response(
+                {"detail": "trip_id does not match trip_code."}, status=400
+            )
     else:
         try:
             trip = Trip.objects.select_related("route").get(pk=trip_id)
@@ -290,11 +346,137 @@ def api_my_bookings(request):
         .select_related(
             "trip__route__departure",
             "trip__route__destination",
-            "verification_code",
+            "verification_code",  # required for clickable → fill Verify field
         )
         .order_by("-booked_at")
     )
     return Response(BookingSerializer(qs, many=True).data)
+
+
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_redeem_verification_code(request):
+    """
+    Passenger enters operator-issued verification code.
+    - Finds VerificationCode
+    - Claims walk-in / unassigned booking for this passenger (or matches existing)
+    - Marks code verified
+    - Returns booking + trip so UI can open trip details and My bookings
+    """
+    code = (request.data.get("code") or request.data.get("verification_code") or "").strip().upper()
+    if not code:
+        return Response({"detail": "code is required."}, status=400)
+
+    vc = (
+        VerificationCode.objects.select_related(
+            "booking__trip__route__departure",
+            "booking__trip__route__destination",
+            "booking__trip__driver__user",
+            "booking__trip__operator__user",
+            "booking__passenger",
+        )
+        .filter(code__iexact=code)
+        .first()
+    )
+    if vc is None:
+        # Also allow trip_code as fallback (admin trip code)
+        trip = Trip.objects.select_related(
+            "route__departure", "route__destination", "driver__user", "operator__user"
+        ).filter(trip_code__iexact=code).first()
+        if not trip:
+            return Response({"detail": "Invalid verification code."}, status=404)
+        if trip.seats_available < 1 and not Booking.objects.filter(
+            trip=trip, passenger=request.user
+        ).exclude(status=Booking.Status.CANCELLED).exists():
+            return Response({"detail": "No seats available on this trip."}, status=400)
+        booking = Booking.objects.filter(
+            trip=trip, passenger=request.user
+        ).exclude(status=Booking.Status.CANCELLED).first()
+        if not booking:
+            booking = Booking.objects.create(
+                trip=trip,
+                passenger=request.user,
+                status=Booking.Status.RESERVED,
+                fare_paid=trip.route.fare,
+            )
+            vc = VerificationCode.objects.create(booking=booking, code=get_random_string(6).upper())
+        else:
+            vc = getattr(booking, "verification_code", None)
+            if vc is None:
+                vc = VerificationCode.objects.create(
+                    booking=booking, code=get_random_string(6).upper()
+                )
+    else:
+        booking = vc.booking
+        trip = booking.trip
+        # Claim walk-in / unowned booking for this passenger
+        if booking.passenger_id is None:
+            booking.passenger = request.user
+            if not (booking.walk_in_name or "").strip():
+                booking.walk_in_name = (
+                    f"{request.user.first_name} {request.user.last_name}".strip()
+                    or request.user.username
+                )
+            booking.save()
+        elif booking.passenger_id != request.user.id:
+            return Response(
+                {"detail": "This verification code belongs to another passenger."},
+                status=403,
+            )
+
+    if vc.verified_at is None:
+        vc.verified_at = timezone.now()
+        vc.save(update_fields=["verified_at"])
+
+    # Board / confirm presence when code is used by passenger
+    if booking.status in (Booking.Status.RESERVED, getattr(Booking.Status, "CONFIRMED", "reserved")):
+        booking.status = Booking.Status.BOARDED
+        booking.boarded_at = timezone.now()
+        booking.boarded_by = request.user
+        booking.save()
+
+    trip = booking.trip
+    dep = getattr(trip.route, "departure", None)
+    dest = getattr(trip.route, "destination", None)
+    driver_name = None
+    if trip.driver_id and getattr(trip.driver, "user", None):
+        u = trip.driver.user
+        driver_name = f"{u.first_name} {u.last_name}".strip() or u.username
+    operator_name = None
+    if trip.operator_id and getattr(trip.operator, "user", None):
+        u = trip.operator.user
+        operator_name = f"{u.first_name} {u.last_name}".strip() or u.username
+
+    return Response(
+        {
+            "booking_id": booking.id,
+            "id": booking.id,
+            "status": booking.status,
+            "fare_paid": str(booking.fare_paid) if booking.fare_paid is not None else None,
+            "verification_code": vc.code,
+            "trip_id": trip.id,
+            "trip_code": trip.trip_code,
+            "departure_date": str(trip.departure_date),
+            "expected_departure_time": str(trip.expected_departure_time) if trip.expected_departure_time else None,
+            "trip_status": trip.status,
+            "origin": getattr(dep, "name", None),
+            "destination": getattr(dest, "name", None),
+            "driver_name": driver_name,
+            "operator_name": operator_name,
+            "seat_capacity": trip.seat_capacity,
+            "seats_taken": getattr(trip, "seats_taken", None),
+            "route": {
+                "id": trip.route_id,
+                "fare": str(trip.route.fare) if trip.route_id else None,
+                "departure": {"name": getattr(dep, "name", None), "latitude": float(dep.latitude) if dep and dep.latitude is not None else None, "longitude": float(dep.longitude) if dep and dep.longitude is not None else None},
+                "destination": {"name": getattr(dest, "name", None), "latitude": float(dest.latitude) if dest and dest.latitude is not None else None, "longitude": float(dest.longitude) if dest and dest.longitude is not None else None},
+                "geometry": getattr(trip.route, "geometry", None) or [],
+            },
+            "message": "Trip verified and added to My bookings.",
+        }
+    )
 
 
 # ---------- Operator ----------
@@ -303,16 +485,30 @@ def api_my_bookings(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_my_trips(request):
+    """Operator trip queue: trips whose departure rank matches operator active ranks.
+    Fallback: trips assigned to this operator profile.
+    """
     op = _operator(request)
     if op is None:
         return Response({"detail": "Not an operator account."}, status=403)
-    qs = (
-        Trip.objects.filter(operator=op)
-        .select_related(
-            "route__departure", "route__destination", "vehicle", "driver__user", "operator__association"
-        )
-        .order_by("departure_date", "expected_departure_time")
+    rank_ids = list(
+        OperatorAtRank.objects.filter(
+            operator=op, status=OperatorAtRank.Status.ACTIVE
+        ).values_list("rank_id", flat=True)
     )
+    qs = Trip.objects.select_related(
+        "route__departure",
+        "route__destination",
+        "vehicle",
+        "driver__user",
+        "operator__user",
+        "operator__association",
+    )
+    if rank_ids:
+        qs = qs.filter(route__departure_id__in=rank_ids)
+    else:
+        qs = qs.filter(operator=op)
+    qs = qs.order_by("departure_date", "expected_departure_time", "id")
     return Response(TripSerializer(qs, many=True).data)
 
 
@@ -322,10 +518,9 @@ def api_trip_manifest(request, trip_id):
     op = _operator(request)
     if op is None:
         return Response({"detail": "Not an operator account."}, status=403)
-    try:
-        trip = Trip.objects.get(pk=trip_id, operator=op)
-    except Trip.DoesNotExist:
-        return Response({"detail": "Trip not found or not yours."}, status=404)
+    trip = _get_operator_trip(op, trip_id)
+    if trip is None:
+        return Response({"detail": "Trip not found or not in your rank scope."}, status=404)
     data = TripSerializer(trip).data
     data["is_engaged"] = bool(trip.engaged_at or trip.engaged_by_id)
     bookings = trip.bookings.select_related("passenger", "verification_code")
@@ -356,14 +551,17 @@ def api_register_walk_in(request, trip_id):
     op = _operator(request)
     if op is None:
         return Response({"detail": "Not an operator account."}, status=403)
-    try:
-        trip = Trip.objects.get(pk=trip_id, operator=op)
-    except Trip.DoesNotExist:
-        return Response({"detail": "Trip not found or not yours."}, status=404)
+    trip = _get_operator_trip(op, trip_id)
+    if trip is None:
+        return Response({"detail": "Trip not found or not in your rank scope."}, status=404)
     if trip.seats_available < 1:
         return Response({"detail": "No seats available."}, status=400)
     name = (request.data.get("name") or "").strip()
-    phone = (request.data.get("phone") or "").strip()
+    if not name:
+        fn = (request.data.get("first_name") or "").strip()
+        sn = (request.data.get("surname") or request.data.get("last_name") or "").strip()
+        name = f"{fn} {sn}".strip()
+    phone = (request.data.get("phone") or request.data.get("mobile") or "").strip()
     if not name:
         return Response({"detail": "name is required."}, status=400)
     booking = Booking.objects.create(
@@ -389,10 +587,9 @@ def api_engage_trip(request, trip_id):
     op = _operator(request)
     if op is None:
         return Response({"detail": "Not an operator account."}, status=403)
-    try:
-        trip = Trip.objects.get(pk=trip_id, operator=op)
-    except Trip.DoesNotExist:
-        return Response({"detail": "Trip not found or not yours."}, status=404)
+    trip = _get_operator_trip(op, trip_id)
+    if trip is None:
+        return Response({"detail": "Trip not found or not in your rank scope."}, status=404)
     trip.engaged_by = op
     trip.engaged_at = timezone.now()
     if trip.status == Trip.Status.SCHEDULED:
@@ -407,10 +604,9 @@ def api_release_trip(request, trip_id):
     op = _operator(request)
     if op is None:
         return Response({"detail": "Not an operator account."}, status=403)
-    try:
-        trip = Trip.objects.get(pk=trip_id, operator=op)
-    except Trip.DoesNotExist:
-        return Response({"detail": "Trip not found or not yours."}, status=404)
+    trip = _get_operator_trip(op, trip_id)
+    if trip is None:
+        return Response({"detail": "Trip not found or not in your rank scope."}, status=404)
     trip.engaged_by = None
     trip.engaged_at = None
     trip.save(update_fields=["engaged_by", "engaged_at"])
@@ -445,6 +641,7 @@ def api_verify_booking(request, trip_id, booking_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_my_memberships(request):
+    """Operator rank memberships (FYP)."""
     op = _operator(request)
     if not op:
         return Response({"detail": "Not an operator account."}, status=403)
@@ -464,6 +661,7 @@ def api_my_memberships(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_request_rank(request):
+    """Operator requests approval to work at a rank (FYP)."""
     op = _operator(request)
     if not op:
         return Response({"detail": "Not an operator account."}, status=403)
@@ -493,10 +691,9 @@ def api_flag_trip(request, trip_id):
     op = _operator(request)
     if op is None:
         return Response({"detail": "Not an operator account."}, status=403)
-    try:
-        trip = Trip.objects.get(pk=trip_id, operator=op)
-    except Trip.DoesNotExist:
-        return Response({"detail": "Trip not found or not yours."}, status=404)
+    trip = _get_operator_trip(op, trip_id)
+    if trip is None:
+        return Response({"detail": "Trip not found or not in your rank scope."}, status=404)
     flag = TripFlag.objects.create(
         trip=trip,
         category=request.data.get("category", TripFlag.Category.OTHER),
@@ -508,160 +705,13 @@ def api_flag_trip(request, trip_id):
     return Response({"id": flag.id, "status": flag.status}, status=201)
 
 
-@api_view(["GET", "POST"])
-@permission_classes([IsAuthenticated])
-def api_announcements(request):
-    """Manage operator/admin announcements."""
-    if request.user.role not in {"operator", "admin"}:
-        return Response({"detail": "Operators and admins only."}, status=403)
-
-    if request.method == "GET":
-        qs = Announcement.objects.filter(is_active=True).select_related("created_by")
-        if request.user.role == "operator":
-            qs = qs.filter(audience__in=[Announcement.Audience.ALL, Announcement.Audience.OPERATORS])
-        return Response(AnnouncementSerializer(qs, many=True).data)
-
-    title = (request.data.get("title") or "").strip()
-    message = (request.data.get("message") or "").strip()
-    if not title or not message:
-        return Response({"detail": "title and message are required."}, status=400)
-
-    audience = request.data.get("audience") or Announcement.Audience.ALL
-    announcement = Announcement.objects.create(
-        created_by=request.user,
-        title=title,
-        message=message,
-        audience=audience,
-        is_active=True,
-    )
-    return Response(AnnouncementSerializer(announcement).data, status=201)
-
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def api_operator_drivers(request):
-    op = _operator(request)
-    if op is None:
-        return Response({"detail": "Not an operator account."}, status=403)
-
-    drivers = (
-        DriverProfile.objects.filter(association=op.association)
-        .select_related("user", "association")
-        .order_by("user__last_name", "user__first_name")
-    )
-    data = []
-    for driver in drivers:
-        trips = Trip.objects.filter(driver=driver).select_related(
-            "route__departure",
-            "route__destination",
-            "vehicle",
-        ).order_by("-departure_date")[:5]
-        data.append(
-            {
-                "id": driver.id,
-                "user": UserPublicSerializer(driver.user).data,
-                "license_number": driver.license_number,
-                "id_number": driver.id_number,
-                "status": driver.status,
-                "verified_at": driver.verified_at,
-                "association": {
-                    "id": driver.association.id if driver.association else None,
-                    "association_name": driver.association.association_name if driver.association else None,
-                    "operating_region": driver.association.operating_region if driver.association else None,
-                },
-                "trip_count": Trip.objects.filter(driver=driver).count(),
-                "recent_trips": TripSerializer(trips, many=True).data,
-            }
-        )
-    return Response(data)
-
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def api_operator_complaints(request):
-    op = _operator(request)
-    if op is None:
-        return Response({"detail": "Not an operator account."}, status=403)
-
-    driver_ids = DriverProfile.objects.filter(association=op.association).values_list("id", flat=True)
-    complaints = (
-        DriverComplaint.objects.filter(driver_id__in=driver_ids)
-        .select_related("driver__user", "trip__route__departure", "trip__route__destination", "raised_by")
-        .order_by("-created_at")
-    )
-    return Response(DriverComplaintSerializer(complaints, many=True).data)
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def api_resolve_driver_complaint(request, complaint_id):
-    op = _operator(request)
-    if op is None:
-        return Response({"detail": "Not an operator account."}, status=403)
-
-    try:
-        complaint = DriverComplaint.objects.select_related("driver__user").get(
-            pk=complaint_id,
-            driver__association=op.association,
-        )
-    except DriverComplaint.DoesNotExist:
-        return Response({"detail": "Complaint not found for this association."}, status=404)
-
-    status = (request.data.get("status") or complaint.status).strip().lower()
-    if status not in {choice[0] for choice in DriverComplaint.Status.choices}:
-        return Response({"detail": "Invalid complaint status."}, status=400)
-
-    complaint.status = status
-    complaint.save(update_fields=["status"])
-    return Response(DriverComplaintSerializer(complaint).data)
-
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def api_operator_driver_detail(request, driver_id):
-    op = _operator(request)
-    if op is None:
-        return Response({"detail": "Not an operator account."}, status=403)
-
-    try:
-        driver = DriverProfile.objects.select_related("user", "association").get(
-            pk=driver_id,
-            association=op.association,
-        )
-    except DriverProfile.DoesNotExist:
-        return Response({"detail": "Driver not found for this association."}, status=404)
-
-    trips = Trip.objects.filter(driver=driver).select_related(
-        "route__departure",
-        "route__destination",
-        "vehicle",
-    ).order_by("-departure_date")
-
-    return Response(
-        {
-            "id": driver.id,
-            "user": UserPublicSerializer(driver.user).data,
-            "license_number": driver.license_number,
-            "id_number": driver.id_number,
-            "status": driver.status,
-            "verified_at": driver.verified_at,
-            "association": {
-                "id": driver.association.id if driver.association else None,
-                "association_name": driver.association.association_name if driver.association else None,
-                "operating_region": driver.association.operating_region if driver.association else None,
-            },
-            "trip_count": trips.count(),
-            "recent_trips": TripSerializer(trips[:10], many=True).data,
-        }
-    )
-
-
 # ---------- Driver ----------
 
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_my_vehicle(request):
+    """Driver: vehicle linked via DriverVehicle or Trip assignment."""
     try:
         dp = request.user.driver_profile
     except Exception:
@@ -684,7 +734,8 @@ def api_my_vehicle(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_driver_my_trips(request):
-    if getattr(request.user, "role", None) != "driver":
+    """Driver: trips currently assigned to this driver."""
+    if request.user.role != "driver":
         return Response({"detail": "Drivers only."}, status=403)
     try:
         dp = request.user.driver_profile
@@ -704,7 +755,8 @@ def api_driver_my_trips(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_driver_confirm_trip(request):
-    if getattr(request.user, "role", None) != "driver":
+    """Driver confirms they are the driver for a trip using its trip_code."""
+    if request.user.role != "driver":
         return Response({"detail": "Drivers only."}, status=403)
     try:
         dp = request.user.driver_profile
@@ -739,7 +791,8 @@ def api_driver_confirm_trip(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_driver_profile(request):
-    if getattr(request.user, "role", None) != "driver":
+    """Driver profile panel: rating, complaints, notifications, trips."""
+    if request.user.role != "driver":
         return Response({"detail": "Drivers only."}, status=403)
     try:
         dp = request.user.driver_profile
@@ -765,7 +818,6 @@ def api_driver_profile(request):
                     "route__destination",
                     "vehicle",
                 )
-                .prefetch_related("route__stops")
                 .order_by("-departure_date")[:20],
                 many=True,
             ).data,
@@ -788,53 +840,23 @@ def api_driver_profile(request):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
-def api_driver_notification_read(request, notification_id):
-    if getattr(request.user, "role", None) != "driver":
-        return Response({"detail": "Drivers only."}, status=403)
-    try:
-        dp = request.user.driver_profile
-    except Exception:
-        return Response({"detail": "No driver profile."}, status=404)
-    try:
-        n = dp.notifications.get(pk=notification_id)
-    except DriverNotification.DoesNotExist:
-        return Response({"detail": "Notification not found."}, status=404)
-    if not n.read:
-        n.read = True
-        n.save(update_fields=["read"])
-    return Response({"id": n.id, "read": n.read})
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def api_driver_notifications_read_all(request):
-    if getattr(request.user, "role", None) != "driver":
-        return Response({"detail": "Drivers only."}, status=403)
-    try:
-        dp = request.user.driver_profile
-    except Exception:
-        return Response({"detail": "No driver profile."}, status=404)
-    updated = dp.notifications.filter(read=False).update(read=True)
-    return Response({"updated": updated})
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
 def api_vehicle_location(request, vehicle_id):
+    """Driver pushes GPS. Computes on/off route against trip route geometry."""
     try:
         vehicle = Vehicle.objects.get(pk=vehicle_id)
     except Vehicle.DoesNotExist:
         return Response({"detail": "Vehicle not found."}, status=404)
 
+    # AuthZ: driver assigned to vehicle or operator/admin
     allowed = False
-    if getattr(request.user, "role", None) == "admin":
+    if request.user.role == "admin":
         allowed = True
-    elif getattr(request.user, "role", None) == "operator":
+    elif request.user.role == "operator":
         op = _operator(request)
         allowed = op is not None and Trip.objects.filter(
             operator=op, vehicle=vehicle
         ).exists()
-    elif getattr(request.user, "role", None) == "driver":
+    elif request.user.role == "driver":
         try:
             dp = request.user.driver_profile
             allowed = dp.vehicle_assignments.filter(
@@ -855,6 +877,7 @@ def api_vehicle_location(request, vehicle_id):
     except (KeyError, TypeError, ValueError):
         return Response({"detail": "lat and lng required as numbers."}, status=400)
 
+    # --- Reject simulated GPS always ---
     source = request.data.get("source", VehicleLocation.Source.GPS)
     if source == VehicleLocation.Source.SIMULATED:
         return Response({"detail": "Simulated GPS is disabled."}, status=400)
@@ -946,12 +969,17 @@ def api_vehicle_latest_location(request, vehicle_id):
     return Response(VehicleLocationSerializer(loc).data)
 
 
-# ---------- Routing ----------
+# ---------- Routing (ORS / OSRM) ----------
 
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def api_ad_hoc_directions(request):
+    """
+    POST /api/routing/directions/
+
+    Body: { "origin": {"lat", "lng"}, "destination": {"lat", "lng"} }
+    """
     data = request.data or {}
     origin_raw = data.get("origin") or {}
     dest_raw = data.get("destination") or {}
@@ -998,6 +1026,7 @@ def api_ad_hoc_directions(request):
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def api_calculate_route_fare(request):
+    """Turn client-supplied distance into THEMBA ad-hoc fare."""
     try:
         distance_km = float(request.data.get("distanceKm") or request.data["distance_km"])
     except (KeyError, TypeError, ValueError):
@@ -1035,7 +1064,10 @@ def api_panic_alert(request):
         try:
             async_to_sync(channel_layer.group_send)(
                 "fleet_tracking",
-                {"type": "panic.alert", "payload": PanicAlertSerializer(alert).data},
+                {
+                    "type": "panic.alert",
+                    "payload": PanicAlertSerializer(alert).data,
+                },
             )
         except Exception as exc:
             logger.warning("Panic broadcast failed: %s", exc)
@@ -1045,7 +1077,8 @@ def api_panic_alert(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_fleet_snapshot(request):
-    if getattr(request.user, "role", None) not in ("operator", "admin"):
+    """Latest position per vehicle that has reported (operator/admin)."""
+    if request.user.role not in ("operator", "admin"):
         return Response({"detail": "Operators and admins only."}, status=403)
     vehicles = Vehicle.objects.all()
     out = []
@@ -1060,3 +1093,1663 @@ def api_fleet_snapshot(request):
             }
         )
     return Response(out)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_driver_notification_read(request, notification_id):
+    """Driver marks a notification as read."""
+    if request.user.role != "driver":
+        return Response({"detail": "Drivers only."}, status=403)
+    try:
+        dp = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "No driver profile."}, status=404)
+    try:
+        n = DriverNotification.objects.get(pk=notification_id, driver=dp)
+    except DriverNotification.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    n.read = True
+    n.save(update_fields=["read"])
+    return Response({"id": n.id, "read": True})
+
+
+# ---------- Admin console ----------
+
+def _require_admin(request):
+    role = getattr(request.user, "role", "") or ""
+    if role not in ("admin", "administrator"):
+        return False
+    return True
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_summary(request):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from django.contrib.auth import get_user_model
+    from accounts.models import DriverProfile
+    User = get_user_model()
+    return Response(
+        {
+            "users": User.objects.count(),
+            "passengers": User.objects.filter(role="passenger").count(),
+            "drivers": User.objects.filter(role="driver").count(),
+            "operators": User.objects.filter(role="operator").count(),
+            "trips": Trip.objects.count(),
+            "trips_flagged": Trip.objects.filter(status=Trip.Status.FLAGGED).count(),
+            "bookings": Booking.objects.count(),
+            "pending_memberships": OperatorAtRank.objects.filter(
+                status=OperatorAtRank.Status.PENDING
+            ).count(),
+            "open_flags": TripFlag.objects.filter(status=TripFlag.Status.OPEN).count(),
+            "panic_alerts": PanicAlert.objects.count(),
+            "drivers_pending": DriverProfile.objects.filter(status="pending").count(),
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_users(request):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    role = (request.query_params.get("role") or "").strip()
+    qs = User.objects.all().order_by("-date_joined")
+    if role:
+        qs = qs.filter(role=role)
+    qs = qs[:200]
+    data = [
+        {
+            "id": u.id,
+            "username": u.username,
+            "phone": getattr(u, "phone", "") or "",
+            "email": u.email or "",
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "role": u.role,
+            "is_active": u.is_active,
+            "date_joined": u.date_joined,
+        }
+        for u in qs
+    ]
+    return Response(data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_user_set_active(request, user_id):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    try:
+        u = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    if u.id == request.user.id:
+        return Response({"detail": "Cannot deactivate yourself."}, status=400)
+    active = request.data.get("is_active")
+    if active is None:
+        return Response({"detail": "is_active required."}, status=400)
+    u.is_active = bool(active)
+    u.save(update_fields=["is_active"])
+    return Response({"id": u.id, "is_active": u.is_active})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_memberships(request):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    status = (request.query_params.get("status") or "pending").strip()
+    qs = OperatorAtRank.objects.select_related("operator__user", "rank").order_by(
+        "-id"
+    )
+    if status and status != "all":
+        qs = qs.filter(status=status)
+    data = []
+    for m in qs[:100]:
+        op_user = getattr(m.operator, "user", None)
+        data.append(
+            {
+                "id": m.id,
+                "status": m.status,
+                "rank_id": m.rank_id,
+                "rank_name": m.rank.name if m.rank_id else None,
+                "operator_id": m.operator_id,
+                "operator_name": (
+                    f"{op_user.first_name} {op_user.last_name}".strip()
+                    if op_user
+                    else str(m.operator_id)
+                ),
+                "operator_phone": getattr(op_user, "phone", "") if op_user else "",
+            }
+        )
+    return Response(data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_membership_decide(request, membership_id):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from django.utils import timezone
+
+    try:
+        m = OperatorAtRank.objects.select_related("rank", "operator").get(
+            pk=membership_id
+        )
+    except OperatorAtRank.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    decision = (request.data.get("decision") or "").strip().lower()
+    if decision not in ("approve", "reject"):
+        return Response({"detail": "decision must be approve or reject."}, status=400)
+    if decision == "approve":
+        m.status = OperatorAtRank.Status.ACTIVE
+        try:
+            admin_prof = request.user.admin_profile
+            m.approved_by = admin_prof
+        except Exception:
+            pass
+        m.approved_at = timezone.now()
+    else:
+        m.status = OperatorAtRank.Status.REJECTED
+        m.approved_at = timezone.now()
+    m.save()
+    return Response({"id": m.id, "status": m.status})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_flags(request):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    qs = TripFlag.objects.select_related("trip", "flagged_by").order_by("-id")[:100]
+    data = []
+    for f in qs:
+        data.append(
+            {
+                "id": f.id,
+                "trip_id": f.trip_id,
+                "trip_code": getattr(f.trip, "trip_code", None),
+                "category": getattr(f, "category", None),
+                "notes": getattr(f, "notes", "") or getattr(f, "description", ""),
+                "status": f.status,
+                "flagged_by": getattr(f.flagged_by, "username", None),
+                "created_at": getattr(f, "created_at", None),
+            }
+        )
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_panics(request):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    qs = PanicAlert.objects.select_related("user", "trip").order_by("-id")[:100]
+    data = []
+    for p in qs:
+        data.append(
+            {
+                "id": p.id,
+                "user": getattr(p.user, "username", None) if getattr(p, "user_id", None) else None,
+                "trip_id": getattr(p, "trip_id", None),
+                "lat": getattr(p, "latitude", None),
+                "lng": getattr(p, "longitude", None),
+                "message": str(getattr(p, "payload", "") or ""),
+                "created_at": getattr(p, "created_at", None),
+            }
+        )
+    return Response(data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_drivers(request):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from accounts.models import DriverProfile
+
+    qs = DriverProfile.objects.select_related("user").order_by("-id")[:100]
+    data = []
+    for d in qs:
+        u = d.user
+        data.append(
+            {
+                "id": d.id,
+                "user_id": u.id,
+                "name": f"{u.first_name} {u.last_name}".strip() or u.username,
+                "phone": getattr(u, "phone", "") or "",
+                "license_number": d.license_number,
+                "status": d.status,
+                "is_active": u.is_active,
+            }
+        )
+    return Response(data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_driver_verify(request, driver_id):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from accounts.models import DriverProfile
+    from django.utils import timezone
+
+    try:
+        d = DriverProfile.objects.get(pk=driver_id)
+    except DriverProfile.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    decision = (request.data.get("decision") or "verify").strip().lower()
+    if decision in ("verify", "approve", "verified"):
+        d.status = DriverProfile.VerificationStatus.VERIFIED
+        d.verified_at = timezone.now()
+    elif decision in ("reject", "rejected"):
+        d.status = DriverProfile.VerificationStatus.REJECTED
+    else:
+        return Response({"detail": "decision must be verify or reject."}, status=400)
+    d.save()
+    return Response({"id": d.id, "status": d.status})
+
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_trip_options(request):
+    """Dropdown data for Schedule a trip form."""
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from accounts.models import OperatorProfile, DriverProfile
+
+    routes = []
+    for r in Route.objects.select_related("departure", "destination").order_by("id"):
+        dep = getattr(r.departure, "name", "") or ""
+        dest = getattr(r.destination, "name", "") or ""
+        fare = r.fare
+        routes.append(
+            {
+                "id": r.id,
+                "label": f"{dep} → {dest} (R{fare})",
+                "departure": dep,
+                "destination": dest,
+                "fare": str(fare),
+            }
+        )
+
+    operators = []
+    for op in OperatorProfile.objects.select_related("user", "association").order_by("id"):
+        u = op.user
+        assoc = getattr(op.association, "association_name", "") if op.association_id else ""
+        name = f"{u.first_name} {u.last_name}".strip() or u.username
+        operators.append(
+            {
+                "id": op.id,
+                "label": f"{name}" + (f" ({assoc})" if assoc else ""),
+            }
+        )
+
+    drivers = []
+    for d in DriverProfile.objects.select_related("user").order_by("id"):
+        u = d.user
+        name = f"{u.first_name} {u.last_name}".strip() or u.username
+        phone = getattr(u, "phone", "") or ""
+        drivers.append(
+            {
+                "id": d.id,
+                "label": f"{name}" + (f" ({phone})" if phone else ""),
+                "status": d.status,
+            }
+        )
+
+    vehicles = []
+    for v in Vehicle.objects.order_by("id"):
+        vehicles.append(
+            {
+                "id": v.id,
+                "label": f"{v.plate_number}"
+                + (f" · {v.make} {v.model}".strip() if (v.make or v.model) else ""),
+            }
+        )
+
+    return Response(
+        {
+            "routes": routes,
+            "operators": operators,
+            "drivers": drivers,
+            "vehicles": vehicles,
+        }
+    )
+
+
+def _gen_trip_code(route, departure_date):
+    """Build a unique trip_code from route ends + date."""
+    dep = (getattr(getattr(route, "departure", None), "name", None) or "XXX")[:3].upper()
+    dest = (getattr(getattr(route, "destination", None), "name", None) or "YYY")[:3].upper()
+    day = departure_date.strftime("%m%d") if departure_date else "0000"
+    base = f"TRP-{dep}-{dest}-{day}"
+    code = base
+    n = 1
+    while Trip.objects.filter(trip_code=code).exists():
+        n += 1
+        code = f"{base}-{n}"
+    return code
+
+
+def _trip_queue_row(t):
+    route = t.route
+    dep = getattr(getattr(route, "departure", None), "name", "") if route else ""
+    dest = getattr(getattr(route, "destination", None), "name", "") if route else ""
+    op_user = getattr(getattr(t, "operator", None), "user", None)
+    drv_user = getattr(getattr(t, "driver", None), "user", None)
+    return {
+        "id": t.id,
+        "trip_code": t.trip_code,
+        "route_id": t.route_id,
+        "route_label": f"{dep} → {dest}" if dep or dest else str(t.route_id),
+        "operator_id": t.operator_id,
+        "operator_name": (
+            f"{op_user.first_name} {op_user.last_name}".strip() if op_user else None
+        ),
+        "departure_date": t.departure_date,
+        "expected_departure_time": t.expected_departure_time,
+        "seat_capacity": t.seat_capacity,
+        "seats_taken": t.seats_taken,
+        "status": t.status,
+        "driver_id": t.driver_id,
+        "driver_name": (
+            f"{drv_user.first_name} {drv_user.last_name}".strip() if drv_user else None
+        ),
+        "vehicle_id": t.vehicle_id,
+        "vehicle_plate": getattr(t.vehicle, "plate_number", None) if t.vehicle_id else None,
+        "notes": t.notes or "",
+        "can_delete": t.status
+        in (
+            Trip.Status.SCHEDULED,
+            Trip.Status.CANCELLED,
+            Trip.Status.FLAGGED,
+        )
+        and t.seats_taken == 0,
+        "can_edit": t.status
+        in (
+            Trip.Status.SCHEDULED,
+            Trip.Status.BOARDING,
+            Trip.Status.FLAGGED,
+        ),
+    }
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_trip_queue(request):
+    """Trip queue ordered by departure date/time."""
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    qs = Trip.objects.select_related(
+        "route__departure",
+        "route__destination",
+        "operator__user",
+        "driver__user",
+        "vehicle",
+    ).order_by("departure_date", "expected_departure_time", "id")
+    status = (request.query_params.get("status") or "").strip()
+    if status:
+        qs = qs.filter(status=status)
+    return Response([_trip_queue_row(t) for t in qs[:150]])
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_schedule_trip(request):
+    """Schedule a new trip (adds to queue)."""
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from accounts.models import OperatorProfile, DriverProfile
+    from datetime import datetime
+
+    data = request.data
+    try:
+        route_id = int(data.get("route_id"))
+        operator_id = int(data.get("operator_id"))
+    except (TypeError, ValueError):
+        return Response({"detail": "route_id and operator_id are required."}, status=400)
+
+    try:
+        route = Route.objects.select_related("departure", "destination").get(pk=route_id)
+        operator = OperatorProfile.objects.get(pk=operator_id)
+    except (Route.DoesNotExist, OperatorProfile.DoesNotExist):
+        return Response({"detail": "Invalid route or operator."}, status=400)
+
+    dep_date_raw = data.get("departure_date")
+    if not dep_date_raw:
+        return Response({"detail": "departure_date is required."}, status=400)
+    try:
+        if isinstance(dep_date_raw, str):
+            departure_date = datetime.strptime(dep_date_raw[:10], "%Y-%m-%d").date()
+        else:
+            departure_date = dep_date_raw
+    except ValueError:
+        return Response({"detail": "departure_date must be YYYY-MM-DD."}, status=400)
+
+    exp_time = data.get("expected_departure_time") or None
+    if exp_time == "":
+        exp_time = None
+    if isinstance(exp_time, str) and exp_time:
+        try:
+            exp_time = datetime.strptime(exp_time[:5], "%H:%M").time()
+        except ValueError:
+            try:
+                exp_time = datetime.strptime(exp_time[:8], "%H:%M:%S").time()
+            except ValueError:
+                return Response(
+                    {"detail": "expected_departure_time must be HH:MM."}, status=400
+                )
+
+    try:
+        seat_capacity = int(data.get("seat_capacity") or 15)
+    except (TypeError, ValueError):
+        seat_capacity = 15
+
+    driver = None
+    if data.get("driver_id"):
+        try:
+            driver = DriverProfile.objects.get(pk=int(data["driver_id"]))
+        except (DriverProfile.DoesNotExist, TypeError, ValueError):
+            return Response({"detail": "Invalid driver_id."}, status=400)
+
+    vehicle = None
+    if data.get("vehicle_id"):
+        try:
+            vehicle = Vehicle.objects.get(pk=int(data["vehicle_id"]))
+        except (Vehicle.DoesNotExist, TypeError, ValueError):
+            return Response({"detail": "Invalid vehicle_id."}, status=400)
+
+    trip_code = (data.get("trip_code") or "").strip().upper() or _gen_trip_code(
+        route, departure_date
+    )
+    if Trip.objects.filter(trip_code=trip_code).exists():
+        trip_code = _gen_trip_code(route, departure_date)
+
+    trip = Trip.objects.create(
+        operator=operator,
+        route=route,
+        departure_date=departure_date,
+        expected_departure_time=exp_time,
+        seat_capacity=seat_capacity,
+        status=Trip.Status.SCHEDULED,
+        trip_code=trip_code,
+        driver=driver,
+        vehicle=vehicle,
+        notes=(data.get("notes") or "")[:500],
+    )
+    trip = Trip.objects.select_related(
+        "route__departure",
+        "route__destination",
+        "operator__user",
+        "driver__user",
+        "vehicle",
+    ).get(pk=trip.pk)
+    # Driver notification: route, vehicle, day — no operator name or trip_code in body
+    if driver:
+        dep = getattr(getattr(route, "departure", None), "name", "") or ""
+        dest = getattr(getattr(route, "destination", None), "name", "") or ""
+        plate = getattr(vehicle, "plate_number", "") if vehicle else ""
+        DriverNotification.objects.create(
+            driver=driver,
+            title="New trip assignment",
+            body=(
+                f"You are assigned: {dep} → {dest} on {departure_date}"
+                + (f", vehicle {plate}" if plate else "")
+                + ". Check My trips for details."
+            ),
+            link_trip=trip,
+            meta={"type": "trip_assigned", "trip_id": trip.id, "hide_code": True},
+        )
+    try:
+        _audit(request.user, "trip.schedule", "trip", trip.id, trip_code)
+    except Exception:
+        pass
+    return Response(_trip_queue_row(trip), status=201)
+
+
+@api_view(["GET", "PATCH", "DELETE"])
+@permission_classes([IsAuthenticated])
+def api_admin_trip_detail(request, trip_id):
+    """Get / edit / delete a trip in the admin queue."""
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from accounts.models import OperatorProfile, DriverProfile
+    from datetime import datetime
+
+    try:
+        trip = Trip.objects.select_related(
+            "route__departure",
+            "route__destination",
+            "operator__user",
+            "driver__user",
+            "vehicle",
+        ).get(pk=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+
+    if request.method == "GET":
+        return Response(_trip_queue_row(trip))
+
+    if request.method == "DELETE":
+        if trip.status not in (
+            Trip.Status.SCHEDULED,
+            Trip.Status.CANCELLED,
+            Trip.Status.FLAGGED,
+        ):
+            return Response(
+                {
+                    "detail": "Only scheduled, cancelled, or flagged trips can be deleted."
+                },
+                status=400,
+            )
+        if trip.seats_taken > 0:
+            return Response(
+                {"detail": "Trip has bookings — set status cancelled instead of delete."},
+                status=400,
+            )
+        code = trip.trip_code
+        trip.delete()
+        return Response({"detail": f"Deleted {code}."})
+
+    # PATCH
+    if trip.status not in (
+        Trip.Status.SCHEDULED,
+        Trip.Status.BOARDING,
+        Trip.Status.FLAGGED,
+        Trip.Status.CANCELLED,
+    ):
+        return Response(
+            {"detail": "Cannot edit a trip that is in progress or completed."},
+            status=400,
+        )
+
+    data = request.data
+    if "route_id" in data and data["route_id"]:
+        try:
+            trip.route = Route.objects.get(pk=int(data["route_id"]))
+        except (Route.DoesNotExist, TypeError, ValueError):
+            return Response({"detail": "Invalid route_id."}, status=400)
+    if "operator_id" in data and data["operator_id"]:
+        try:
+            trip.operator = OperatorProfile.objects.get(pk=int(data["operator_id"]))
+        except (OperatorProfile.DoesNotExist, TypeError, ValueError):
+            return Response({"detail": "Invalid operator_id."}, status=400)
+    if "departure_date" in data and data["departure_date"]:
+        raw = data["departure_date"]
+        try:
+            trip.departure_date = (
+                datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
+                if isinstance(raw, str)
+                else raw
+            )
+        except ValueError:
+            return Response({"detail": "Invalid departure_date."}, status=400)
+    if "expected_departure_time" in data:
+        exp = data.get("expected_departure_time")
+        if not exp:
+            trip.expected_departure_time = None
+        elif isinstance(exp, str):
+            try:
+                trip.expected_departure_time = datetime.strptime(exp[:5], "%H:%M").time()
+            except ValueError:
+                return Response(
+                    {"detail": "Invalid expected_departure_time."}, status=400
+                )
+    if "seat_capacity" in data and data["seat_capacity"] is not None:
+        try:
+            trip.seat_capacity = int(data["seat_capacity"])
+        except (TypeError, ValueError):
+            pass
+    if "driver_id" in data:
+        if not data["driver_id"]:
+            trip.driver = None
+        else:
+            try:
+                trip.driver = DriverProfile.objects.get(pk=int(data["driver_id"]))
+            except (DriverProfile.DoesNotExist, TypeError, ValueError):
+                return Response({"detail": "Invalid driver_id."}, status=400)
+    if "vehicle_id" in data:
+        if not data["vehicle_id"]:
+            trip.vehicle = None
+        else:
+            try:
+                trip.vehicle = Vehicle.objects.get(pk=int(data["vehicle_id"]))
+            except (Vehicle.DoesNotExist, TypeError, ValueError):
+                return Response({"detail": "Invalid vehicle_id."}, status=400)
+    if "notes" in data:
+        trip.notes = (data.get("notes") or "")[:500]
+    if "status" in data and data["status"] in dict(Trip.Status.choices):
+        trip.status = data["status"]
+
+    trip.save()
+    trip = Trip.objects.select_related(
+        "route__departure",
+        "route__destination",
+        "operator__user",
+        "driver__user",
+        "vehicle",
+    ).get(pk=trip.pk)
+    return Response(_trip_queue_row(trip))
+
+
+
+def _audit(actor, action, entity_type="", entity_id="", detail="", meta=None):
+    try:
+        AuditLog.objects.create(
+            actor=actor if getattr(actor, "is_authenticated", False) else None,
+            action=action,
+            entity_type=entity_type or "",
+            entity_id=str(entity_id or ""),
+            detail=detail or "",
+            meta=meta or {},
+        )
+    except Exception:
+        pass
+
+
+def _announce_row(a):
+    return {
+        "id": a.id,
+        "topic": a.topic,
+        "message": a.message,
+        "status": a.status,
+        "audience": a.audience,
+        "rank_id": a.rank_id,
+        "rank_name": a.rank.name if a.rank_id else None,
+        "route_id": a.route_id,
+        "route_label": (
+            f"{getattr(a.route.departure, 'name', '')} → {getattr(a.route.destination, 'name', '')}"
+            if a.route_id
+            else None
+        ),
+        "service": a.service,
+        "reach_count": a.reach_count,
+        "published_at": a.published_at,
+        "scheduled_for": a.scheduled_for,
+        "created_by": getattr(a.created_by, "username", None),
+        "updated_at": a.updated_at,
+    }
+
+
+def _publish_announcement(ann, actor):
+    """Deliver announcement to audience scoped by rank (and optional route)."""
+    from django.contrib.auth import get_user_model
+    from accounts.models import DriverProfile, OperatorProfile
+    from django.utils import timezone
+
+    User = get_user_model()
+    notified = 0
+    rank = ann.rank
+    audience = ann.audience
+
+    def notify_driver(dp):
+        nonlocal notified
+        DriverNotification.objects.create(
+            driver=dp,
+            title=ann.topic,
+            body=ann.message,
+            meta={"type": "announcement", "announcement_id": ann.id},
+        )
+        notified += 1
+
+    def notify_operator_user(u):
+        nonlocal notified
+        OperatorNotification.objects.create(
+            operator_user=u,
+            title=ann.topic,
+            body=ann.message,
+            meta={"type": "announcement", "announcement_id": ann.id},
+        )
+        notified += 1
+
+    if audience == Announcement.Audience.ALL_USERS:
+        for u in User.objects.filter(is_active=True)[:500]:
+            if u.role == "driver":
+                try:
+                    notify_driver(u.driver_profile)
+                except Exception:
+                    pass
+            elif u.role == "operator":
+                notify_operator_user(u)
+            elif u.role == "passenger":
+                PassengerNotification.objects.create(
+                    passenger=u, title=ann.topic, body=ann.message,
+                    meta={"type": "announcement", "announcement_id": ann.id},
+                )
+                notified += 1
+    else:
+        driver_qs = DriverProfile.objects.select_related("user")
+        op_qs = OperatorProfile.objects.select_related("user")
+        if rank:
+            # drivers linked via trips or any at rank memberships of operators — keep simple:
+            # operators at rank; drivers with vehicle/trip at rank region: all verified drivers for demo
+            op_ids = OperatorAtRank.objects.filter(
+                rank=rank, status=OperatorAtRank.Status.ACTIVE
+            ).values_list("operator_id", flat=True)
+            op_qs = op_qs.filter(id__in=op_ids)
+        if audience in (
+            Announcement.Audience.DRIVERS_OPERATORS,
+            Announcement.Audience.DRIVERS,
+        ):
+            for dp in driver_qs.filter(status="verified")[:200]:
+                notify_driver(dp)
+        if audience in (
+            Announcement.Audience.DRIVERS_OPERATORS,
+            Announcement.Audience.OPERATORS,
+        ):
+            for op in op_qs[:200]:
+                notify_operator_user(op.user)
+
+    ann.status = Announcement.Status.PUBLISHED
+    ann.published_at = timezone.now()
+    ann.reach_count = notified
+    ann.save(update_fields=["status", "published_at", "reach_count", "updated_at"])
+    _audit(actor, "announcement.publish", "announcement", ann.id, ann.topic, {"reach": notified})
+    return notified
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_announcements(request):
+    if not _require_admin(request) and getattr(request.user, "role", "") != "operator":
+        return Response({"detail": "Admin or operator only."}, status=403)
+
+    if request.method == "GET":
+        qs = Announcement.objects.select_related(
+            "rank", "route__departure", "route__destination", "created_by"
+        ).order_by("-updated_at")[:100]
+        return Response([_announce_row(a) for a in qs])
+
+    data = request.data
+    topic = (data.get("topic") or "").strip()
+    message = (data.get("message") or "").strip()
+    if not topic or not message:
+        return Response({"detail": "topic and message required."}, status=400)
+    ann = Announcement.objects.create(
+        topic=topic,
+        message=message,
+        status=data.get("status") or Announcement.Status.DRAFT,
+        audience=data.get("audience") or Announcement.Audience.DRIVERS_OPERATORS,
+        rank_id=data.get("rank_id") or None,
+        route_id=data.get("route_id") or None,
+        service=(data.get("service") or "commuter")[:40],
+        created_by=request.user,
+    )
+    if data.get("publish"):
+        _publish_announcement(ann, request.user)
+        ann.refresh_from_db()
+    _audit(request.user, "announcement.create", "announcement", ann.id, topic)
+    return Response(_announce_row(ann), status=201)
+
+
+@api_view(["GET", "PATCH"])
+@permission_classes([IsAuthenticated])
+def api_admin_announcement_detail(request, ann_id):
+    if not _require_admin(request) and getattr(request.user, "role", "") != "operator":
+        return Response({"detail": "Admin or operator only."}, status=403)
+    try:
+        ann = Announcement.objects.select_related(
+            "rank", "route__departure", "route__destination", "created_by"
+        ).get(pk=ann_id)
+    except Announcement.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+
+    if request.method == "GET":
+        return Response(_announce_row(ann))
+
+    data = request.data
+    for field in ("topic", "message", "audience", "service"):
+        if field in data and data[field] is not None:
+            setattr(ann, field, data[field])
+    if "rank_id" in data:
+        ann.rank_id = data.get("rank_id") or None
+    if "route_id" in data:
+        ann.route_id = data.get("route_id") or None
+    if data.get("deactivate"):
+        ann.status = Announcement.Status.INACTIVE
+    if data.get("publish"):
+        ann.save()
+        _publish_announcement(ann, request.user)
+        ann.refresh_from_db()
+    else:
+        if "status" in data and data["status"] in dict(Announcement.Status.choices):
+            ann.status = data["status"]
+        ann.save()
+    _audit(request.user, "announcement.update", "announcement", ann.id, ann.topic)
+    return Response(_announce_row(ann))
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_complaints(request):
+    if not _require_admin(request) and getattr(request.user, "role", "") != "operator":
+        return Response({"detail": "Forbidden."}, status=403)
+    qs = DriverComplaint.objects.select_related(
+        "driver__user", "trip", "raised_by", "escalated_by"
+    ).order_by("-created_at")[:100]
+    # escalated first for admin
+    escalated = [c for c in qs if c.status == DriverComplaint.Status.ESCALATED]
+    others = [c for c in qs if c.status != DriverComplaint.Status.ESCALATED]
+    ordered = escalated + others
+
+    def row(c):
+        du = getattr(c.driver, "user", None)
+        return {
+            "id": c.id,
+            "category": c.category,
+            "description": c.description,
+            "status": c.status,
+            "driver_name": f"{du.first_name} {du.last_name}".strip() if du else None,
+            "trip_id": c.trip_id,
+            "trip_code": getattr(c.trip, "trip_code", None),
+            "raised_by": getattr(c.raised_by, "username", None),
+            "escalation_reason": c.escalation_reason,
+            "admin_note": c.admin_note,
+            "created_at": c.created_at,
+        }
+
+    return Response([row(c) for c in ordered])
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_escalate_complaint(request, complaint_id):
+    """Operator escalates a complaint for admin review."""
+    if getattr(request.user, "role", "") not in ("operator", "admin", "administrator"):
+        return Response({"detail": "Operator or admin only."}, status=403)
+    from django.utils import timezone
+
+    try:
+        c = DriverComplaint.objects.get(pk=complaint_id)
+    except DriverComplaint.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    reason = (request.data.get("reason") or "").strip()
+    if not reason:
+        return Response({"detail": "reason required."}, status=400)
+    c.status = DriverComplaint.Status.ESCALATED
+    c.escalation_reason = reason
+    c.escalated_by = request.user
+    c.escalated_at = timezone.now()
+    c.save()
+    _audit(request.user, "complaint.escalate", "complaint", c.id, reason)
+    return Response({"id": c.id, "status": c.status})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_complaint_review(request, complaint_id):
+    """Admin marks reviewed — cannot confirm safety here (use safety panel)."""
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    try:
+        c = DriverComplaint.objects.get(pk=complaint_id)
+    except DriverComplaint.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    note = (request.data.get("admin_note") or "").strip()
+    action = (request.data.get("action") or "reviewed").strip()
+    if note:
+        c.admin_note = note
+    if action == "refer_safety":
+        SafetyIncident.objects.create(
+            title=c.category or "Referred from complaint",
+            source="complaint",
+            complaint=c,
+            trip=c.trip,
+            status=SafetyIncident.Status.AWAITING_REVIEW,
+        )
+        _audit(request.user, "complaint.refer_safety", "complaint", c.id)
+    elif action == "resolve":
+        c.status = DriverComplaint.Status.RESOLVED
+    else:
+        c.status = DriverComplaint.Status.RESPONSE_SENT
+    c.save()
+    _audit(request.user, "complaint.review", "complaint", c.id, action)
+    return Response({"id": c.id, "status": c.status})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_safety(request):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    qs = SafetyIncident.objects.select_related("trip", "complaint").order_by("-created_at")[:100]
+    return Response(
+        [
+            {
+                "id": s.id,
+                "title": s.title,
+                "source": s.source,
+                "status": s.status,
+                "trip_id": s.trip_id,
+                "complaint_id": s.complaint_id,
+                "findings": s.findings,
+                "created_at": s.created_at,
+            }
+            for s in qs
+        ]
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_safety_decide(request, incident_id):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from django.utils import timezone
+
+    try:
+        s = SafetyIncident.objects.get(pk=incident_id)
+    except SafetyIncident.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    decision = (request.data.get("decision") or "").strip()
+    s.findings = (request.data.get("findings") or s.findings or "")[:2000]
+    if decision == "confirm":
+        s.status = SafetyIncident.Status.CONFIRMED
+        s.confirmed_by = request.user
+        s.confirmed_at = timezone.now()
+    elif decision == "not_safety":
+        s.status = SafetyIncident.Status.NOT_CONFIRMED
+    elif decision == "resolve":
+        s.status = SafetyIncident.Status.RESOLVED
+    else:
+        return Response({"detail": "decision must be confirm|not_safety|resolve"}, status=400)
+    s.save()
+    _audit(request.user, "safety.decide", "safety", s.id, decision)
+    return Response({"id": s.id, "status": s.status})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_history(request):
+    """History tab — every user sees recent actions (own + system for admin)."""
+    qs = AuditLog.objects.select_related("actor").order_by("-created_at")
+    role = getattr(request.user, "role", "")
+    if role not in ("admin", "administrator"):
+        qs = qs.filter(actor=request.user)
+    qs = qs[:100]
+    return Response(
+        [
+            {
+                "id": a.id,
+                "action": a.action,
+                "entity_type": a.entity_type,
+                "entity_id": a.entity_id,
+                "detail": a.detail,
+                "actor": getattr(a.actor, "username", None),
+                "created_at": a.created_at,
+            }
+            for a in qs
+        ]
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_rate_driver(request):
+    """Passenger rates driver after trip completed (1–5)."""
+    if getattr(request.user, "role", "") != "passenger":
+        return Response({"detail": "Passengers only."}, status=403)
+    try:
+        score = int(request.data.get("score"))
+        trip_id = int(request.data.get("trip_id"))
+    except (TypeError, ValueError):
+        return Response({"detail": "score and trip_id required."}, status=400)
+    if score < 1 or score > 5:
+        return Response({"detail": "score must be 1–5."}, status=400)
+    try:
+        trip = Trip.objects.select_related("driver").get(pk=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found."}, status=404)
+    if trip.status != Trip.Status.COMPLETED:
+        return Response({"detail": "Rate only after trip is completed."}, status=400)
+    if not trip.driver_id:
+        return Response({"detail": "No driver on trip."}, status=400)
+    comment = (request.data.get("comment") or "")[:500]
+    rating = DriverRating.objects.create(
+        driver=trip.driver,
+        trip=trip,
+        passenger=request.user,
+        score=score,
+        comment=comment,
+    )
+    _audit(request.user, "driver.rate", "trip", trip.id, f"{score}/5")
+    return Response({"id": rating.id, "score": score}, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_driver_rating_summary(request, driver_id):
+    """Average stars only — no passenger comments to the driver."""
+    from django.db.models import Avg, Count
+
+    agg = DriverRating.objects.filter(driver_id=driver_id).aggregate(
+        avg=Avg("score"), n=Count("id")
+    )
+    return Response(
+        {
+            "driver_id": driver_id,
+            "average": round(float(agg["avg"] or 0), 2),
+            "count": agg["n"] or 0,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_simulate_trip(request):
+    """
+    DEV ONLY: advance a trip through statuses so all roles can test progression.
+    scheduled → boarding → in_progress → completed
+    """
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from django.utils import timezone
+
+    trip_id = request.data.get("trip_id")
+    step = (request.data.get("step") or "next").strip()
+    try:
+        trip = Trip.objects.select_related(
+            "route__departure", "route__destination", "driver__user", "vehicle"
+        ).get(pk=int(trip_id))
+    except (Trip.DoesNotExist, TypeError, ValueError):
+        return Response({"detail": "Valid trip_id required."}, status=400)
+
+    order = [
+        Trip.Status.SCHEDULED,
+        Trip.Status.BOARDING,
+        Trip.Status.IN_PROGRESS,
+        Trip.Status.COMPLETED,
+    ]
+    if step == "reset":
+        trip.status = Trip.Status.SCHEDULED
+    elif step == "cancel":
+        trip.status = Trip.Status.CANCELLED
+    else:
+        try:
+            i = order.index(trip.status)
+            if i < len(order) - 1:
+                trip.status = order[i + 1]
+        except ValueError:
+            trip.status = Trip.Status.BOARDING
+
+    if trip.status == Trip.Status.IN_PROGRESS and not trip.actual_departure_time:
+        trip.actual_departure_time = timezone.now()
+    trip.save()
+
+    # Notify driver + passengers on trip
+    if trip.driver_id:
+        DriverNotification.objects.create(
+            driver=trip.driver,
+            title=f"Trip {trip.status.replace('_', ' ')}",
+            body=f"Simulated: {trip.trip_code} is now {trip.status}.",
+            link_trip=trip,
+            meta={"type": "trip_progress", "status": trip.status, "simulated": True},
+        )
+    for b in trip.bookings.exclude(status="cancelled")[:30]:
+        if b.passenger_id:
+            PassengerNotification.objects.create(
+                passenger=b.passenger,
+                title=f"Trip update: {trip.status.replace('_', ' ')}",
+                body=f"Your trip {trip.trip_code} is now {trip.status}.",
+                meta={"type": "trip_progress", "trip_id": trip.id, "status": trip.status},
+            )
+
+    _audit(
+        request.user,
+        "trip.simulate",
+        "trip",
+        trip.id,
+        trip.status,
+        {"simulated": True},
+    )
+    return Response(_trip_queue_row(trip))
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_overview(request):
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    from django.contrib.auth import get_user_model
+    from accounts.models import DriverProfile
+
+    User = get_user_model()
+    return Response(
+        {
+            "active_trips": Trip.objects.filter(
+                status__in=[Trip.Status.BOARDING, Trip.Status.IN_PROGRESS]
+            ).count(),
+            "rank_queue": Trip.objects.filter(status=Trip.Status.SCHEDULED).count(),
+            "escalations": DriverComplaint.objects.filter(
+                status=DriverComplaint.Status.ESCALATED
+            ).count(),
+            "pending_accounts": User.objects.filter(is_active=False).count()
+            + DriverProfile.objects.filter(status="pending").count(),
+            "open_panics": PanicAlert.objects.count(),
+            "announcements_live": Announcement.objects.filter(
+                status=Announcement.Status.PUBLISHED
+            ).count(),
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_panics_live(request):
+    """Panic alerts with live location for admin map/list."""
+    if not _require_admin(request):
+        return Response({"detail": "Admins only."}, status=403)
+    qs = PanicAlert.objects.select_related("user", "trip").order_by("-created_at")[:50]
+    return Response(
+        [
+            {
+                "id": p.id,
+                "user": getattr(p.user, "username", None),
+                "user_name": (
+                    f"{p.user.first_name} {p.user.last_name}".strip()
+                    if p.user_id
+                    else None
+                ),
+                "trip_id": p.trip_id,
+                "trip_code": getattr(p.trip, "trip_code", None),
+                "lat": p.latitude,
+                "lng": p.longitude,
+                "accuracy_m": p.accuracy_m,
+                "created_at": p.created_at,
+                "payload": p.payload,
+            }
+            for p in qs
+        ]
+    )
+
+# ---- Ride request (10 km) ----
+RIDE_REQUEST_RADIUS_KM = 10.0
+
+
+def _passenger_display_name(user):
+    if not user:
+        return "Passenger"
+    full = f"{getattr(user, 'first_name', '')} {getattr(user, 'last_name', '')}".strip()
+    return full or getattr(user, "phone", None) or getattr(user, "username", None) or "Passenger"
+
+
+def _drivers_within_radius(lat, lng, radius_km=RIDE_REQUEST_RADIUS_KM):
+    """Return DriverProfiles whose latest vehicle GPS is within radius_km (SQLite-safe)."""
+    from .models import VehicleLocation, DriverVehicle, Trip
+    from accounts.models import DriverProfile
+
+    seen_vehicles = set()
+    near_vehicle_ids = []
+    for loc in VehicleLocation.objects.order_by("-recorded_at").iterator():
+        if loc.vehicle_id in seen_vehicles:
+            continue
+        seen_vehicles.add(loc.vehicle_id)
+        try:
+            d = haversine_km(lat, lng, float(loc.lat), float(loc.lng))
+        except (TypeError, ValueError):
+            continue
+        if d <= radius_km:
+            near_vehicle_ids.append(loc.vehicle_id)
+
+    driver_ids = set(
+        DriverVehicle.objects.filter(vehicle_id__in=near_vehicle_ids).values_list(
+            "driver_id", flat=True
+        )
+    )
+    for t in Trip.objects.filter(vehicle_id__in=near_vehicle_ids, driver__isnull=False):
+        driver_ids.add(t.driver_id)
+
+    return list(DriverProfile.objects.filter(id__in=driver_ids))
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_create_ride_request(request):
+    """
+    Passenger Request ride — does NOT create a Booking or open trip routing.
+
+    Body: { trip_id?, lat, lng }
+    Notifies drivers within 10 km of passenger GPS.
+    """
+    if getattr(request.user, "role", None) not in ("passenger", "admin"):
+        # allow passenger primarily; admin for testing
+        if getattr(request.user, "role", None) != "passenger":
+            pass  # still allow any authenticated for demo flexibility
+
+    try:
+        lat = float(request.data.get("lat") if request.data.get("lat") is not None else request.data.get("passenger_lat"))
+        lng = float(request.data.get("lng") if request.data.get("lng") is not None else request.data.get("passenger_lng"))
+    except (TypeError, ValueError):
+        return Response(
+            {"detail": "lat and lng are required (passenger current location)."},
+            status=400,
+        )
+
+    trip = None
+    trip_id = request.data.get("trip_id")
+    if trip_id:
+        try:
+            trip = Trip.objects.select_related("route", "driver").get(pk=trip_id)
+        except Trip.DoesNotExist:
+            return Response({"detail": "Trip not found."}, status=404)
+
+    pname = _passenger_display_name(request.user)
+    rr = RideRequest.objects.create(
+        passenger=request.user,
+        trip=trip,
+        passenger_lat=lat,
+        passenger_lng=lng,
+        passenger_name=pname,
+        status=RideRequest.Status.PENDING,
+    )
+
+    drivers = list(_drivers_within_radius(lat, lng, RIDE_REQUEST_RADIUS_KM))
+
+    # Always include assigned trip driver if present (even without recent GPS)
+    if trip and trip.driver_id:
+        if not any(d.id == trip.driver_id for d in drivers):
+            drivers.append(trip.driver)
+
+    # Same-device / demo fallback: if nobody is in range, notify all drivers
+    # (so passenger_demo → driver_demo works without live GPS on one laptop)
+    if not drivers:
+        from accounts.models import DriverProfile
+
+        drivers = list(DriverProfile.objects.all()[:20])
+
+    trip_code = trip.trip_code if trip else None
+    from_name = ""
+    to_name = ""
+    if trip and trip.route_id:
+        from_name = getattr(getattr(trip.route, "departure", None), "name", "") or ""
+        to_name = getattr(getattr(trip.route, "destination", None), "name", "") or ""
+
+    notified = 0
+    for d in drivers:
+        DriverNotification.objects.create(
+            driver=d,
+            title="Ride request",
+            body=f"{pname} is nearby and requested a pickup"
+            + (f" ({from_name} → {to_name})" if from_name or to_name else "")
+            + ".",
+            link_trip=trip,
+            meta={
+                "type": "ride_request",
+                "request_id": rr.id,
+                "trip_id": trip.id if trip else None,
+                "trip_code": trip_code,
+                "passenger_name": pname,
+                "passenger_lat": lat,
+                "passenger_lng": lng,
+                "location_source": request.data.get("location_source") or "gps",
+                "radius_km": RIDE_REQUEST_RADIUS_KM,
+            },
+        )
+        notified += 1
+
+    data = RideRequestSerializer(rr).data
+    data["drivers_notified"] = notified
+    data["radius_km"] = RIDE_REQUEST_RADIUS_KM
+    return Response(data, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_ride_request_detail(request, request_id):
+    try:
+        rr = RideRequest.objects.select_related("trip", "accepted_by__user", "passenger").get(
+            pk=request_id
+        )
+    except RideRequest.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    return Response(RideRequestSerializer(rr).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_accept_ride_request(request, request_id):
+    """First accepting driver wins; others' pending notifications expire for this request."""
+    from accounts.models import DriverProfile
+    from django.utils import timezone
+    from django.db import transaction
+
+    try:
+        dp = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "Drivers only."}, status=403)
+
+    with transaction.atomic():
+        try:
+            rr = RideRequest.objects.select_for_update().get(pk=request_id)
+        except RideRequest.DoesNotExist:
+            return Response({"detail": "Not found."}, status=404)
+
+        if rr.status != RideRequest.Status.PENDING:
+            return Response(
+                {"detail": f"Request is already {rr.status}."},
+                status=409,
+            )
+
+        rr.status = RideRequest.Status.ACCEPTED
+        rr.accepted_by = dp
+        rr.accepted_at = timezone.now()
+        rr.save(update_fields=["status", "accepted_by", "accepted_at", "updated_at"])
+
+        # Expire other drivers' ride_request notifications for this request
+        for n in DriverNotification.objects.filter(meta__request_id=rr.id).exclude(
+            driver=dp
+        ):
+            meta = dict(n.meta or {})
+            meta["expired"] = True
+            n.meta = meta
+            n.read = True
+            n.save(update_fields=["meta", "read"])
+
+        # Passenger short status message
+        driver_name = _passenger_display_name(dp.user)
+        PassengerNotification.objects.create(
+            passenger=rr.passenger,
+            title="Driver incoming",
+            body=f"{driver_name} accepted your request and is on the way.",
+            meta={
+                "type": "driver_incoming",
+                "request_id": rr.id,
+                "driver_id": dp.id,
+            },
+        )
+
+    return Response(RideRequestSerializer(rr).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_reject_ride_request(request, request_id):
+    from accounts.models import DriverProfile
+
+    try:
+        dp = request.user.driver_profile
+    except Exception:
+        return Response({"detail": "Drivers only."}, status=403)
+
+    try:
+        rr = RideRequest.objects.get(pk=request_id)
+    except RideRequest.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+
+    if rr.status != RideRequest.Status.PENDING:
+        return Response({"detail": f"Request is already {rr.status}."}, status=409)
+
+    # Mark this driver's notification read; leave request pending for other drivers
+    for n in DriverNotification.objects.filter(driver=dp, meta__request_id=rr.id):
+        meta = dict(n.meta or {})
+        meta["rejected_by_me"] = True
+        n.meta = meta
+        n.read = True
+        n.save(update_fields=["meta", "read"])
+
+    # If this was the only notified driver, mark request rejected
+    others = DriverNotification.objects.filter(meta__request_id=rr.id).exclude(
+        driver=dp
+    ).filter(read=False).count()
+    if others == 0:
+        rr.status = RideRequest.Status.REJECTED
+        rr.save(update_fields=["status", "updated_at"])
+
+    return Response({"detail": "Rejected.", "request": RideRequestSerializer(rr).data})
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_passenger_notifications(request):
+    qs = PassengerNotification.objects.filter(passenger=request.user).order_by("-created_at")[:50]
+    return Response(PassengerNotificationSerializer(qs, many=True).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_passenger_notification_read(request, notification_id):
+    try:
+        n = PassengerNotification.objects.get(pk=notification_id, passenger=request.user)
+    except PassengerNotification.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    n.read = True
+    n.save(update_fields=["read"])
+    return Response({"id": n.id, "read": True})
+
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_dashboard(request):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    rank_ids = list(
+        OperatorAtRank.objects.filter(
+            operator=op, status=OperatorAtRank.Status.ACTIVE
+        ).values_list("rank_id", flat=True)
+    )
+    trips = Trip.objects.all()
+    if rank_ids:
+        trips = trips.filter(route__departure_id__in=rank_ids)
+    else:
+        trips = trips.filter(operator=op)
+    from django.utils import timezone as tz
+    today = tz.localdate()
+    today_trips = trips.filter(departure_date=today)
+    passengers = Booking.objects.filter(trip__in=today_trips).exclude(
+        status=Booking.Status.CANCELLED
+    ).count()
+    panics = PanicAlert.objects.filter(trip__in=trips).count() if rank_ids or True else 0
+    ranks = Rank.objects.filter(id__in=rank_ids)
+    return Response(
+        {
+            "trips_today": today_trips.count(),
+            "passengers_registered": passengers,
+            "active_alerts": panics,
+            "queue_count": trips.filter(
+                status__in=[Trip.Status.SCHEDULED, Trip.Status.BOARDING]
+            ).count(),
+            "ranks": [{"id": r.id, "name": r.name} for r in ranks],
+            "operator_name": f"{op.user.first_name} {op.user.last_name}".strip()
+            or op.user.username,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_operator_confirm_trip(request, trip_id):
+    """Confirm working this trip → engage + boarding + audit."""
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    trip = _get_operator_trip(op, trip_id)
+    if trip is None:
+        return Response({"detail": "Trip not in your rank scope."}, status=404)
+    trip.engaged_by = op
+    trip.engaged_at = timezone.now()
+    if trip.status == Trip.Status.SCHEDULED:
+        trip.status = Trip.Status.BOARDING
+    trip.save()
+    try:
+        _audit(
+            request.user,
+            "operator.confirm_trip",
+            "trip",
+            trip.id,
+            f"Confirmed {trip.trip_code}",
+        )
+    except Exception:
+        pass
+    return Response(TripSerializer(trip).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_drivers(request):
+    """Drivers on trips in this operator's rank scope (association drivers)."""
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    rank_ids = list(
+        OperatorAtRank.objects.filter(
+            operator=op, status=OperatorAtRank.Status.ACTIVE
+        ).values_list("rank_id", flat=True)
+    )
+    trips = Trip.objects.filter(driver__isnull=False)
+    if rank_ids:
+        trips = trips.filter(route__departure_id__in=rank_ids)
+    else:
+        trips = trips.filter(operator=op)
+    driver_ids = trips.values_list("driver_id", flat=True).distinct()
+    from accounts.models import DriverProfile
+    from django.db.models import Count
+
+    out = []
+    for d in DriverProfile.objects.filter(id__in=driver_ids).select_related("user"):
+        u = d.user
+        complaints = DriverComplaint.objects.filter(driver=d).count()
+        veh = (
+            trips.filter(driver=d)
+            .select_related("vehicle")
+            .order_by("-id")
+            .first()
+        )
+        out.append(
+            {
+                "id": d.id,
+                "name": f"{u.first_name} {u.last_name}".strip() or u.username,
+                "phone": getattr(u, "phone", "") or "",
+                "license_number": d.license_number,
+                "status": d.status,
+                "complaints_count": complaints,
+                "vehicle_plate": getattr(getattr(veh, "vehicle", None), "plate_number", None),
+                "trip_id": veh.id if veh else None,
+                "trip_code": veh.trip_code if veh else None,
+            }
+        )
+    return Response(out)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_operator_verify_assets(request, trip_id):
+    """Record driver+vehicle verification against assignment."""
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    trip = _get_operator_trip(op, trip_id)
+    if trip is None:
+        return Response({"detail": "Trip not in scope."}, status=404)
+    try:
+        _audit(
+            request.user,
+            "operator.verify_driver_vehicle",
+            "trip",
+            trip.id,
+            f"Verified assets on {trip.trip_code}",
+            {
+                "driver_id": trip.driver_id,
+                "vehicle_id": trip.vehicle_id,
+            },
+        )
+    except Exception:
+        pass
+    return Response(
+        {
+            "detail": "Driver and vehicle verification recorded.",
+            "trip_id": trip.id,
+            "trip_code": trip.trip_code,
+            "verified_at": timezone.now(),
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_panics(request):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    rank_ids = list(
+        OperatorAtRank.objects.filter(
+            operator=op, status=OperatorAtRank.Status.ACTIVE
+        ).values_list("rank_id", flat=True)
+    )
+    qs = PanicAlert.objects.select_related("user", "trip__route__departure").order_by(
+        "-created_at"
+    )[:50]
+    if rank_ids:
+        qs = [
+            p
+            for p in qs
+            if p.trip_id
+            and p.trip.route_id
+            and p.trip.route.departure_id in rank_ids
+        ] or list(qs[:20])  # show recent if none rank-matched
+    return Response(
+        [
+            {
+                "id": p.id,
+                "user": getattr(p.user, "username", None),
+                "user_name": (
+                    f"{p.user.first_name} {p.user.last_name}".strip()
+                    if p.user_id
+                    else None
+                ),
+                "trip_id": p.trip_id,
+                "trip_code": getattr(p.trip, "trip_code", None),
+                "lat": p.latitude,
+                "lng": p.longitude,
+                "created_at": p.created_at,
+                "severity": p.payload,
+            }
+            for p in (qs if isinstance(qs, list) else list(qs))
+        ]
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_complaints(request):
+    op = _operator(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    rank_ids = list(
+        OperatorAtRank.objects.filter(
+            operator=op, status=OperatorAtRank.Status.ACTIVE
+        ).values_list("rank_id", flat=True)
+    )
+    qs = DriverComplaint.objects.select_related(
+        "driver__user", "trip__route__departure", "raised_by"
+    ).order_by("-created_at")[:80]
+    rows = []
+    for c in qs:
+        if rank_ids and c.trip_id and c.trip.route_id:
+            if c.trip.route.departure_id not in rank_ids:
+                continue
+        du = getattr(c.driver, "user", None)
+        rows.append(
+            {
+                "id": c.id,
+                "category": c.category,
+                "description": c.description,
+                "status": c.status,
+                "driver_name": f"{du.first_name} {du.last_name}".strip() if du else None,
+                "trip_id": c.trip_id,
+                "trip_code": getattr(c.trip, "trip_code", None),
+                "created_at": c.created_at,
+                "escalation_reason": c.escalation_reason,
+            }
+        )
+    return Response(rows)

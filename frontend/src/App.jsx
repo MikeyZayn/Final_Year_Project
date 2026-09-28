@@ -10,32 +10,289 @@ import {
 } from './api';
 import PassengerMapDashboard from './pages/PassengerMapDashboard.jsx';
 import DriverPage from './pages/DriverPage.jsx';
-import OperatorPage from './pages/OperatorPage.jsx';
+import RankFlowOperatorPage from './pages/RankFlowOperatorPage.jsx';
+import RankFlowAdminPage from './pages/RankFlowAdminPage.jsx';
+import './styles/operatorFyp.css';
 
-/* ============================================================
-   Register component (own page)
-   ============================================================ */
+const DEMOS = [
+  { label: 'Passenger', ident: 'passenger_demo' },
+  { label: 'Driver', ident: 'driver_demo' },
+  { label: 'Operator', ident: 'operator_demo' },
+  { label: 'Admin', ident: 'admin_demo' },
+];
 
-const REGISTER_ROLES = ['passenger', 'driver', 'operator', 'administrator'];
+const ROLES = ['passenger', 'driver', 'operator'];
 
-function RegisterRolePicker({ role, setRole }) {
+export default function App() {
+  const [user, setUser] = useState(getUser());
+  const [token, setToken] = useState(getToken());
+  const [screen, setScreen] = useState('welcome'); // welcome | login | register
+  const [role, setRole] = useState('passenger');
+  const [darkMode, setDarkMode] = useState(true);
+  const [toast, setToast] = useState('');
+  const [apiBase, setApiBaseState] = useState(getApiBase());
+  const [health, setHealth] = useState(null);
+
+  const notify = useCallback((msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 3200);
+  }, []);
+
+  const refreshHealth = useCallback(async () => {
+    try {
+      setHealth(await api.health());
+    } catch (e) {
+      setHealth({ status: 'down', error: e.message });
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshHealth();
+  }, [apiBase, refreshHealth]);
+
+  function handleLogout() {
+    api.logout().catch(() => {});
+    clearSession();
+    setToken(null);
+    setUser(null);
+    setScreen('welcome');
+    notify('Signed out');
+  }
+
+  function handleAuthed(data) {
+    setSession(data.token, data.user);
+    setToken(data.token);
+    setUser(data.user);
+    notify(`Signed in as ${data.user.role}`);
+  }
+
+  // ——— Logged in: full-bleed role dashboards ———
+  if (token && user) {
+    const r = user.role === 'administrator' ? 'admin' : user.role;
+    return (
+      <>
+        {r === 'passenger' && (
+          <PassengerMapDashboard notify={notify} onExit={handleLogout} />
+        )}
+        {r === 'driver' && <DriverPage notify={notify} />}
+        {r === 'operator' && <RankFlowOperatorPage notify={notify} />}
+        {r === 'admin' && <RankFlowAdminPage notify={notify} />}
+        {toast && (
+          <div className="toast" role="status">
+            {toast}
+          </div>
+        )}
+      </>
+    );
+  }
+
+  // ——— Auth shell (FYP welcome / login / register — no guest) ———
   return (
-    <div className="role-picker">
-      {REGISTER_ROLES.map((item) => (
-        <button
-          key={item}
-          type="button"
-          className={role === item ? 'selected' : ''}
-          onClick={() => setRole(item)}
-        >
-          {item}
+    <div className={darkMode ? 'app dark' : 'app light'}>
+      <header className="topbar">
+        <button className="brand" onClick={() => setScreen('welcome')} type="button">
+          <span className="brand-mark">T</span>
+          <span>
+            <strong>THEMBA</strong>
+            <small>Transport Hub with Evaluated Mobility, Boarding & Accountability</small>
+          </span>
         </button>
-      ))}
+        <div className="top-actions">
+          <button
+            className="text-button"
+            type="button"
+            onClick={() => setDarkMode((v) => !v)}
+          >
+            {darkMode ? 'Light mode' : 'Dark mode'}
+          </button>
+          <span className={`status-pill ${health?.status === 'ok' ? '' : ''}`}>
+            API {health?.status === 'ok' ? 'online' : 'offline'}
+          </span>
+        </div>
+      </header>
+
+      <main className="page-shell">
+        {screen === 'welcome' && (
+          <Welcome
+            onLogin={() => setScreen('login')}
+            onRegister={() => {
+              setRole('passenger');
+              setScreen('register');
+            }}
+          />
+        )}
+
+        {screen === 'login' && (
+          <Login
+            apiBase={apiBase}
+            setApiBaseState={setApiBaseState}
+            onBack={() => setScreen('welcome')}
+            onAuthed={handleAuthed}
+            notify={notify}
+          />
+        )}
+
+        {screen === 'register' && (
+          <Register
+            role={role}
+            setRole={setRole}
+            apiBase={apiBase}
+            setApiBaseState={setApiBaseState}
+            onBack={() => setScreen('welcome')}
+            onAuthed={handleAuthed}
+            notify={notify}
+          />
+        )}
+      </main>
+
+      {toast && (
+        <div className="toast" role="status">
+          {toast}
+        </div>
+      )}
     </div>
   );
 }
 
-function Register({ role, setRole, onBack, onAuthed }) {
+function Welcome({ onLogin, onRegister }) {
+  return (
+    <section className="welcome-panel">
+      <div className="eyebrow">South African transport information platform</div>
+      <h1>
+        Travel information.
+        <br />
+        <em>Verified trips.</em>
+        <br />
+        Safer journeys.
+      </h1>
+      <p className="lead">
+        Find the right route, understand the fare, and connect every completed trip to
+        accountable passenger feedback.
+      </p>
+      <div className="welcome-actions">
+        <button className="primary-button" onClick={onLogin} type="button">
+          Sign in <span>→</span>
+        </button>
+        <button className="secondary-button" onClick={onRegister} type="button">
+          Create an account
+        </button>
+      </div>
+      <div className="feature-strip">
+        <span>01 / Route clarity</span>
+        <span>02 / Trip verification</span>
+        <span>03 / Accountable feedback</span>
+      </div>
+    </section>
+  );
+}
+
+function Login({ apiBase, setApiBaseState, onBack, onAuthed, notify }) {
+  const [ident, setIdent] = useState('passenger_demo');
+  const [password, setPassword] = useState('themba123');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function handleSubmit(e) {
+    e?.preventDefault?.();
+    setError('');
+    if (!ident || !password) {
+      setError('Username / phone / email and password are required.');
+      return;
+    }
+    setBusy(true);
+    try {
+      setApiBase(apiBase);
+      const data = await api.login(ident.trim(), password);
+      onAuthed(data);
+    } catch (err) {
+      setError(err.message || 'Login failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="auth-panel">
+      <button className="back-link" onClick={onBack} type="button">
+        ← Back
+      </button>
+      <div className="eyebrow">Secure access</div>
+      <h2>Welcome back.</h2>
+      <p className="muted">Sign in with your phone, email, or demo username.</p>
+
+      <label>
+        API base URL
+        <input
+          value={apiBase}
+          onChange={(e) => setApiBaseState(e.target.value)}
+          placeholder="http://127.0.0.1:8000/api"
+        />
+      </label>
+
+      <label>
+        Phone / email / username
+        <input
+          value={ident}
+          onChange={(e) => setIdent(e.target.value)}
+          placeholder="passenger_demo or 082…"
+          autoComplete="username"
+        />
+      </label>
+
+      <label>
+        Password
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Your password"
+          autoComplete="current-password"
+        />
+      </label>
+
+      {error && (
+        <p className="muted" style={{ color: 'var(--danger)' }}>
+          {error}
+        </p>
+      )}
+
+      <div className="demo-chips" style={{ display: 'flex', flexWrap: 'wrap', gap: 6, margin: '12px 0' }}>
+        {DEMOS.map((d) => (
+          <button
+            key={d.ident}
+            type="button"
+            className="secondary-button"
+            style={{ minWidth: 0, padding: '8px 12px', fontSize: 12 }}
+            onClick={() => {
+              setIdent(d.ident);
+              setPassword('themba123');
+            }}
+          >
+            {d.label}
+          </button>
+        ))}
+      </div>
+
+      <button
+        className="primary-button full"
+        onClick={handleSubmit}
+        type="button"
+        disabled={busy}
+      >
+        {busy ? 'Signing in…' : (
+          <>
+            Sign in <span>→</span>
+          </>
+        )}
+      </button>
+      <button className="secondary-button full" onClick={onBack} type="button">
+        Back to welcome
+      </button>
+    </section>
+  );
+}
+
+function Register({ role, setRole, apiBase, setApiBaseState, onBack, onAuthed, notify }) {
   const [form, setForm] = useState({
     first_name: '',
     last_name: '',
@@ -44,8 +301,11 @@ function Register({ role, setRole, onBack, onAuthed }) {
     password: '',
     next_of_kin_name: '',
     next_of_kin_phone: '',
+    second_next_of_kin_name: '',
+    second_next_of_kin_phone: '',
     license_number: '',
     rank_code: '',
+    id_number: '',
   });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -56,17 +316,13 @@ function Register({ role, setRole, onBack, onAuthed }) {
 
   async function handleSubmit() {
     setError('');
-    if (role === 'administrator') {
-      setError('Administrator accounts are created by invitation only.');
-      return;
-    }
     if (!form.phone || !form.password) {
       setError('Phone number and password are required.');
       return;
     }
-
     setBusy(true);
     try {
+      setApiBase(apiBase);
       let data;
       if (role === 'passenger') {
         data = await api.registerPassenger({
@@ -77,6 +333,8 @@ function Register({ role, setRole, onBack, onAuthed }) {
           password: form.password,
           next_of_kin_name: form.next_of_kin_name,
           next_of_kin_phone: form.next_of_kin_phone,
+          second_next_of_kin_name: form.second_next_of_kin_name || '',
+          second_next_of_kin_phone: form.second_next_of_kin_phone || '',
         });
       } else if (role === 'driver') {
         data = await api.registerDriver({
@@ -87,18 +345,23 @@ function Register({ role, setRole, onBack, onAuthed }) {
           password: form.password,
           license_number: form.license_number,
           rank_code: form.rank_code || undefined,
+          id_number: form.id_number || undefined,
         });
       } else if (role === 'operator') {
         data = await api.registerOperator({
+          first_name: form.first_name,
+          last_name: form.last_name,
           phone: form.phone,
           email: form.email || undefined,
           password: form.password,
           rank_code: form.rank_code,
         });
       } else {
-        throw new Error('Unsupported role.');
+        setError('Administrator accounts are created by invitation only.');
+        setBusy(false);
+        return;
       }
-      onAuthed(data.user, data.token);
+      onAuthed(data);
     } catch (err) {
       setError(err.message || 'Registration failed.');
     } finally {
@@ -114,29 +377,42 @@ function Register({ role, setRole, onBack, onAuthed }) {
       <div className="eyebrow">Account registration</div>
       <h2>Join THEMBA.</h2>
       <p className="muted">
-        Passenger accounts are active immediately. Driver accounts require operator approval.
+        Passenger accounts are active immediately. Driver accounts may require verification.
+        Administrator accounts are invitation-only.
       </p>
 
-      <RegisterRolePicker role={role} setRole={setRole} />
+      <label>
+        API base URL
+        <input
+          value={apiBase}
+          onChange={(e) => setApiBaseState(e.target.value)}
+          placeholder="http://127.0.0.1:8000/api"
+        />
+      </label>
 
-      {role !== 'operator' && role !== 'administrator' && (
-        <div className="form-grid-2">
-          <label>
-            First name
-            <input
-              value={form.first_name}
-              onChange={(e) => set('first_name', e.target.value)}
-            />
-          </label>
-          <label>
-            Surname
-            <input
-              value={form.last_name}
-              onChange={(e) => set('last_name', e.target.value)}
-            />
-          </label>
-        </div>
-      )}
+      <div className="role-picker">
+        {ROLES.map((r) => (
+          <button
+            key={r}
+            type="button"
+            className={role === r ? 'selected' : ''}
+            onClick={() => setRole(r)}
+          >
+            {r}
+          </button>
+        ))}
+      </div>
+
+      <div className="form-grid">
+        <label>
+          First name
+          <input value={form.first_name} onChange={(e) => set('first_name', e.target.value)} />
+        </label>
+        <label>
+          Surname
+          <input value={form.last_name} onChange={(e) => set('last_name', e.target.value)} />
+        </label>
+      </div>
 
       <label>
         Cellphone number
@@ -156,17 +432,26 @@ function Register({ role, setRole, onBack, onAuthed }) {
         />
       </label>
 
+      <label>
+        Password
+        <input
+          type="password"
+          value={form.password}
+          onChange={(e) => set('password', e.target.value)}
+        />
+      </label>
+
       {role === 'passenger' && (
         <>
           <label>
-            Emergency contact — name
+            Next of kin — name
             <input
               value={form.next_of_kin_name}
               onChange={(e) => set('next_of_kin_name', e.target.value)}
             />
           </label>
           <label>
-            Emergency contact — phone
+            Next of kin — phone
             <input
               value={form.next_of_kin_phone}
               onChange={(e) => set('next_of_kin_phone', e.target.value)}
@@ -178,51 +463,32 @@ function Register({ role, setRole, onBack, onAuthed }) {
       {role === 'driver' && (
         <>
           <label>
-            Driver license number
+            Licence number
             <input
               value={form.license_number}
               onChange={(e) => set('license_number', e.target.value)}
             />
           </label>
           <label>
-            Association rank code
-            <input
-              value={form.rank_code}
-              onChange={(e) => set('rank_code', e.target.value.toUpperCase())}
-              placeholder="e.g. KDL001"
-            />
+            Rank / association code (optional)
+            <input value={form.rank_code} onChange={(e) => set('rank_code', e.target.value)} />
           </label>
         </>
       )}
 
       {role === 'operator' && (
         <label>
-          Association rank code
+          Association rank code (required)
           <input
             value={form.rank_code}
-            onChange={(e) => set('rank_code', e.target.value.toUpperCase())}
+            onChange={(e) => set('rank_code', e.target.value)}
             placeholder="e.g. KDL001"
           />
         </label>
       )}
 
-      {role === 'administrator' && (
-        <p className="muted">
-          Administrator accounts are created by invitation only. Contact the system owner.
-        </p>
-      )}
-
-      <label>
-        Password
-        <input
-          type="password"
-          value={form.password}
-          onChange={(e) => set('password', e.target.value)}
-        />
-      </label>
-
       {error && (
-        <p className="danger-button" style={{ display: 'block', marginTop: 4 }}>
+        <p className="muted" style={{ color: 'var(--danger)' }}>
           {error}
         </p>
       )}
@@ -231,543 +497,17 @@ function Register({ role, setRole, onBack, onAuthed }) {
         className="primary-button full"
         onClick={handleSubmit}
         type="button"
-        disabled={busy || role === 'administrator'}
-      >
-        {busy ? 'Creating account…' : <>Submit registration <span>→</span></>}
-      </button>
-    </section>
-  );
-}
-
-/* ============================================================
-   Login component (own page)
-   ============================================================ */
-
-const DEMOS = [
-  { label: 'Passenger', ident: 'passenger_demo' },
-  { label: 'Driver', ident: 'driver_demo' },
-  { label: 'Operator', ident: 'operator_demo' },
-  { label: 'Admin', ident: 'admin_demo' },
-];
-
-function Login({ onBack, onCreateAccount, onAuthed, notify }) {
-  const [ident, setIdent] = useState('passenger_demo');
-  const [password, setPassword] = useState('themba123');
-  const [busy, setBusy] = useState(false);
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setBusy(true);
-    try {
-      const data = await api.login(ident, password);
-      onAuthed(data.user, data.token);
-      notify?.(`Signed in as ${data.user.role}`);
-    } catch (err) {
-      notify?.(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <section className="auth-panel">
-      <button className="back-link" onClick={onBack} type="button">
-        ← Back
-      </button>
-      <div className="eyebrow">Secure access</div>
-      <h2>Welcome back.</h2>
-      <p className="muted">Choose your role to open the relevant dashboard.</p>
-
-      <div className="role-picker">
-        {DEMOS.map((d) => (
-          <button
-            key={d.ident}
-            type="button"
-            className={ident === d.ident ? 'selected' : ''}
-            onClick={() => {
-              setIdent(d.ident);
-              setPassword('themba123');
-            }}
-          >
-            {d.label}
-          </button>
-        ))}
-      </div>
-
-      <label>
-        Username / phone / email
-        <input
-          value={ident}
-          onChange={(e) => setIdent(e.target.value)}
-          autoComplete="username"
-        />
-      </label>
-
-      <label>
-        Password
-        <input
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          autoComplete="current-password"
-        />
-      </label>
-
-      <button
-        type="submit"
-        className="primary-button full"
         disabled={busy}
-        onClick={handleSubmit}
       >
-        {busy ? 'Signing in…' : 'Sign in'}
+        {busy ? 'Creating account…' : (
+          <>
+            Create account <span>→</span>
+          </>
+        )}
       </button>
-
-      <p className="muted small">
-        Demo password: <strong>themba123</strong>
-      </p>
-
-      <button
-        type="button"
-        className="secondary-button full"
-        style={{ marginTop: 8 }}
-        onClick={onCreateAccount}
-      >
-        Create an account
+      <button className="secondary-button full" onClick={onBack} type="button">
+        Back to welcome
       </button>
     </section>
-  );
-}
-
-/* ============================================================
-   Profile settings modal
-   ============================================================ */
-
-function ProfileSettingsModal({ user, onClose, notify }) {
-  const [form, setForm] = useState({
-    name: [user?.first_name, user?.last_name].filter(Boolean).join(' '),
-    phone: user?.phone || '',
-    email: user?.email || '',
-    homeArea: 'Empangeni',
-    emergencyContact: 'Nandi Dlamini',
-    emergencyContactNumber: '082 123 4567',
-    password: '',
-    newPassword: '',
-    confirmPassword: '',
-    emailAlerts: true,
-    smsAlerts: true,
-    pushAlerts: false,
-  });
-
-  useEffect(() => {
-    setForm({
-      name: [user?.first_name, user?.last_name].filter(Boolean).join(' '),
-      phone: user?.phone || '',
-      email: user?.email || '',
-      homeArea: 'Empangeni',
-      emergencyContact: 'Nandi Dlamini',
-      emergencyContactNumber: '082 123 4567',
-      password: '',
-      newPassword: '',
-      confirmPassword: '',
-      emailAlerts: true,
-      smsAlerts: true,
-      pushAlerts: false,
-    });
-  }, [user]);
-
-  function updateForm(field, value) {
-    setForm((prev) => ({ ...prev, [field]: value }));
-  }
-
-  function handleSave(e) {
-    e.preventDefault();
-    notify?.('Profile settings saved.');
-    onClose();
-  }
-
-  const initials = [user?.first_name, user?.last_name]
-    .filter(Boolean)
-    .map((part) => part[0])
-    .join('')
-    .slice(0, 2)
-    .toUpperCase();
-
-  return (
-    <div className="settings-overlay" onClick={onClose}>
-      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="settings-header">
-          <div>
-            <div className="eyebrow">Profile</div>
-            <h3>Settings</h3>
-          </div>
-          <button type="button" className="secondary-button" onClick={onClose}>
-            Close
-          </button>
-        </div>
-
-        <div className="avatar-card">
-          <div className="avatar-badge">{initials || 'T'}</div>
-          <div>
-            <strong>{form.name || user?.username || 'THEMBA rider'}</strong>
-            <small>{user?.email || user?.phone || 'Passenger profile'}</small>
-          </div>
-          <button type="button" className="secondary-button">Change photo</button>
-        </div>
-
-        <form onSubmit={handleSave}>
-          <div className="settings-section first-section">
-            <div className="section-title">Personal details</div>
-            <div className="settings-grid">
-              <label>
-                Full name
-                <input
-                  name="name"
-                  value={form.name}
-                  onChange={(e) => updateForm('name', e.target.value)}
-                />
-              </label>
-              <label>
-                Phone number
-                <input
-                  name="phone"
-                  value={form.phone}
-                  onChange={(e) => updateForm('phone', e.target.value)}
-                />
-              </label>
-              <label>
-                Email address
-                <input
-                  name="email"
-                  type="email"
-                  value={form.email}
-                  onChange={(e) => updateForm('email', e.target.value)}
-                />
-              </label>
-              <label>
-                Home area
-                <input
-                  name="homeArea"
-                  value={form.homeArea}
-                  onChange={(e) => updateForm('homeArea', e.target.value)}
-                />
-              </label>
-              <label>
-                Emergency contact
-                <input
-                  name="emergencyContact"
-                  value={form.emergencyContact}
-                  onChange={(e) => updateForm('emergencyContact', e.target.value)}
-                />
-              </label>
-              <label>
-                Emergency contact number
-                <input
-                  name="emergencyContactNumber"
-                  type="tel"
-                  value={form.emergencyContactNumber}
-                  onChange={(e) => updateForm('emergencyContactNumber', e.target.value)}
-                />
-              </label>
-            </div>
-          </div>
-
-          <div className="settings-section">
-            <div className="section-title">Security</div>
-            <div className="settings-grid single-column">
-              <label>
-                Current password
-                <input
-                  name="password"
-                  type="password"
-                  value={form.password}
-                  onChange={(e) => updateForm('password', e.target.value)}
-                />
-              </label>
-              <label>
-                New password
-                <input
-                  name="newPassword"
-                  type="password"
-                  value={form.newPassword}
-                  onChange={(e) => updateForm('newPassword', e.target.value)}
-                />
-              </label>
-              <label>
-                Confirm password
-                <input
-                  name="confirmPassword"
-                  type="password"
-                  value={form.confirmPassword}
-                  onChange={(e) => updateForm('confirmPassword', e.target.value)}
-                />
-              </label>
-            </div>
-          </div>
-
-          <div className="settings-section">
-            <div className="section-title">Notifications</div>
-            <div className="checkbox-stack">
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={form.emailAlerts}
-                  onChange={(e) => updateForm('emailAlerts', e.target.checked)}
-                />
-                Email alerts
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={form.smsAlerts}
-                  onChange={(e) => updateForm('smsAlerts', e.target.checked)}
-                />
-                SMS alerts
-              </label>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={form.pushAlerts}
-                  onChange={(e) => updateForm('pushAlerts', e.target.checked)}
-                />
-                Push notifications
-              </label>
-            </div>
-          </div>
-
-          <div className="settings-actions">
-            <button type="button" className="secondary-button" onClick={onClose}>
-              Cancel
-            </button>
-            <button type="submit" className="primary-button">Save changes</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   Landing hero page (standalone)
-   ============================================================ */
-
-function LandingPage({ onSignIn, onCreateAccount }) {
-  return (
-    <div className="app dark">
-      <div className="landing-shell">
-        <header className="landing-topbar">
-          <div className="landing-brand">
-            <span className="landing-brand-mark">T</span>
-            <span>
-              <strong>THEMBA</strong>
-              <small>
-                Transport Hub with Evaluated Mobility, Boarding &amp; Accountability
-              </small>
-            </span>
-          </div>
-        </header>
-
-        <div className="landing-page landing-page--hero">
-          <div className="welcome-panel">
-            <span className="eyebrow">South African transport information platform</span>
-            <h1>
-              Travel information.<br />
-              <em>Verified trips.</em><br />
-              Safer journeys.
-            </h1>
-            <p className="lead">
-              Find the right route, understand the fare, and connect every completed trip to
-              accountable passenger feedback.
-            </p>
-
-            <div className="welcome-actions">
-              <button
-                type="button"
-                className="primary-button"
-                onClick={onCreateAccount}
-              >
-                Create an account <span>→</span>
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={onSignIn}
-              >
-                Sign in
-              </button>
-            </div>
-
-            <div className="feature-strip">
-              <span>01 / Route clarity</span>
-              <span>02 / Trip verification</span>
-              <span>03 / Accountable feedback</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   Auth page wrapper (login or register, centred)
-   ============================================================ */
-
-function AuthPage({ children }) {
-  return (
-    <div className="app dark">
-      <div className="landing-shell">
-        <header className="landing-topbar">
-          <div className="landing-brand">
-            <span className="landing-brand-mark">T</span>
-            <span>
-              <strong>THEMBA</strong>
-              <small>
-                Transport Hub with Evaluated Mobility, Boarding &amp; Accountability
-              </small>
-            </span>
-          </div>
-        </header>
-
-        <div className="landing-page landing-page--auth">
-          <div className="auth-slot">{children}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   App root
-   ============================================================ */
-
-export default function App() {
-  const [user, setUser] = useState(getUser());
-  const [token, setToken] = useState(getToken());
-  const apiBase = getApiBase();
-  const [toast, setToast] = useState('');
-  const [settingsOpen, setSettingsOpen] = useState(false);
-
-  // Simple page router: 'landing' | 'login' | 'register'
-  const [page, setPage] = useState('landing');
-  const [registerRole, setRegisterRole] = useState('passenger');
-
-  const notify = useCallback((msg) => {
-    setToast(msg);
-    setTimeout(() => setToast(''), 4000);
-  }, []);
-
-  function handleAuthed(newUser, newToken) {
-    setSession(newToken, newUser);
-    setToken(newToken);
-    setUser(newUser);
-  }
-
-  function handleLogout() {
-    api.logout().catch(() => {});
-    clearSession();
-    setToken(null);
-    setUser(null);
-    setPage('landing');
-    notify('Signed out');
-  }
-
-  /* ---- Unauthenticated: route between landing / login / register ---- */
-
-  if (!token || !user) {
-    if (page === 'login') {
-      return (
-        <>
-          <AuthPage>
-            <Login
-              onBack={() => setPage('landing')}
-              onCreateAccount={() => setPage('register')}
-              onAuthed={handleAuthed}
-              notify={notify}
-            />
-          </AuthPage>
-          {toast && <div className="toast">{toast}</div>}
-        </>
-      );
-    }
-
-    if (page === 'register') {
-      return (
-        <>
-          <AuthPage>
-            <Register
-              role={registerRole}
-              setRole={setRegisterRole}
-              onBack={() => setPage('landing')}
-              onAuthed={handleAuthed}
-            />
-          </AuthPage>
-          {toast && <div className="toast">{toast}</div>}
-        </>
-      );
-    }
-
-    return (
-      <>
-        <LandingPage
-          onSignIn={() => {
-            setPage('login');
-          }}
-          onCreateAccount={() => {
-            setRegisterRole('passenger');
-            setPage('register');
-          }}
-        />
-        {toast && <div className="toast">{toast}</div>}
-      </>
-    );
-  }
-
-  /* ---- Authenticated: dashboard shell ---- */
-
-  const role = user.role === 'administrator' ? 'admin' : user.role;
-
-  return (
-    <div className="app dark">
-      <div className="shell">
-        <header className="top">
-          <div>
-            <div className="eyebrow">
-              {role} · {user.phone || user.email || user.username}
-            </div>
-            <h1>
-              {user.first_name} {user.last_name}
-            </h1>
-          </div>
-          <div className="top-actions">
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => setSettingsOpen(true)}
-            >
-              Profile Settings
-            </button>
-            <button type="button" className="secondary" onClick={handleLogout}>
-              Sign out
-            </button>
-          </div>
-        </header>
-
-        {settingsOpen && (
-          <ProfileSettingsModal
-            user={user}
-            onClose={() => setSettingsOpen(false)}
-            notify={notify}
-          />
-        )}
-
-        {role === 'passenger' && <PassengerMapDashboard notify={notify} />}
-        {role === 'driver' && <DriverPage notify={notify} />}
-        {(role === 'operator' || role === 'admin') && (
-          <OperatorPage notify={notify} isAdmin={role === 'admin'} />
-        )}
-
-        {toast && <div className="toast">{toast}</div>}
-      </div>
-    </div>
   );
 }

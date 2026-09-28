@@ -4,7 +4,7 @@ THEMBA transport — merged domain models.
 Decisions applied:
 - Route: FYP structure (Rank → Destination + fixed fare) + search-first geometry,
   distance_km, deviation_threshold_m, vehicle_class (no separate "routing plan" model).
-- Trip: FYP Trip is source of truth (operator, schedule, capacity, trip_code, engage).
+- Trip: FYP trip is source of truth (operator, schedule, capacity, trip_code, engage).
 - Passenger on trip: FYP Booking only (Boarding from search-first maps here).
 - Vehicle: FYP Vehicle + search-first VehicleLocation (live GPS).
 - Operator scope: FYP OperatorAtRank + OperatorProfile.
@@ -12,6 +12,10 @@ Decisions applied:
 - Duplicate engaged_* fields from FYP source fixed (single pair).
 - Driver profile support: ratings, complaints, notifications.
 - DriverNotification: link_trip, link_booking, meta (for ride-request deep links).
+- RideRequest: passenger dispatch signal, not a booking.
+- PassengerNotification: slim status messages for the passenger bar.
+- Announcement: RankFlow Ops scoped (topic/message/status/audience/rank/route/service).
+- SafetyIncident + AuditLog + OperatorNotification for the RankFlow admin console.
 """
 from django.conf import settings
 from django.db import models
@@ -256,7 +260,11 @@ class VehicleLocation(models.Model):
 
 
 class Trip(models.Model):
-    """FYP Trip = source of truth."""
+    """
+    FYP Trip = source of truth.
+    Operator is OPTIONAL: a trip scheduled with operator=null appears to any
+    operator whose active rank matches the route's departure rank.
+    """
 
     class Status(models.TextChoices):
         SCHEDULED = "scheduled", "Scheduled"
@@ -268,7 +276,9 @@ class Trip(models.Model):
 
     operator = models.ForeignKey(
         "accounts.OperatorProfile",
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="trips",
     )
     route = models.ForeignKey(Route, on_delete=models.PROTECT, related_name="trips")
@@ -432,41 +442,6 @@ class TripFlag(models.Model):
 
     def __str__(self):
         return f"{self.trip.trip_code} — {self.get_category_display()} ({self.status})"
-
-
-class Announcement(models.Model):
-    """Operator/admin communication item visible to the relevant audience."""
-
-    class Audience(models.TextChoices):
-        ALL = "all", "All users"
-        OPERATORS = "operators", "Operators"
-        DRIVERS = "drivers", "Drivers"
-        PASSENGERS = "passengers", "Passengers"
-
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name="announcements_created",
-    )
-    title = models.CharField(max_length=150)
-    message = models.TextField()
-    audience = models.CharField(
-        max_length=20,
-        choices=Audience.choices,
-        default=Audience.ALL,
-    )
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    expires_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        ordering = ["-created_at"]
-
-    def __str__(self):
-        return f"{self.title} ({self.audience})"
 
 
 class TripAssetChange(models.Model):
@@ -642,6 +617,9 @@ class DriverComplaint(models.Model):
 
     class Status(models.TextChoices):
         OPEN = "open", "Open"
+        OPERATOR_REVIEWING = "operator_reviewing", "Operator reviewing"
+        ESCALATED = "escalated", "Escalated"
+        RESPONSE_SENT = "response_sent", "Response sent"
         RESOLVED = "resolved", "Resolved"
         DISMISSED = "dismissed", "Dismissed"
 
@@ -669,6 +647,16 @@ class DriverComplaint(models.Model):
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.OPEN
     )
+    escalation_reason = models.TextField(blank=True)
+    escalated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="complaints_escalated",
+    )
+    escalated_at = models.DateTimeField(null=True, blank=True)
+    admin_note = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -690,7 +678,6 @@ class DriverNotification(models.Model):
     body = models.TextField(blank=True)
     read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-    # Ride-request / deep-link payload (passenger → driver)
     link_trip = models.ForeignKey(
         "Trip",
         on_delete=models.SET_NULL,
@@ -716,3 +703,193 @@ class DriverNotification(models.Model):
 
     def __str__(self):
         return f"{self.driver} — {self.title}"
+
+
+class Announcement(models.Model):
+    """Rank/route-scoped announcement to drivers and/or operators."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        SCHEDULED = "scheduled", "Scheduled"
+        PUBLISHED = "published", "Published"
+        INACTIVE = "inactive", "Inactive"
+
+    class Audience(models.TextChoices):
+        DRIVERS_OPERATORS = "drivers_operators", "Drivers + operators"
+        DRIVERS = "drivers", "Drivers only"
+        OPERATORS = "operators", "Operators only"
+        ALL_USERS = "all_users", "Every user"
+
+    topic = models.CharField(max_length=200)
+    message = models.TextField()
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.DRAFT
+    )
+    audience = models.CharField(
+        max_length=30, choices=Audience.choices, default=Audience.DRIVERS_OPERATORS
+    )
+    rank = models.ForeignKey(
+        Rank, on_delete=models.SET_NULL, null=True, blank=True, related_name="announcements"
+    )
+    route = models.ForeignKey(
+        Route, on_delete=models.SET_NULL, null=True, blank=True, related_name="announcements"
+    )
+    service = models.CharField(max_length=40, blank=True, default="commuter")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name="announcements_created",
+    )
+    published_at = models.DateTimeField(null=True, blank=True)
+    scheduled_for = models.DateTimeField(null=True, blank=True)
+    reach_count = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self):
+        return f"{self.topic} ({self.status})"
+
+
+class SafetyIncident(models.Model):
+    """Independent safety register (confirm only via admin safety review)."""
+
+    class Status(models.TextChoices):
+        AWAITING_REVIEW = "awaiting_review", "Awaiting review"
+        EVIDENCE_REVIEW = "evidence_review", "Evidence review"
+        CONFIRMED = "confirmed", "Confirmed"
+        NOT_CONFIRMED = "not_confirmed", "Not confirmed"
+        RESOLVED = "resolved", "Resolved"
+
+    title = models.CharField(max_length=200)
+    source = models.CharField(max_length=40, default="complaint")  # complaint | independent
+    complaint = models.ForeignKey(
+        DriverComplaint,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="safety_incidents",
+    )
+    trip = models.ForeignKey(
+        Trip, on_delete=models.SET_NULL, null=True, blank=True, related_name="safety_incidents"
+    )
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.AWAITING_REVIEW
+    )
+    findings = models.TextField(blank=True)
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="safety_confirmed",
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class AuditLog(models.Model):
+    """History of system changes visible to users (role-filtered in API)."""
+
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="audit_actions",
+    )
+    action = models.CharField(max_length=80)
+    entity_type = models.CharField(max_length=40, blank=True)
+    entity_id = models.CharField(max_length=40, blank=True)
+    detail = models.TextField(blank=True)
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class OperatorNotification(models.Model):
+    operator_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="operator_notifications",
+    )
+    title = models.CharField(max_length=120)
+    body = models.TextField(blank=True)
+    read = models.BooleanField(default=False)
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class PassengerNotification(models.Model):
+    passenger = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="passenger_notifications",
+    )
+    title = models.CharField(max_length=120)
+    body = models.TextField(blank=True)
+    read = models.BooleanField(default=False)
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+
+class RideRequest(models.Model):
+    """Passenger → nearby drivers: location ping, not a seat booking."""
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        ACCEPTED = "accepted", "Accepted"
+        REJECTED = "rejected", "Rejected"
+        EXPIRED = "expired", "Expired"
+        CANCELLED = "cancelled", "Cancelled"
+
+    RADIUS_KM = 10.0
+
+    passenger = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="ride_requests",
+    )
+    trip = models.ForeignKey(
+        Trip,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ride_requests",
+    )
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING
+    )
+    passenger_lat = models.FloatField()
+    passenger_lng = models.FloatField()
+    passenger_name = models.CharField(max_length=150, blank=True)
+    accepted_by = models.ForeignKey(
+        "accounts.DriverProfile",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="accepted_ride_requests",
+    )
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"RideRequest#{self.pk} {self.passenger_name} ({self.status})"

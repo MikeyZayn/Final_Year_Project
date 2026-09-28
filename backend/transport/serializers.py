@@ -10,14 +10,12 @@ from .models import (
     Booking,
     VerificationCode,
     TripFlag,
-    Announcement,
     TripAssetChange,
     VehicleLocation,
     TaxiFareRule,
     PanicAlert,
-    DriverRating,
-    DriverComplaint,
-    DriverNotification,
+    RideRequest,
+    PassengerNotification,
 )
 
 
@@ -105,12 +103,7 @@ class TripSerializer(serializers.ModelSerializer):
     vehicle_plate = serializers.CharField(
         source="vehicle.plate_number", read_only=True, default=None
     )
-    vehicle_id = serializers.IntegerField(
-        source="vehicle.id", read_only=True, default=None
-    )
     driver_name = serializers.SerializerMethodField()
-    driver_phone = serializers.SerializerMethodField()
-    driver_license = serializers.SerializerMethodField()
     seats_taken = serializers.IntegerField(read_only=True)
     seats_available = serializers.IntegerField(read_only=True)
 
@@ -130,8 +123,6 @@ class TripSerializer(serializers.ModelSerializer):
             "seats_available",
             "status",
             "driver_name",
-            "driver_phone",
-            "driver_license",
             "vehicle_plate",
             "vehicle_id",
             "engaged_at",
@@ -145,27 +136,24 @@ class TripSerializer(serializers.ModelSerializer):
         name = f"{u.first_name} {u.last_name}".strip()
         return name or u.phone or u.username
 
-    def get_driver_phone(self, obj):
-        if not obj.driver:
-            return None
-        return obj.driver.user.phone or None
-
-    def get_driver_license(self, obj):
-        if not obj.driver:
-            return None
-        return obj.driver.license_number or None
-
 
 class BookingSerializer(serializers.ModelSerializer):
     display_name = serializers.CharField(read_only=True)
     trip_code = serializers.CharField(source="trip.trip_code", read_only=True)
+    trip_id = serializers.IntegerField(source="trip_id", read_only=True)
     verification_code = serializers.SerializerMethodField()
+    route_from = serializers.SerializerMethodField()
+    route_to = serializers.SerializerMethodField()
+    departure_date = serializers.DateField(source="trip.departure_date", read_only=True)
+    driver_name = serializers.SerializerMethodField()
+    operator_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
         fields = [
             "id",
             "trip",
+            "trip_id",
             "trip_code",
             "passenger",
             "walk_in_name",
@@ -179,50 +167,51 @@ class BookingSerializer(serializers.ModelSerializer):
             "boarded_at",
             "display_name",
             "verification_code",
+            "route_from",
+            "route_to",
+            "departure_date",
+            "driver_name",
+            "operator_name",
         ]
         read_only_fields = ["booked_at", "boarded_at"]
 
     def get_verification_code(self, obj):
-        """
-        Safe reverse OneToOne access — Django raises RelatedObjectDoesNotExist
-        when a Booking has no VerificationCode row.
-        """
         try:
             vc = obj.verification_code
         except Exception:
             return None
         return vc.code if vc else None
 
+    def get_route_from(self, obj):
+        try:
+            return obj.trip.route.departure.name
+        except Exception:
+            return None
+
+    def get_route_to(self, obj):
+        try:
+            return obj.trip.route.destination.name
+        except Exception:
+            return None
+
+    def get_driver_name(self, obj):
+        try:
+            u = obj.trip.driver.user
+            return f"{u.first_name} {u.last_name}".strip() or u.username
+        except Exception:
+            return None
+
+    def get_operator_name(self, obj):
+        try:
+            u = obj.trip.operator.user
+            return f"{u.first_name} {u.last_name}".strip() or u.username
+        except Exception:
+            return None
+
 
 class BookingCreateSerializer(serializers.Serializer):
-    trip_id = serializers.IntegerField(required=False)
-    trip_code = serializers.CharField(required=False, allow_blank=True)
-
-
-class AnnouncementSerializer(serializers.ModelSerializer):
-    created_by_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Announcement
-        fields = [
-            "id",
-            "title",
-            "message",
-            "audience",
-            "is_active",
-            "created_by",
-            "created_by_name",
-            "created_at",
-            "updated_at",
-            "expires_at",
-        ]
-        read_only_fields = ["id", "created_by", "created_at", "updated_at"]
-
-    def get_created_by_name(self, obj):
-        if not obj.created_by:
-            return None
-        full = f"{obj.created_by.first_name} {obj.created_by.last_name}".strip()
-        return full or obj.created_by.username or obj.created_by.phone or obj.created_by.email
+    trip_id = serializers.IntegerField()
+    # optional walk-in if not authenticated passenger self-book
 
 
 class PanicAlertSerializer(serializers.ModelSerializer):
@@ -241,85 +230,47 @@ class PanicAlertSerializer(serializers.ModelSerializer):
         read_only_fields = ["created_at"]
 
 
-# ---------------------------------------------------------------------------
-# Driver profile panel serializers
-# ---------------------------------------------------------------------------
-
-
-class DriverRatingSerializer(serializers.ModelSerializer):
-    passenger_name = serializers.SerializerMethodField()
+class RideRequestSerializer(serializers.ModelSerializer):
     trip_code = serializers.CharField(
         source="trip.trip_code", read_only=True, default=None
     )
+    accepted_by_name = serializers.SerializerMethodField()
 
     class Meta:
-        model = DriverRating
+        model = RideRequest
         fields = [
             "id",
-            "driver",
-            "trip",
-            "trip_code",
             "passenger",
-            "passenger_name",
-            "score",
-            "comment",
-            "created_at",
-        ]
-        read_only_fields = ["created_at"]
-
-    def get_passenger_name(self, obj):
-        if not obj.passenger:
-            return None
-        u = obj.passenger
-        full = f"{u.first_name} {u.last_name}".strip()
-        return full or u.phone or u.username
-
-
-class DriverComplaintSerializer(serializers.ModelSerializer):
-    raised_by_name = serializers.SerializerMethodField()
-    trip_code = serializers.CharField(
-        source="trip.trip_code", read_only=True, default=None
-    )
-
-    class Meta:
-        model = DriverComplaint
-        fields = [
-            "id",
-            "driver",
             "trip",
             "trip_code",
-            "raised_by",
-            "raised_by_name",
-            "category",
-            "description",
             "status",
+            "passenger_lat",
+            "passenger_lng",
+            "passenger_name",
+            "accepted_by",
+            "accepted_by_name",
+            "accepted_at",
             "created_at",
         ]
-        read_only_fields = ["created_at"]
+        read_only_fields = [
+            "passenger",
+            "status",
+            "accepted_by",
+            "accepted_at",
+            "created_at",
+            "passenger_name",
+        ]
 
-    def get_raised_by_name(self, obj):
-        if not obj.raised_by:
+    def get_accepted_by_name(self, obj):
+        if not obj.accepted_by_id:
             return None
-        u = obj.raised_by
+        u = obj.accepted_by.user
         full = f"{u.first_name} {u.last_name}".strip()
-        return full or u.phone or u.username
+        return full or getattr(u, "phone", None) or u.username
 
 
-class DriverNotificationSerializer(serializers.ModelSerializer):
-    trip_id = serializers.IntegerField(source="link_trip_id", read_only=True)
-    booking_id = serializers.IntegerField(source="link_booking_id", read_only=True)
-
+class PassengerNotificationSerializer(serializers.ModelSerializer):
     class Meta:
-        model = DriverNotification
-        fields = [
-            "id",
-            "driver",
-            "title",
-            "body",
-            "read",
-            "created_at",
-            "trip_id",
-            "booking_id",
-            "meta",
-        ]
+        model = PassengerNotification
+        fields = ["id", "title", "body", "read", "created_at", "meta"]
         read_only_fields = ["created_at"]

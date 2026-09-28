@@ -17,5 +17,7 @@ for m in [
     models.TripAssetChange,
     models.TaxiFareRule,
     models.PanicAlert,
+    models.RideRequest,
+    models.PassengerNotification,
 ]:
     admin.site.register(m)

@@ -98,6 +98,8 @@ export const api = {
   tripDetail: (tripId) => request(`/trips/${tripId}/`),
   tripLive: (tripId) => request(`/trips/${tripId}/live/`, { auth: true }),
 
+
+  // --- Passenger booking now requires trip_code ---
   createBooking: (tripId, tripCode, extra = {}) =>
     request('/bookings/', {
       method: 'POST',
@@ -110,6 +112,7 @@ export const api = {
     }),
   myBookings: () => request('/bookings/mine/', { auth: true }),
 
+  // --- Operator ---
   myTrips: () => request('/my-trips/', { auth: true }),
   manifest: (tripId) => request(`/my-trips/${tripId}/manifest/`, { auth: true }),
   engage: (tripId) =>
@@ -125,6 +128,7 @@ export const api = {
       body: { code },
     }),
 
+  // --- Driver ---
   myVehicle: () => request('/vehicles/mine/', { auth: true }),
   postLocation: (vehicleId, payload) =>
     request(`/vehicles/${vehicleId}/location/`, {
@@ -151,28 +155,6 @@ export const api = {
       auth: true,
       body: { rank_id: rankId, notes },
     }),
-  listAnnouncements: () => request('/announcements/', { auth: true }),
-  createAnnouncement: (payload) =>
-    request('/announcements/', {
-      method: 'POST',
-      auth: true,
-      body: payload,
-    }),
-  listOperatorDrivers: () => request('/operator/drivers/', { auth: true }),
-  getOperatorDriver: (driverId) => request(`/operator/drivers/${driverId}/`, { auth: true }),
-  listOperatorComplaints: () => request('/operator/complaints/', { auth: true }),
-  resolveOperatorComplaint: (complaintId, status = 'resolved') =>
-    request(`/operator/complaints/${complaintId}/resolve/`, {
-      method: 'POST',
-      auth: true,
-      body: { status },
-    }),
-  flagTrip: (tripId, payload = {}) =>
-    request(`/my-trips/${tripId}/flag/`, {
-      method: 'POST',
-      auth: true,
-      body: payload,
-    }),
   listRanks: () => request('/ranks/'),
 
   directions: (origin, destination) =>
@@ -182,4 +164,111 @@ export const api = {
     }),
   panic: (payload) =>
     request('/panic-alerts/', { method: 'POST', auth: true, body: payload }),
+  adminSummary: () => request('/admin/summary/', { auth: true }),
+  adminUsers: (role = '') =>
+    request(`/admin/users/${role ? `?role=${encodeURIComponent(role)}` : ''}`, { auth: true }),
+  adminSetUserActive: (userId, is_active) =>
+    request(`/admin/users/${userId}/set-active/`, {
+      method: 'POST',
+      auth: true,
+      body: { is_active },
+    }),
+  adminMemberships: (status = 'pending') =>
+    request(`/admin/memberships/?status=${encodeURIComponent(status)}`, { auth: true }),
+  adminMembershipDecide: (id, decision) =>
+    request(`/admin/memberships/${id}/decide/`, {
+      method: 'POST',
+      auth: true,
+      body: { decision },
+    }),
+  adminFlags: () => request('/admin/flags/', { auth: true }),
+  adminPanics: () => request('/admin/panics/', { auth: true }),
+  adminDrivers: () => request('/admin/drivers/', { auth: true }),
+  adminDriverVerify: (driverId, decision = 'verify') =>
+    request(`/admin/drivers/${driverId}/verify/`, {
+      method: 'POST',
+      auth: true,
+      body: { decision },
+    }),
+  adminTripOptions: () => request('/admin/trip-options/', { auth: true }),
+  adminTripQueue: (status = '') =>
+    request(`/admin/trips/${status ? `?status=${encodeURIComponent(status)}` : ''}`, {
+      auth: true,
+    }),
+  adminScheduleTrip: (payload) =>
+    request('/admin/trips/schedule/', { method: 'POST', auth: true, body: payload }),
+  adminUpdateTrip: (tripId, payload) =>
+    request(`/admin/trips/${tripId}/`, { method: 'PATCH', auth: true, body: payload }),
+  adminDeleteTrip: (tripId) =>
+    request(`/admin/trips/${tripId}/`, { method: 'DELETE', auth: true }),
+  adminOverview: () => request('/admin/overview/', { auth: true }),
+  adminAnnouncements: () => request('/admin/announcements/', { auth: true }),
+  adminCreateAnnouncement: (payload) =>
+    request('/admin/announcements/', { method: 'POST', auth: true, body: payload }),
+  adminUpdateAnnouncement: (id, payload) =>
+    request(`/admin/announcements/${id}/`, { method: 'PATCH', auth: true, body: payload }),
+  adminComplaints: () => request('/admin/complaints/', { auth: true }),
+  escalateComplaint: (id, reason) =>
+    request(`/admin/complaints/${id}/escalate/`, {
+      method: 'POST',
+      auth: true,
+      body: { reason },
+    }),
+  adminReviewComplaint: (id, payload) =>
+    request(`/admin/complaints/${id}/review/`, {
+      method: 'POST',
+      auth: true,
+      body: payload,
+    }),
+  adminSafety: () => request('/admin/safety/', { auth: true }),
+  adminSafetyDecide: (id, payload) =>
+    request(`/admin/safety/${id}/decide/`, { method: 'POST', auth: true, body: payload }),
+  adminPanicsLive: () => request('/admin/panics/live/', { auth: true }),
+  adminSimulateTrip: (trip_id, step = 'next') =>
+    request('/admin/trips/simulate/', {
+      method: 'POST',
+      auth: true,
+      body: { trip_id, step },
+    }),
+  history: () => request('/history/', { auth: true }),
+  rateDriver: (payload) => request('/ratings/', { method: 'POST', auth: true, body: payload }),
+  driverRatingSummary: (driverId) =>
+    request(`/drivers/${driverId}/rating/`, { auth: true }),
+  createRideRequest: (payload) =>
+    request('/ride-requests/', { method: 'POST', auth: true, body: payload }),
+  getRideRequest: (id) => request(`/ride-requests/${id}/`, { auth: true }),
+  acceptRideRequest: (id) =>
+    request(`/ride-requests/${id}/accept/`, { method: 'POST', auth: true, body: {} }),
+  rejectRideRequest: (id) =>
+    request(`/ride-requests/${id}/reject/`, { method: 'POST', auth: true, body: {} }),
+  passengerNotifications: () =>
+    request('/passenger/notifications/', { auth: true }),
+
+  // Operator / shared announcement aliases (operator dashboard uses these names)
+  listAnnouncements: () => request('/announcements/', { auth: true }),
+  createAnnouncement: (payload) =>
+    request('/announcements/', { method: 'POST', auth: true, body: payload }),
+  updateAnnouncement: (id, payload) =>
+    request(`/announcements/${id}/`, { method: 'PATCH', auth: true, body: payload }),
+  getAnnouncement: (id) => request(`/announcements/${id}/`, { auth: true }),
+
+  operatorDashboard: () => request('/operator/dashboard/', { auth: true }),
+  operatorDrivers: () => request('/operator/drivers/', { auth: true }),
+  operatorComplaints: () => request('/operator/complaints/', { auth: true }),
+  operatorPanics: () => request('/operator/panics/', { auth: true }),
+  confirmTripAccess: (tripId) =>
+    request(`/my-trips/${tripId}/confirm/`, { method: 'POST', auth: true, body: {} }),
+  verifyTripAssets: (tripId) =>
+    request(`/my-trips/${tripId}/verify-assets/`, { method: 'POST', auth: true, body: {} }),
+  // aliases used by operator console
+  listOperatorDrivers: () => request('/operator/drivers/', { auth: true }),
+  listOperatorComplaints: () => request('/operator/complaints/', { auth: true }),
+
+  /** Passenger redeems operator-issued verification code → claim booking + open trip */
+  verifyBookingCode: (code) =>
+    request('/bookings/verify-code/', {
+      method: 'POST',
+      auth: true,
+      body: { code: String(code || '').trim().toUpperCase() },
+    }),
 };

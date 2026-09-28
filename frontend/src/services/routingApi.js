@@ -1,76 +1,56 @@
 /**
- * Ad-hoc road routing — themba-search-first client.
- * POST /api/routing/directions/ → ORS → OSRM (server).
+ * Client-side routing helper. Wraps the backend's `/api/routing/directions/`
+ * endpoint and normalises the response shape used by PassengerMapDashboard.
+ *
+ * computeRoute(origin, destination)
+ *   origin       : { lat, lng } | { latitude, longitude }
+ *   destination  : { lat, lng } | { latitude, longitude }
+ *
+ * Returns: { geometry, distanceKm, durationMin, source, fare, fareNotice }
  */
 import { api } from '../api';
 
+function _pair(p) {
+  if (!p) return null;
+  const lat = p.lat ?? p.latitude;
+  const lng = p.lng ?? p.longitude;
+  const latN = Number(lat);
+  const lngN = Number(lng);
+  if (!Number.isFinite(latN) || !Number.isFinite(lngN)) return null;
+  return { lat: latN, lng: lngN };
+}
+
 export async function computeRoute(origin, destination) {
-  const lat0 = Number(origin?.lat);
-  const lng0 = Number(origin?.lng);
-  const lat1 = Number(destination?.lat);
-  const lng1 = Number(destination?.lng);
-
-  if (![lat0, lng0, lat1, lng1].every((n) => Number.isFinite(n))) {
-    throw new Error(
-      'Origin and destination must both have valid latitude and longitude numbers.'
-    );
+  const a = _pair(origin);
+  const b = _pair(destination);
+  if (!a || !b) {
+    throw new Error('computeRoute: valid origin and destination are required.');
   }
 
-  try {
-    const data = await api.directions(
-      { lat: lat0, lng: lng0 },
-      { lat: lat1, lng: lng1 }
-    );
+  // Backend expects { origin: {lat,lng}, destination: {lat,lng} }
+  const data = await api.directions(
+    { lat: a.lat, lng: a.lng },
+    { lat: b.lat, lng: b.lng }
+  );
 
-    const geometry = Array.isArray(data.geometry) ? data.geometry : [];
-    if (geometry.length < 2) {
-      throw new Error(
-        'Routing service returned no usable path between these two points.'
-      );
-    }
-
-    return {
-      geometry,
-      distanceKm: Number(data.distance_km) || 0,
-      durationMin: Number(data.duration_min) || 0,
-      trafficAware: false,
-      source: data.source || 'ors',
-      fare: data.fare ?? null,
-      fareNotice: data.fare_notice ?? null,
-      alternatives: [],
-    };
-  } catch (err) {
-    throw new Error(routingErrorMessage(err));
+  if (!data || data.error) {
+    throw new Error(data?.error || 'Routing service unavailable.');
   }
+
+  const geometry = Array.isArray(data.geometry) ? data.geometry : [];
+  const distanceKm = Number(data.distance_km ?? data.distanceKm ?? 0);
+  const durationMin = Number(data.duration_min ?? data.durationMin ?? 0);
+  const fareRaw = data.fare != null ? Number(data.fare) : null;
+  const fare = Number.isFinite(fareRaw) ? fareRaw : null;
+
+  return {
+    geometry,
+    distanceKm,
+    durationMin,
+    source: data.source || 'backend',
+    fare,
+    fareNotice: data.fare_notice || data.notice || null,
+  };
 }
 
-export async function computeGoogleRoute(origin, destination) {
-  return computeRoute(origin, destination);
-}
-
-export async function computeOrsRoute(origin, destination) {
-  return computeRoute(origin, destination);
-}
-
-export async function computeRouteWithFallback(origin, destination) {
-  return computeRoute(origin, destination);
-}
-
-function routingErrorMessage(err) {
-  const raw = err?.message || String(err);
-  if (/ORS_API_KEY|API key|401|403|rejected/i.test(raw)) {
-    return (
-      'OpenRouteService rejected the request. Set ORS_API_KEY in backend/.env ' +
-      '(https://openrouteservice.org/dev/#/signup) and restart Django.'
-    );
-  }
-  if (/429|quota|rate/i.test(raw)) {
-    return 'Routing quota reached. Try again shortly.';
-  }
-  if (/Cannot reach/i.test(raw)) {
-    return raw;
-  }
-  return `Routing unavailable right now (${raw}).`;
-}
-
-export default computeRoute;
+export default { computeRoute };
