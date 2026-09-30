@@ -3532,6 +3532,110 @@ function PasswordResetModal({ onClose, notify }) {
   );
 }
 
+function AdminDrivers({ notify }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [scope, setScope] = useState('pending');
 
+  async function load() {
+    setLoading(true);
+    try {
+      const { data } = await api.get(`/transport/api/admin/drivers/?scope=${scope}`);
+      setItems(data);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, [scope]);
+
+  async function verifyDriver(id) {
+    try {
+      const { data } = await api.post(`/transport/api/admin/drivers/${id}/verify/`);
+      if (data.verified) {
+        notify(`Verified with DOT. PDP: ${data.pdp_number || 'n/a'}`);
+      } else {
+        notify(`DOT check failed: ${data.reason}`);
+      }
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Verification failed.');
+    }
+  }
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Driver applications</span>
+        <span className="module-number">{items.length}</span>
+      </div>
+
+      <div className="role-picker" style={{ marginBottom: 16 }}>
+        {[
+          { key: 'pending', label: 'Pending DOT check' },
+          { key: 'all', label: 'All drivers' },
+        ].map((s) => (
+          <button
+            key={s.key}
+            className={scope === s.key ? 'selected' : ''}
+            onClick={() => setScope(s.key)}
+            type="button"
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      <p className="muted">
+        Verifying against the simulated Department of Transport registry confirms
+        the driver's license number, ID number, and PDP status.
+      </p>
+
+      {loading && <p className="muted">Loading…</p>}
+      {!loading && items.length === 0 && <p className="muted">No drivers in this view.</p>}
+
+      {items.map((d) => (
+        <div key={d.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <span>
+              <strong>{d.name}</strong>
+              <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
+                {d.phone} · License {d.license_number} · ID {d.id_number || '—'}
+                {d.association_name ? ` · ${d.association_name}` : ''}
+              </small>
+            </span>
+            <span
+              className="status-pill"
+              style={{
+                borderColor:
+                  d.external_verification_status === 'verified' ? 'var(--success)' :
+                  d.external_verification_status === 'unverified' ? 'var(--accent)' :
+                  'var(--danger)',
+                color:
+                  d.external_verification_status === 'verified' ? 'var(--success)' :
+                  d.external_verification_status === 'unverified' ? 'var(--accent)' :
+                  'var(--danger)',
+              }}
+            >
+              {d.external_verification_status}
+            </span>
+          </div>
+          {d.external_verification_reason && (
+            <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+              Reason: {d.external_verification_reason}
+            </p>
+          )}
+          <button
+            className="primary-button"
+            onClick={() => verifyDriver(d.id)}
+            type="button"
+            style={{ marginTop: 8 }}
+          >
+            {d.external_verification_status === 'verified' ? 'Re-check with DOT' : 'Verify with DOT'}
+          </button>
+        </div>
+      ))}
+    </article>
+  );
+}
 
 export default App;
