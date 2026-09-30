@@ -270,25 +270,29 @@ print("Trips:            ", Trip.objects.count())
 
 
 # ---- Demo passengers ----
-for phone, first, last in [
-    ("0821111111", "Sibusiso", "Dlamini"),
-    ("0821111112", "Thandi",   "Mkhize"),
-    ("0821111113", "Sipho",    "Nkosi"),
-]:
+PASSENGER_SPECS = [
+    ("0821111111", "Sibusiso", "Dlamini", "Nandi Dlamini",  "0822222222"),
+    ("0821111112", "Thandi",   "Mkhize",  "Sipho Mkhize",    "0822222223"),
+    ("0821111113", "Sipho",    "Nkosi",   "Lindi Nkosi",     "0822222224"),
+]
+
+for phone, first, last, nok_name, nok_phone in PASSENGER_SPECS:
     user, created = User.objects.get_or_create(
-        phone=phone, defaults={"role": "passenger", "username": phone},
+        phone=phone, defaults={"role": "passenger", "username": phone}
     )
-    user.first_name, user.last_name, user.role = first, last, "passenger"
+    user.first_name = first
+    user.last_name = last
+    user.role = "passenger"
     if created or not user.has_usable_password():
         user.set_password("Passw0rd!")
     user.save()
+
     PassengerProfile.objects.get_or_create(
         user=user,
         defaults={
-            "next_of_kin_name": "Family Contact",
-            "next_of_kin_phone": "0822222222",
+            "next_of_kin_name": nok_name,
+            "next_of_kin_phone": nok_phone,
         },
     )
-print("passengers ready")
 
-
+print(f"passengers ready: {User.objects.filter(role='passenger').count()}")
