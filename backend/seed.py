@@ -1,6 +1,8 @@
 from datetime import date, time, timedelta
 from django.utils import timezone
-from accounts.models import User, PassengerProfile, OperatorProfile, RankCode, AdminProfile, DriverProfile
+from accounts.models import (
+    User, OperatorProfile, RankCode, AdminProfile, DriverProfile, PassengerProfile,
+)
 from transport.models import (
     Rank, Destination, OperatorAtRank, Route,
     Vehicle, DriverVehicle, Trip,
@@ -46,7 +48,7 @@ for name, area, lat, lng in RANK_SPECS:
     ranks_by_name[name] = r
 print(f"ranks: {len(ranks_by_name)}")
 
-# ---- Admins (one per rank) ----
+# ---- Admins ----
 ADMIN_SPECS = [
     ("0700000001", "Sizwe",  "Nkosi",   "Ongoye Main Rank",       "Kwa-Dlangezwa Taxi Association"),
     ("0700000002", "Andile", "Mabaso",  "eSikhawini Main Rank",   "eSikhawini Taxi Association"),
@@ -102,15 +104,6 @@ for phone, first, last, code, rank_name in OPERATOR_SPECS:
         approved_by=admins_by_rank[rank_name],
         approved_at=timezone.now(),
     )
-
-# second membership: KDL operator also approved at Empangeni Rank 1 (demo)
-OperatorAtRank.objects.create(
-    operator=operators_by_phone["0820000003"],
-    rank=ranks_by_name["Empangeni Rank 1"],
-    status=OperatorAtRank.Status.ACTIVE,
-    approved_by=admins_by_rank["Empangeni Rank 1"],
-    approved_at=timezone.now(),
-)
 print(f"operators + memberships: {len(operators_by_phone)}")
 
 # ---- Destinations ----
@@ -121,24 +114,37 @@ for name, area, lat, lng in [
     ("Richards Bay",  "King Cetshwayo", -28.780, 32.038),
 ]:
     Destination.objects.create(name=name, area=area, latitude=lat, longitude=lng)
-dest = {d.name: d for d in Destination.objects.all()}
-print(f"destinations: {len(dest)}")
+destinations = {d.name: d for d in Destination.objects.all()}
+print(f"destinations: {len(destinations)}")
 
-# ---- Routes (shared corridors) ----
+# ---- Routes ----
 ROUTE_SPECS = [
+    # Ongoye Main Rank
     ("Ongoye Main Rank",       "Empangeni",     24),
     ("Ongoye Main Rank",       "eSikhawini",    16),
     ("Ongoye Main Rank",       "Richards Bay",  34),
+    # eSikhawini Main Rank
     ("eSikhawini Main Rank",   "Empangeni",     24),
     ("eSikhawini Main Rank",   "Kwa-Dlangezwa", 16),
     ("eSikhawini Main Rank",   "Richards Bay",  16),
+    # Richards Bay Main Rank
     ("Richards Bay Main Rank", "Empangeni",     24),
     ("Richards Bay Main Rank", "Kwa-Dlangezwa", 34),
     ("Richards Bay Main Rank", "eSikhawini",    16),
+    # Empangeni Rank 1
     ("Empangeni Rank 1",       "Kwa-Dlangezwa", 24),
+    ("Empangeni Rank 1",       "eSikhawini",    24),
+    ("Empangeni Rank 1",       "Richards Bay",  24),
+    # Empangeni Rank 2
     ("Empangeni Rank 2",       "Kwa-Dlangezwa", 24),
+    ("Empangeni Rank 2",       "eSikhawini",    24),
+    ("Empangeni Rank 2",       "Richards Bay",  24),
+    # Empangeni Rank 3
+    ("Empangeni Rank 3",       "Kwa-Dlangezwa", 24),
     ("Empangeni Rank 3",       "eSikhawini",    24),
     ("Empangeni Rank 3",       "Richards Bay",  24),
+    # Empangeni Rank 4
+    ("Empangeni Rank 4",       "Kwa-Dlangezwa", 24),
     ("Empangeni Rank 4",       "eSikhawini",    24),
     ("Empangeni Rank 4",       "Richards Bay",  24),
 ]
@@ -146,7 +152,7 @@ routes_by_key = {}
 for dep_name, dest_name, fare in ROUTE_SPECS:
     r = Route.objects.create(
         departure=ranks_by_name[dep_name],
-        destination=dest[dest_name],
+        destination=destinations[dest_name],
         fare=fare,
         service_category=Route.ServiceCategory.STRUCTURED,
         active=True,
@@ -154,7 +160,7 @@ for dep_name, dest_name, fare in ROUTE_SPECS:
     routes_by_key[(dep_name, dest_name)] = r
 print(f"routes: {len(routes_by_key)}")
 
-# ---- Vehicles (standalone assets) ----
+# ---- Vehicles ----
 VEHICLE_SPECS = [
     ("ND 123-456", "Toyota", "Quantum", 15),
     ("ND 234-567", "Toyota", "HiAce",   15),
@@ -192,7 +198,6 @@ for phone, first, last, lic, plate in DRIVER_SPECS:
     user.save()
 
     from django.core.files.base import ContentFile
-    # tiny placeholder image so ImageField doesn't fail on non-null
     dp, _ = DriverProfile.objects.get_or_create(
         user=user,
         defaults={
@@ -203,22 +208,41 @@ for phone, first, last, lic, plate in DRIVER_SPECS:
     )
     drivers.append(dp)
 
-    # link driver to vehicle
     vehicle = Vehicle.objects.get(plate_number=plate)
     DriverVehicle.objects.get_or_create(driver=dp, vehicle=vehicle, active=True)
 print(f"drivers: {len(drivers)}")
 
-# ---- Trips (per operator) ----
+# ---- Demo passengers ----
+PASSENGER_SPECS = [
+    ("0821111111", "Sibusiso", "Dlamini", "Nandi Dlamini",  "0822222222"),
+    ("0821111112", "Thandi",   "Mkhize",  "Sipho Mkhize",    "0822222223"),
+    ("0821111113", "Sipho",    "Nkosi",   "Lindi Nkosi",     "0822222224"),
+]
+for phone, first, last, nok_name, nok_phone in PASSENGER_SPECS:
+    user, created = User.objects.get_or_create(
+        phone=phone, defaults={"role": "passenger", "username": phone},
+    )
+    user.first_name, user.last_name, user.role = first, last, "passenger"
+    if created or not user.has_usable_password():
+        user.set_password("Passw0rd!")
+    user.save()
+    PassengerProfile.objects.get_or_create(
+        user=user,
+        defaults={"next_of_kin_name": nok_name, "next_of_kin_phone": nok_phone},
+    )
+print(f"passengers ready: {User.objects.filter(role='passenger').count()}")
+
+# ---- Trips ----
 today = date.today()
 tomorrow = today + timedelta(days=1)
 
-def make_trip(operator_phone, dep_name, dest_name, day, t):
+def make_trip(operator_phone, dep_name, dest_name, day, t, driver_index=0):
     op = operators_by_phone[operator_phone]
     route = routes_by_key[(dep_name, dest_name)]
-    driver = drivers[0]  # fixed for demo
-    vehicle = vehicles[0]
-    prefix = f"TRP-{route.id:03d}-"
+    driver = drivers[driver_index % len(drivers)]
+    vehicle = vehicles[driver_index % len(vehicles)]
     import random, string
+    prefix = f"TRP-{route.id:03d}-"
     code = prefix + "".join(random.choices(string.ascii_uppercase, k=4))
     while Trip.objects.filter(trip_code=code).exists():
         code = prefix + "".join(random.choices(string.ascii_uppercase, k=4))
@@ -231,68 +255,27 @@ def make_trip(operator_phone, dep_name, dest_name, day, t):
     )
 
 # Today's trips
-make_trip("0820000003", "Ongoye Main Rank", "Empangeni",     today, time(7, 0))
-make_trip("0820000003", "Ongoye Main Rank", "eSikhawini",    today, time(9, 0))
-make_trip("0820000004", "eSikhawini Main Rank", "Empangeni", today, time(7, 30))
-make_trip("0820000005", "Empangeni Rank 1", "Kwa-Dlangezwa", today, time(8, 0))
-make_trip("0820000010", "Empangeni Rank 1", "Kwa-Dlangezwa", today, time(10, 0))
+make_trip("0820000003", "Ongoye Main Rank", "Empangeni",     today, time(7, 0), 0)
+make_trip("0820000003", "Ongoye Main Rank", "eSikhawini",    today, time(9, 0), 1)
+make_trip("0820000004", "eSikhawini Main Rank", "Empangeni", today, time(7, 30), 2)
+make_trip("0820000005", "Empangeni Rank 1", "Kwa-Dlangezwa", today, time(8, 0), 3)
+make_trip("0820000010", "Empangeni Rank 1", "Kwa-Dlangezwa", today, time(10, 0), 4)
 
 # Tomorrow's trips
-make_trip("0820000003", "Ongoye Main Rank", "Richards Bay",  tomorrow, time(7, 0))
-make_trip("0820000003", "Ongoye Main Rank", "Empangeni",     tomorrow, time(8, 0))
-make_trip("0820000006", "Richards Bay Main Rank", "Empangeni", tomorrow, time(9, 0))
-make_trip("0820000008", "Empangeni Rank 3", "Richards Bay",  tomorrow, time(11, 0))
-make_trip("0820000009", "Empangeni Rank 4", "eSikhawini",    tomorrow, time(13, 0))
+make_trip("0820000003", "Ongoye Main Rank", "Richards Bay",  tomorrow, time(7, 0), 5)
+make_trip("0820000003", "Ongoye Main Rank", "Empangeni",     tomorrow, time(8, 0), 0)
+make_trip("0820000006", "Richards Bay Main Rank", "Empangeni", tomorrow, time(9, 0), 1)
+make_trip("0820000008", "Empangeni Rank 3", "Richards Bay",  tomorrow, time(11, 0), 2)
+make_trip("0820000009", "Empangeni Rank 4", "eSikhawini",    tomorrow, time(13, 0), 3)
 
-
-# ---- Ensure superuser exists ----
-su_phone = "0813109193"
-su, created = User.objects.get_or_create(
-    phone=su_phone,
-    defaults={"username": su_phone, "role": "admin", "is_staff": True, "is_superuser": True},
-)
-if created:
-    su.set_password("AdminPass123!")
-    su.save()
-    print(f"superuser ready: {su_phone} / AdminPass123!")
-else:
-    print(f"superuser exists: {su_phone}")
 print("\n=== FINAL STATE ===")
-print("Ranks:            ", Rank.objects.count())
-print("Admins:           ", AdminProfile.objects.count())
-print("Operators:        ", OperatorProfile.objects.count())
-print("Memberships:      ", OperatorAtRank.objects.count())
-print("Destinations:     ", Destination.objects.count())
-print("Routes:           ", Route.objects.count())
-print("Vehicles:         ", Vehicle.objects.count())
-print("Drivers:          ", DriverProfile.objects.count())
-print("Trips:            ", Trip.objects.count())
-
-
-# ---- Demo passengers ----
-PASSENGER_SPECS = [
-    ("0821111111", "Sibusiso", "Dlamini", "Nandi Dlamini",  "0822222222"),
-    ("0821111112", "Thandi",   "Mkhize",  "Sipho Mkhize",    "0822222223"),
-    ("0821111113", "Sipho",    "Nkosi",   "Lindi Nkosi",     "0822222224"),
-]
-
-for phone, first, last, nok_name, nok_phone in PASSENGER_SPECS:
-    user, created = User.objects.get_or_create(
-        phone=phone, defaults={"role": "passenger", "username": phone}
-    )
-    user.first_name = first
-    user.last_name = last
-    user.role = "passenger"
-    if created or not user.has_usable_password():
-        user.set_password("Passw0rd!")
-    user.save()
-
-    PassengerProfile.objects.get_or_create(
-        user=user,
-        defaults={
-            "next_of_kin_name": nok_name,
-            "next_of_kin_phone": nok_phone,
-        },
-    )
-
-print(f"passengers ready: {User.objects.filter(role='passenger').count()}")
+print("Ranks:           ", Rank.objects.count())
+print("Admins:          ", AdminProfile.objects.count())
+print("Operators:       ", OperatorProfile.objects.count())
+print("Memberships:     ", OperatorAtRank.objects.count())
+print("Destinations:    ", Destination.objects.count())
+print("Routes:          ", Route.objects.count())
+print("Vehicles:        ", Vehicle.objects.count())
+print("Drivers:         ", DriverProfile.objects.count())
+print("Passengers:      ", User.objects.filter(role='passenger').count())
+print("Trips:           ", Trip.objects.count())
