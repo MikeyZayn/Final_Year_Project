@@ -6,7 +6,9 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 
-from accounts.models import OperatorProfile, User
+from accounts.models import OperatorProfile, User, PasswordResetCode
+import random
+from datetime import timedelta
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
     Vehicle, Trip, Booking, VerificationCode,
@@ -1860,4 +1862,64 @@ def api_admin_driver_detail(request, driver_id):
             }
             for dv in vehicles
         ],
+    })
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_generate_reset_code(request, user_id):
+    """Admin generates a reset code for a user. Superuser can generate for anyone.
+    A rank admin can generate for users on their own rank only."""
+    admin_profile = _get_admin_or_none(request)
+    is_superuser = request.user.is_superuser
+
+    if admin_profile is None and not is_superuser:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    try:
+        target = User.objects.get(pk=user_id)
+    except User.DoesNotExist:
+        return Response({"detail": "User not found."}, status=404)
+
+    # Rank-scoped check for non-superuser admins
+    if not is_superuser and admin_profile.rank:
+        target_rank = None
+        try:
+            if target.role == User.Role.OPERATOR:
+                m = OperatorAtRank.objects.filter(
+                    operator__user=target, status=OperatorAtRank.Status.ACTIVE,
+                ).first()
+                target_rank = m.rank if m else None
+            elif target.role == User.Role.DRIVER:
+                dp = getattr(target, "driver_profile", None)
+                if dp and dp.association:
+                    target_rank = None  # drivers are association-scoped, not rank-scoped
+            elif target.role == User.Role.ADMIN:
+                ap = getattr(target, "admin_profile", None)
+                target_rank = ap.rank if ap else None
+
+            if target_rank and target_rank.id != admin_profile.rank.id:
+                return Response(
+                    {"detail": "That user is not on your rank."}, status=403,
+                )
+        except Exception:
+            pass
+
+    PasswordResetCode.objects.filter(user=target, used_at__isnull=True).update(
+        used_at=timezone.now()
+    )
+
+    code = f"{random.randint(0, 999999):06d}"
+    PasswordResetCode.objects.create(
+        user=target,
+        code=code,
+        purpose=PasswordResetCode.Purpose.ADMIN_ISSUED,
+        created_by=request.user,
+        expires_at=timezone.now() + timedelta(hours=24),
+    )
+
+    return Response({
+        "code": code,
+        "user_phone": target.phone,
+        "user_name": f"{target.first_name} {target.last_name}".strip() or target.phone,
+        "detail": "Code valid for 24 hours. Give this to the user in person.",
     })

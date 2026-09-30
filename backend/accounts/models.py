@@ -128,3 +128,34 @@ class AdminProfile(models.Model):
         rank_label = self.rank.name if self.rank else "unassigned"
         return f"Admin: {self.user} ({self.institution_name}) @ {rank_label}"
 
+class PasswordResetCode(models.Model):
+    """A short-lived, single-use code for resetting an account password.
+    Created either by the user themselves (passenger/driver) or by a rank
+    admin on their behalf (operator/admin)."""
+
+    class Purpose(models.TextChoices):
+        SELF_SERVICE = "self_service", "Self-service"
+        ADMIN_ISSUED = "admin_issued", "Admin issued"
+
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="reset_codes"
+    )
+    code = models.CharField(max_length=8)
+    purpose = models.CharField(max_length=20, choices=Purpose.choices)
+    created_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="reset_codes_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def is_valid(self):
+        from django.utils import timezone
+        return self.used_at is None and self.expires_at > timezone.now()
+
+    def __str__(self):
+        return f"{self.code} for {self.user.phone} ({self.purpose})"

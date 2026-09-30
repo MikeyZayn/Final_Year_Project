@@ -475,6 +475,7 @@ function Login({ role, setRole, onBack, onAuthed }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
 
   async function handleSubmit(e) {
     e?.preventDefault?.();
@@ -499,7 +500,7 @@ function Login({ role, setRole, onBack, onAuthed }) {
       setBusy(false);
     }
   }
-
+  
   return (
     <section className="auth-panel">
       <button className="back-link" onClick={onBack} type="button">← Back</button>
@@ -545,6 +546,18 @@ function Login({ role, setRole, onBack, onAuthed }) {
       <button className="secondary-button full" onClick={onBack} type="button">
         Back to welcome
       </button>
+      <button
+        className="text-button"
+        onClick={() => setResetOpen(true)}
+        type="button"
+        style={{ marginTop: 12, width: '100%' }}
+      >
+        Forgot your password?
+      </button>
+
+      {resetOpen && (
+        <PasswordResetModal onClose={() => setResetOpen(false)} notify={notify} />
+      )}
     </section>
   );
 }
@@ -2525,6 +2538,7 @@ function Administrator({ notify }) {
       <AdminFeedback notify={notify} />
       <AdminFlags notify={notify} />
       <AdminTrips notify={notify} />
+      <AdminAccounts notify={notify} />
     </div>
   );
 }
@@ -3107,3 +3121,127 @@ function AdminTrips({ notify }) {
 }
 
 export default App;
+
+function PasswordResetModal({ onClose, notify }) {
+  const [step, setStep] = useState('request');
+  const [phone, setPhone] = useState('');
+  const [code, setCode] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [issuedCode, setIssuedCode] = useState('');
+  const [infoMessage, setInfoMessage] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function requestCode() {
+    setError('');
+    setBusy(true);
+    try {
+      const data = await api.requestPasswordReset(phone);
+      if (data.method === 'admin_assisted') {
+        setInfoMessage(data.detail);
+        setStep('admin_assisted');
+      } else {
+        setIssuedCode(data.code);
+        setInfoMessage(data.detail);
+        setStep('confirm');
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Request failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmReset() {
+    setError('');
+    if (!code || !newPassword) {
+      setError('Enter the code and a new password.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.confirmPasswordReset(phone, code, newPassword);
+      notify('Password updated. You can now sign in.');
+      onClose();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Reset failed.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="settings-overlay" onClick={onClose}>
+      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="settings-header">
+          <h3>Reset password</h3>
+          <button className="text-button" onClick={onClose} type="button">Close</button>
+        </div>
+
+        {step === 'request' && (
+          <>
+            <p className="muted">
+              Enter your phone number. Passengers and drivers will get a code
+              shown on screen. Operators and admins are given a code by their
+              rank administrator.
+            </p>
+            <label>
+              Phone number
+              <input
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                placeholder="0821234567"
+              />
+            </label>
+            {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+            <div className="settings-actions">
+              <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+              <button className="primary-button" onClick={requestCode} disabled={busy} type="button">
+                {busy ? 'Requesting…' : 'Request code'}
+              </button>
+            </div>
+          </>
+        )}
+
+        {step === 'admin_assisted' && (
+          <>
+            <p className="muted">{infoMessage}</p>
+            <div className="settings-actions">
+              <button className="secondary-button" onClick={onClose} type="button">Close</button>
+            </div>
+          </>
+        )}
+
+        {step === 'confirm' && (
+          <>
+            <p className="muted">{infoMessage}</p>
+            <div style={{
+              padding: 12, borderRadius: 8, marginTop: 12,
+              background: 'var(--chip)', border: '1px dashed var(--accent)',
+            }}>
+              <small className="muted">Your code</small>
+              <div style={{ fontSize: 28, fontFamily: 'DM Mono, monospace', letterSpacing: 4 }}>
+                {issuedCode}
+              </div>
+            </div>
+            <label>
+              Enter code
+              <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="123456" maxLength={6} />
+            </label>
+            <label>
+              New password (min 8 characters)
+              <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+            </label>
+            {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+            <div className="settings-actions">
+              <button className="secondary-button" onClick={onClose} type="button">Cancel</button>
+              <button className="primary-button" onClick={confirmReset} disabled={busy} type="button">
+                {busy ? 'Updating…' : 'Set new password'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

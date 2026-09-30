@@ -55,3 +55,15 @@ api.directions = async (origin, destination) => {
 //   import { api } from './api'  (teammate's code)
 export { api };
 export default api;
+
+api.requestPasswordReset = async (phone) => {
+  const { data } = await api.post("/accounts/api/password-reset/request/", { phone });
+  return data;
+};
+
+api.confirmPasswordReset = async (phone, code, new_password) => {
+  const { data } = await api.post("/accounts/api/password-reset/confirm/", {
+    phone, code, new_password,
+  });
+  return data;
+};
