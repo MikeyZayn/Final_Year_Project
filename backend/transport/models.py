@@ -153,6 +153,12 @@ class Trip(models.Model):
     )
     engaged_at = models.DateTimeField(null=True, blank=True)
 
+    assets_verified_at = models.DateTimeField(null=True, blank=True)
+    assets_verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="verified_trip_assets",
+    )
+
     class Meta:
         ordering = ["departure_date", "expected_departure_time", "id"]
 

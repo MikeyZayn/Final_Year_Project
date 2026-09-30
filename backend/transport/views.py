@@ -506,6 +506,11 @@ def api_release_trip(request, trip_id):
 def api_verify_booking(request, trip_id, booking_id):
     """Operator confirms a booked passenger boarded. Issues a verification code."""
     op = _get_operator_or_none(request)
+    if not trip.assets_verified_at:
+        return Response(
+            {"detail": "Verify the driver and vehicle on-site before registering passengers."},
+            status=400,
+        )
     if op is None:
         return Response({"detail": "Not an operator account."}, status=403)
     try:
@@ -1996,3 +2001,26 @@ def api_admin_verify_driver(request, driver_id):
         "external_verification_status": d.external_verification_status,
         "pdp_number": d.pdp_number,
     })
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_verify_trip_assets(request, trip_id):
+    """Operator confirms the on-site driver and vehicle match the assignment."""
+    op = _get_operator_or_none(request)
+    if op is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    try:
+        trip = Trip.objects.get(pk=trip_id, operator=op, engaged_by=op)
+    except Trip.DoesNotExist:
+        return Response({"detail": "You are not engaged to this trip."}, status=404)
+
+    if not trip.driver or not trip.vehicle:
+        return Response(
+            {"detail": "Cannot verify assets — driver or vehicle not assigned."},
+            status=400,
+        )
+
+    trip.assets_verified_at = timezone.now()
+    trip.assets_verified_by = request.user
+    trip.save()
+    return Response(TripSerializer(trip).data)
