@@ -95,5 +95,7 @@ urlpatterns = [
     path("api/admin/users/<int:user_id>/archive/", views.api_admin_archive_user, name="api_admin_archive_user"),
 
     # Admin/operator — driver detail
+    path("api/admin/users/<int:user_id>/reset-code/", views.api_admin_generate_reset_code, name="api_admin_generate_reset_code"),
     path("api/admin/drivers/<int:driver_id>/", views.api_admin_driver_detail, name="api_admin_driver_detail"),
 ]   
+

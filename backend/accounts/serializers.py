@@ -9,6 +9,7 @@ from .models import (
     PassengerProfile,
     RankCode,
     User,
+    PasswordResetCode,
 )
 
 
@@ -158,3 +159,12 @@ class OperatorRegisterSerializer(serializers.Serializer):
         user.save()
         OperatorProfile.objects.create(user=user, association=self._rank)
         return user
+
+class PasswordResetRequestSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=15)
+
+
+class PasswordResetConfirmSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=15)
+    code = serializers.CharField(max_length=8)
+    new_password = serializers.CharField(write_only=True, min_length=8)

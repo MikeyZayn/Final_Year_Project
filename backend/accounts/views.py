@@ -8,6 +8,8 @@ from rest_framework.response import Response
 from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser
 
+from .models import PasswordResetCode, User
+
 from .forms import (
     AdminSignUpForm,
     DriverSignUpForm,
@@ -21,6 +23,8 @@ from .serializers import (
     PassengerRegisterSerializer,
     DriverRegisterSerializer,
     OperatorRegisterSerializer,
+    PasswordResetRequestSerializer,
+    PasswordResetConfirmSerializer,
 )
 
 
@@ -157,3 +161,105 @@ def api_logout(request):
 @permission_classes([IsAuthenticated])
 def api_me(request):
     return Response(UserSerializer(request.user).data)
+
+def _generate_reset_code():
+    return f"{random.randint(0, 999999):06d}"
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def api_password_reset_request(request):
+    """Request a password reset code.
+    Passengers and drivers get the code returned directly (simulated SMS).
+    Operators and admins are told to contact their rank admin."""
+    s = PasswordResetRequestSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+    phone = s.validated_data["phone"]
+
+    try:
+        user = User.objects.get(phone=phone)
+    except User.DoesNotExist:
+        return Response(
+            {"detail": "No account found with that phone number."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    if user.account_status != User.AccountStatus.ACTIVE:
+        return Response(
+            {"detail": "This account is not active. Contact an administrator."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
+    # Operators and admins use admin-assisted reset
+    if user.role in (User.Role.OPERATOR, User.Role.ADMIN):
+        return Response({
+            "method": "admin_assisted",
+            "detail": (
+                "Password reset for this role is handled by a rank administrator. "
+                "Please contact your rank admin in person."
+            ),
+        })
+
+    # Passengers and drivers get a self-service code
+    PasswordResetCode.objects.filter(user=user, used_at__isnull=True).update(
+        used_at=timezone.now()
+    )
+    code = _generate_reset_code()
+    PasswordResetCode.objects.create(
+        user=user,
+        code=code,
+        purpose=PasswordResetCode.Purpose.SELF_SERVICE,
+        expires_at=timezone.now() + timedelta(minutes=15),
+    )
+
+    return Response({
+        "method": "self_service",
+        "code": code,
+        "detail": (
+            "A 6-digit code has been generated. In production this would be sent "
+            "by SMS; for the prototype it is shown here and expires in 15 minutes."
+        ),
+    })
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def api_password_reset_confirm(request):
+    """Verify a code and set a new password."""
+    s = PasswordResetConfirmSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+    phone = s.validated_data["phone"]
+    code = s.validated_data["code"]
+    new_password = s.validated_data["new_password"]
+
+    try:
+        user = User.objects.get(phone=phone)
+    except User.DoesNotExist:
+        return Response(
+            {"detail": "No account found with that phone number."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+    try:
+        reset = PasswordResetCode.objects.get(
+            user=user, code=code, used_at__isnull=True,
+        )
+    except PasswordResetCode.DoesNotExist:
+        return Response(
+            {"detail": "Invalid or already-used code."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    if not reset.is_valid():
+        return Response(
+            {"detail": "This code has expired. Request a new one."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user.set_password(new_password)
+    user.save()
+
+    reset.used_at = timezone.now()
+    reset.save()
+
+    return Response({"detail": "Password updated. You can now sign in."})
