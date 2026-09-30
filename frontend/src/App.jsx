@@ -205,6 +205,7 @@ function App() {
           <Login
             role={role}
             setRole={setRole}
+            notify={notify}
             onBack={() => setScreen('welcome')}
             onAuthed={(backendRole) => {
               const frontendRole = backendRole === 'admin' ? 'administrator' : backendRole;
@@ -469,7 +470,7 @@ function Welcome({ onLogin, onGuest, onRegister }) {
   );
 }
 
-function Login({ role, setRole, onBack, onAuthed }) {
+function Login({ role, setRole, onBack, onAuthed, notify }) {
   const { login } = useAuth();
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
