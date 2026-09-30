@@ -822,7 +822,7 @@ function Dashboard({ role, activeTrip, setActiveTrip, notify, issuedVerification
       </div>
 
       {role === 'passenger' && <Passenger activeTrip={activeTrip} setActiveTrip={setActiveTrip} notify={notify} issuedVerificationCodes={issuedVerificationCodes} />}
-      {role === 'driver' && <DriverPage notify={notify} />}
+      {role === 'driver' && <Driver notify={notify} />}
       {role === 'operator' && <Operator notify={notify} />}
       {role === 'administrator' && <Administrator notify={notify} />}
     </section>
@@ -1099,7 +1099,9 @@ function Passenger({ notify }) {
         error={error}
         bookingId={bookingId}
         onBook={bookTrip}
-        onViewMap={setSelectedTrip}
+        onViewMap={(trip) =>
+          setSelectedTrip((current) => (current?.id === trip.id ? null : trip))
+        }
         selectedTripId={selectedTrip?.id}
       />
 
@@ -1419,14 +1421,42 @@ function PassengerRouteMap({ trip, notify }) {
       {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
 
       {!loading && !error && (
-        <ThembaMap
-          markers={markers}
-          polylines={polylines}
-          height="360px"
-          fitKey={`trip-${trip.id}`}
-        />
+        <LeafletRouteMap geometry={geometry} dep={dep} dest={dest} />
       )}
     </article>
+  );
+}
+function LeafletFitBounds({ points }) {
+  const map = useMap();
+  useEffect(() => {
+    if (points.length > 1) map.fitBounds(points, { padding: [30, 30] });
+  }, [map, points]);
+  return null;
+}
+
+function LeafletRouteMap({ geometry, dep, dest }) {
+  const depCoord = [Number(dep.latitude), Number(dep.longitude)];
+  const destCoord = [Number(dest.latitude), Number(dest.longitude)];
+  const points = geometry.length >= 2 ? geometry : [depCoord, destCoord];
+
+  return (
+    <div style={{ height: 360, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)' }}>
+      <MapContainer
+        center={depCoord}
+        zoom={11}
+        scrollWheelZoom={false}
+        style={{ width: '100%', height: '100%' }}
+      >
+        <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
+          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+        />
+        <LeafletFitBounds points={points} />
+        <Polyline positions={points} pathOptions={{ color: '#e3a441', weight: 5 }} />
+        <CircleMarker center={depCoord} radius={8} pathOptions={{ color: '#173d3b', fillColor: '#7fbf7c', fillOpacity: 1 }} />
+        <CircleMarker center={destCoord} radius={8} pathOptions={{ color: '#173d3b', fillColor: '#d06d5f', fillOpacity: 1 }} />
+      </MapContainer>
+    </div>
   );
 }
 
@@ -1553,44 +1583,216 @@ function RatingModal({ bookingId, onClose, onDone, notify }) {
 }
 
 function Driver({ notify }) {
+  const [profile, setProfile] = useState(null);
+  const [trips, setTrips] = useState([]);
+  const [vehicle, setVehicle] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [confirmCode, setConfirmCode] = useState('');
+  const [confirmMsg, setConfirmMsg] = useState('');
+
+  async function load() {
+    setLoading(true);
+    setError('');
+    try {
+      const [pRes, tRes, vRes] = await Promise.all([
+        api.get('/transport/api/driver/profile/'),
+        api.get('/transport/api/driver/trips/'),
+        api.get('/transport/api/driver/vehicle/'),
+      ]);
+      setProfile(pRes.data);
+      setTrips(tRes.data);
+      setVehicle(vRes.data);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not load driver data.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function confirmTrip() {
+    setConfirmMsg('');
+    if (!confirmCode.trim()) return;
+    try {
+      await api.confirmTrip(confirmCode.trim());
+      setConfirmMsg('Trip confirmed.');
+      setConfirmCode('');
+      load();
+    } catch (err) {
+      setConfirmMsg(err.response?.data?.detail || 'Could not confirm trip.');
+    }
+  }
+
+  async function acceptTrip(tripCode) {
+  if (!window.confirm(`Confirm you are operating trip ${tripCode}?`)) return;
+  try {
+    await api.confirmTrip(tripCode);
+    notify('Trip confirmed.');
+    load();
+  } catch (err) {
+    notify(err.response?.data?.detail || 'Could not confirm.');
+  }
+}
+
+  if (loading) {
+    return <article className="module module-wide"><p className="muted">Loading…</p></article>;
+  }
+
+  if (error) {
+    return <article className="module module-wide">
+      <p className="danger-button" style={{ display: 'block' }}>{error}</p>
+    </article>;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const todayTrips = trips.filter((t) => t.departure_date === today);
+  const upcoming = trips.filter((t) => t.departure_date > today);
+  const past = trips.filter((t) => t.departure_date < today);
+
   return (
     <div className="dashboard-grid">
       <article className="module module-wide">
         <div className="module-heading">
-          <span>Trip manifest</span>
-          <span className="module-number">03 trips</span>
+          <span>My profile</span>
+          <span className="module-number">{profile?.license_number}</span>
         </div>
-
-        {trips.map((trip) => (
-          <div className="trip-row" key={trip.id}>
-            <span>
-              <strong>{trip.route}</strong>
-              <small>
-                Driver: Bongani Mthembu
-              </small>
-              <small>
-                {trip.date} · {trip.id} · {trip.departure}
-              </small>
-            </span>
-            <b>{trip.status}</b>
-          </div>
-        ))}
+        <div className="route-summary">
+          <div><span className="route-label">Name</span><strong>{profile?.user?.first_name} {profile?.user?.last_name}</strong></div>
+          <div><span className="route-label">Phone</span><strong>{profile?.user?.phone}</strong></div>
+          <div><span className="route-label">Status</span><strong>{profile?.status}</strong></div>
+          <div><span className="route-label">DOT check</span><strong>{profile?.external_verification_status}</strong></div>
+        </div>
       </article>
 
       <article className="module">
         <div className="module-heading">
           <span>Passenger rating</span>
-          <span className="module-number">4.7 / 5</span>
+          <span className="module-number">
+            {profile?.rating_avg ? `${profile.rating_avg} / 5` : 'No ratings'}
+          </span>
         </div>
-        <p className="rating">
-          ★★★★<span>★</span>
-        </p>
-        <p className="muted">Based on verified passenger feedback.</p>
-        <button className="secondary-button" onClick={() => notify('Trip status marked ready for verification.')} type="button">
-          Update status
-        </button>
+        {profile?.rating_avg ? (
+          <>
+            <p className="rating">
+              {'★'.repeat(Math.round(profile.rating_avg))}
+              <span>{'★'.repeat(5 - Math.round(profile.rating_avg))}</span>
+            </p>
+            <p className="muted">Based on {profile.rating_count} verified rating(s).</p>
+          </>
+        ) : (
+          <p className="muted">No ratings yet.</p>
+        )}
       </article>
+
+      <article className="module">
+        <div className="module-heading">
+          <span>Complaints</span>
+          <span className="module-number">
+            {profile?.open_complaints > 0
+              ? `${profile.open_complaints} open`
+              : 'None open'}
+          </span>
+        </div>
+        <p className="muted">
+          {profile?.complaint_count || 0} total on record.
+        </p>
+      </article>
+
+      <article className="module">
+        <div className="module-heading">
+          <span>My vehicle</span>
+          <span className="module-number">{vehicle?.plate_number || 'None'}</span>
+        </div>
+        {vehicle ? (
+          <p className="muted">
+            {vehicle.make} {vehicle.model} · {vehicle.seat_capacity} seats · {vehicle.status}
+          </p>
+        ) : (
+          <p className="muted">No vehicle assigned.</p>
+        )}
+      </article>
+
+      <article className="module">
+        <div className="module-heading">
+          <span>Confirm trip by code</span>
+        </div>
+        <p className="muted">
+          If an operator gives you a trip code, enter it here to confirm the assignment.
+        </p>
+        <input
+          value={confirmCode}
+          onChange={(e) => setConfirmCode(e.target.value)}
+          placeholder="TRP-..."
+        />
+        <button className="secondary-button" onClick={confirmTrip} type="button" style={{ marginTop: 8 }}>
+          Confirm trip
+        </button>
+        {confirmMsg && <p className="muted" style={{ marginTop: 8 }}>{confirmMsg}</p>}
+      </article>
+
+      <article className="module module-wide">
+        <div className="module-heading">
+          <span>Today's trips</span>
+          <span className="module-number">{todayTrips.length}</span>
+        </div>
+        {todayTrips.length === 0 && <p className="muted">No trips scheduled for today.</p>}
+        {todayTrips.map((t) => (
+          <DriverTripRow key={t.id} trip={t} onConfirm={() => acceptTrip(t.trip_code)} />
+        ))}
+      </article>
+
+      {upcoming.length > 0 && (
+        <article className="module module-wide">
+          <div className="module-heading">
+            <span>Upcoming trips</span>
+            <span className="module-number">{upcoming.length}</span>
+          </div>
+          {upcoming.map((t) => <DriverTripRow key={t.id} trip={t} />)}
+        </article>
+      )}
+
+      {past.length > 0 && (
+        <article className="module module-wide">
+          <div className="module-heading">
+            <span>Past trips</span>
+            <span className="module-number">{past.length}</span>
+          </div>
+          {past.slice(0, 5).map((t) => <DriverTripRow key={t.id} trip={t} />)}
+        </article>
+      )}
     </div>
+  );
+}
+
+function DriverTripRow({ trip, onConfirm }) {
+  const statusColor =
+    trip.status === 'flagged' ? 'var(--danger)' :
+    trip.status === 'boarding' || trip.status === 'in_progress' ? 'var(--success)' :
+    trip.status === 'completed' ? 'var(--muted)' :
+    'var(--accent)';
+  return (
+    <button
+      className="trip-row"
+      type="button"
+      onClick={onConfirm}
+      style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)', cursor: 'pointer', font: 'inherit', color: 'inherit' }}
+    >
+      <span>
+        <strong>
+          {trip.route.departure.name} → {trip.route.destination.name}
+        </strong>
+        <small>
+          {trip.trip_code} · {trip.departure_date}
+          {trip.expected_departure_time ? ` · ${trip.expected_departure_time.slice(0, 5)}` : ''}
+          {' · '}{trip.seats_taken}/{trip.seat_capacity} seats
+        </small>
+      </span>
+      <span className="status-pill" style={{ borderColor: statusColor, color: statusColor }}>
+        {trip.status}
+      </span>
+    </button>
   );
 }
 
@@ -2540,6 +2742,7 @@ function Administrator({ notify }) {
       <AdminFlags notify={notify} />
       <AdminTrips notify={notify} />
       <AdminAccounts notify={notify} />
+      <AdminDrivers notify={notify} />
     </div>
   );
 }
@@ -3121,7 +3324,89 @@ function AdminTrips({ notify }) {
   );
 }
 
-export default App;
+function AdminAccounts({ notify }) {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState('');
+  const [role, setRole] = useState('');
+
+  async function load() {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (q) params.set('q', q);
+      if (role) params.set('role', role);
+      const { data } = await api.get(`/transport/api/admin/users/?${params.toString()}`);
+      setItems(data);
+    } catch { /* ignore */ }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { load(); }, []);
+
+  async function generateReset(u) {
+    try {
+      const { data } = await api.post(`/transport/api/admin/users/${u.id}/reset-code/`);
+      window.alert(
+        `Reset code for ${data.user_name} (${data.user_phone}):\n\n${data.code}\n\nValid for 24 hours. Give it to them in person.`
+      );
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Failed.');
+    }
+  }
+
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Account management</span>
+        <span className="module-number">{items.length}</span>
+      </div>
+
+      <div className="form-grid">
+        <label>
+          Search (phone or name)
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="082..." />
+        </label>
+        <label>
+          Role
+          <select value={role} onChange={(e) => setRole(e.target.value)}>
+            <option value="">All roles</option>
+            <option value="passenger">Passenger</option>
+            <option value="driver">Driver</option>
+            <option value="operator">Operator</option>
+            <option value="admin">Admin</option>
+          </select>
+        </label>
+      </div>
+      <button className="primary-button" onClick={load} type="button">Search</button>
+
+      {loading && <p className="muted">Loading…</p>}
+      {!loading && items.length === 0 && <p className="muted">No accounts match.</p>}
+
+      {items.map((u) => (
+        <div className="trip-row" key={u.id}>
+          <span>
+            <strong>{u.name}</strong>
+            <small>{u.phone} · {u.role} · joined {new Date(u.date_joined).toLocaleDateString()}</small>
+          </span>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <span className="status-pill" style={{
+              borderColor: u.account_status === 'active' ? 'var(--success)' :
+                           u.account_status === 'disabled' ? 'var(--danger)' : 'var(--muted)',
+              color: u.account_status === 'active' ? 'var(--success)' :
+                     u.account_status === 'disabled' ? 'var(--danger)' : 'var(--muted)',
+            }}>
+              {u.account_status}
+            </span>
+            <button className="secondary-button" onClick={() => generateReset(u)} type="button">
+              Reset code
+            </button>
+          </div>
+        </div>
+      ))}
+    </article>
+  );
+}
 
 function PasswordResetModal({ onClose, notify }) {
   const [step, setStep] = useState('request');
@@ -3246,3 +3531,7 @@ function PasswordResetModal({ onClose, notify }) {
     </div>
   );
 }
+
+
+
+export default App;
