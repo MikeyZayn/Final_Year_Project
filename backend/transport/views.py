@@ -5,6 +5,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+from accounts.models import DriverProfile
+from accounts.dot_adapter import verify_driver
 
 from accounts.models import OperatorProfile, User, PasswordResetCode
 import random
@@ -1922,4 +1924,75 @@ def api_admin_generate_reset_code(request, user_id):
         "user_phone": target.phone,
         "user_name": f"{target.first_name} {target.last_name}".strip() or target.phone,
         "detail": "Code valid for 24 hours. Give this to the user in person.",
+    })
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_drivers(request):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None and not request.user.is_superuser:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    qs = DriverProfile.objects.select_related("user", "association").all()
+    scope = request.query_params.get("scope", "pending")
+    if scope == "pending":
+        qs = qs.filter(external_verification_status="unverified")
+
+    return Response([
+        {
+            "id": d.id,
+            "name": f"{d.user.first_name} {d.user.last_name}".strip() or d.user.phone,
+            "phone": d.user.phone,
+            "license_number": d.license_number,
+            "id_number": d.id_number,
+            "pdp_number": d.pdp_number,
+            "status": d.status,
+            "external_verification_status": d.external_verification_status,
+            "external_verification_reason": d.external_verification_reason,
+            "association_name": d.association.association_name if d.association else None,
+        }
+        for d in qs
+    ])
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_verify_driver(request, driver_id):
+    admin_profile = _get_admin_or_none(request)
+    if admin_profile is None and not request.user.is_superuser:
+        return Response({"detail": "Not an admin account."}, status=403)
+
+    try:
+        d = DriverProfile.objects.get(pk=driver_id)
+    except DriverProfile.DoesNotExist:
+        return Response({"detail": "Driver not found."}, status=404)
+
+    if not d.id_number or not d.license_number:
+        return Response(
+            {"detail": "Driver is missing ID or license number. Cannot verify."},
+            status=400,
+        )
+
+    result = verify_driver(d.id_number, d.license_number)
+
+    if result["verified"]:
+        d.external_verification_status = "verified"
+    elif result["reason"] in ("license_suspended", "license_revoked"):
+        d.external_verification_status = "suspended"
+    elif result["reason"] == "dot_unavailable":
+        d.external_verification_status = "unavailable"
+    else:
+        d.external_verification_status = "failed"
+
+    d.external_verification_reason = result["reason"]
+    if result.get("record"):
+        d.pdp_number = result["record"].get("pdp_number") or d.pdp_number
+    d.save()
+
+    return Response({
+        "driver_id": d.id,
+        "verified": result["verified"],
+        "reason": result["reason"],
+        "external_verification_status": d.external_verification_status,
+        "pdp_number": d.pdp_number,
     })
