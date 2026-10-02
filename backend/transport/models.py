@@ -1,5 +1,7 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
+from datetime import timedelta, datetime, time
 from accounts.models import OperatorProfile
 
 
@@ -61,6 +63,21 @@ class OperatorAtRank(models.Model):
 
     def __str__(self):
         return f"{self.operator} @ {self.rank} ({self.status})"
+
+
+class DriverAtRank(models.Model):
+    """Driver access to a rank, approved independently of operator membership."""
+    driver = models.ForeignKey("accounts.DriverProfile", on_delete=models.CASCADE, related_name="rank_memberships")
+    rank = models.ForeignKey(Rank, on_delete=models.PROTECT, related_name="driver_memberships")
+    status = models.CharField(max_length=20, choices=OperatorAtRank.Status.choices, default=OperatorAtRank.Status.PENDING)
+    requested_at = models.DateTimeField(auto_now_add=True)
+    approved_by = models.ForeignKey("accounts.AdminProfile", on_delete=models.SET_NULL, null=True, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    notes = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["driver", "rank"], name="driver_rank_unique")]
+        ordering = ["rank__name"]
 
 
 class Route(models.Model):
@@ -126,6 +143,7 @@ class Trip(models.Model):
         COMPLETED = "completed", "Completed"
         CANCELLED = "cancelled", "Cancelled"
         FLAGGED = "flagged", "Flagged — needs admin review"
+        EXPIRED = "expired", "Expired in queue"
 
     operator = models.ForeignKey(
         OperatorProfile, on_delete=models.CASCADE, related_name="trips"
@@ -161,6 +179,15 @@ class Trip(models.Model):
 
     class Meta:
         ordering = ["departure_date", "expected_departure_time", "id"]
+
+    @property
+    def queue_expires_at(self):
+        # A future trip joins its effective departure queue on its scheduled date.
+        from django.utils.dateparse import parse_date, parse_time
+        departure = parse_date(self.departure_date) if isinstance(self.departure_date, str) else self.departure_date
+        expected = parse_time(self.expected_departure_time) if isinstance(self.expected_departure_time, str) else self.expected_departure_time
+        scheduled = timezone.make_aware(datetime.combine(departure, expected or time.min))
+        return max(self.created_at, scheduled) + timedelta(days=1)
 
     @property
     def seats_taken(self):
@@ -211,10 +238,19 @@ class Booking(models.Model):
         related_name="boarded_bookings",
     )
 
+    group_leader = models.ForeignKey("self", on_delete=models.CASCADE, null=True, blank=True, related_name="companions")
+    companion_first_name = models.CharField(max_length=150, blank=True)
+    companion_last_name = models.CharField(max_length=150, blank=True)
+    # Only a trip group needs a NOK snapshot; companions reference the leader.
+    group_next_of_kin_name = models.CharField(max_length=150, blank=True)
+    group_next_of_kin_phone = models.CharField(max_length=15, blank=True)
+
     class Meta:
         ordering = ["-booked_at"]
 
     def display_name(self):
+        if self.group_leader_id:
+            return f"{self.companion_first_name} {self.companion_last_name}".strip()
         if self.passenger:
             return f"{self.passenger.first_name} {self.passenger.last_name}".strip() or self.passenger.phone
         return self.walk_in_name or "Walk-in"
@@ -235,6 +271,7 @@ class VerificationCode(models.Model):
     )
     issued_at = models.DateTimeField(auto_now_add=True)
     verified_at = models.DateTimeField(null=True, blank=True)
+    passenger_confirmed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return f"{self.code} ({'used' if self.verified_at else 'unused'})"
@@ -462,6 +499,10 @@ class QueueEntry(models.Model):
     )
     added_at = models.DateTimeField(auto_now_add=True)
     active = models.BooleanField(default=True)
+
+    @property
+    def expires_at(self):
+        return self.added_at + timedelta(days=1)
 
     class Meta:
         ordering = ["rank", "position"]

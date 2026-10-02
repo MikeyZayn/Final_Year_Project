@@ -8,44 +8,70 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem("token");
+    let cancelled = false;
+    const token = sessionStorage.getItem("token");
+
     if (!token) {
       setLoading(false);
       return;
     }
-    api
-      .get("/accounts/api/me/")
-      .then((r) => setUser(r.data))
-      .catch(() => localStorage.removeItem("token"))
-      .finally(() => setLoading(false));
+
+    api.get("/accounts/api/me/")
+      .then(({ data }) => {
+        if (
+          !cancelled &&
+          sessionStorage.getItem("token") === token
+        ) {
+          setUser(data);
+        }
+      })
+      .catch((error) => {
+        if (
+          !cancelled &&
+          sessionStorage.getItem("token") === token &&
+          [401, 403].includes(error.response?.status)
+        ) {
+          sessionStorage.removeItem("token");
+          setUser(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const login = async (phone, password) => {
-    const { data } = await api.post("/accounts/api/login/", { phone, password });
-    localStorage.setItem("token", data.token);
+    const { data } = await api.post("/accounts/api/login/", {
+      phone,
+      password,
+    });
+
+    sessionStorage.setItem("token", data.token);
     setUser(data.user);
     return data.user;
   };
 
   const register = async (path, payload) => {
     const { data } = await api.post(path, payload);
-    localStorage.setItem("token", data.token);
+
+    sessionStorage.setItem("token", data.token);
     setUser(data.user);
     return data.user;
   };
 
   const logout = async () => {
-    try {
-      await api.post("/accounts/api/logout/");
-    } catch {
-      /* ignore */
-    }
-    localStorage.removeItem("token");
+    sessionStorage.removeItem("token");
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider
+      value={{ user, loading, login, register, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );

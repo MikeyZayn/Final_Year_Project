@@ -32,7 +32,9 @@ SECRET_KEY = os.environ.get(
     'SECRET_KEY',
     'django-insecure-^d7w*s-yn-6t-cz2@0&ofp9fbcq6$roitx%(7-0)nehqxjzm^2'
 )
+DOT_REGISTRY_PATH = os.environ.get("DOT_REGISTRY_PATH", str(BASE_DIR / "dot_registry.db"))
 ORS_API_KEY = os.environ.get("ORS_API_KEY", "")
+ROUTING_SERVICE_URL = os.environ.get("ROUTING_SERVICE_URL", "https://router.project-osrm.org")
 GOOGLE_MAPS_API_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True') == 'True'
@@ -114,6 +116,12 @@ DATABASES = {
     )
 }
 
+if DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3":
+    DATABASES["default"].setdefault("OPTIONS", {}).update({
+        "timeout": 20,
+        "transaction_mode": "IMMEDIATE",
+    })
+
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
 
@@ -138,7 +146,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Africa/Johannesburg'
 
 USE_I18N = True
 
@@ -161,7 +169,7 @@ AUTH_USER_MODEL = 'accounts.User'
 
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-CSRF_TRUSTED_ORIGINS = ['https://*.ngrok-free.dev', 'https://*.ngrok-free.app']
+CSRF_TRUSTED_ORIGINS += ['https://*.ngrok-free.dev', 'https://*.ngrok-free.app']
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [

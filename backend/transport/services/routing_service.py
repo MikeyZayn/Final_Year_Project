@@ -9,7 +9,7 @@ Used for:
 Order of preference for get_driving_route / get_ad_hoc_route:
   1. OpenRouteService (if ORS_API_KEY is set)
   2. OSRM-compatible service (if ROUTING_SERVICE_URL is set)
-  3. Straight-line haversine fallback
+  3. Report route unavailable; do not present a straight line as a road route
 
 ORS docs: https://openrouteservice.org/dev/#/api-docs/v2/directions
 """
@@ -18,11 +18,10 @@ import logging
 import requests
 from django.conf import settings
 
-from .geo import haversine_km
 
 logger = logging.getLogger(__name__)
 
-ORS_DIRECTIONS_URL = "https://api.heigit.org/openrouteservice/v2/directions/driving-car"
+ORS_DIRECTIONS_URL = "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
 
 class RoutingServiceError(Exception):
     pass
@@ -46,7 +45,7 @@ def get_driving_route(origin, destination, timeout=8):
         try:
             return _ors_route(origin, destination, ors_key.strip(), timeout=timeout)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("OpenRouteService unavailable, trying OSRM/fallback: %s", exc)
+            logger.warning("OpenRouteService unavailable, trying OSRM: %s", exc)
 
     # 2) OSRM-compatible
     base_url = getattr(settings, "ROUTING_SERVICE_URL", None) or ""
@@ -54,9 +53,9 @@ def get_driving_route(origin, destination, timeout=8):
         try:
             return _osrm_route(origin, destination, base_url.strip(), timeout=timeout)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("OSRM routing service unavailable, using fallback: %s", exc)
+            logger.warning("OSRM routing service unavailable, road routing unavailable: %s", exc)
 
-    return _fallback_route(origin, destination)
+    raise RoutingServiceError("Road routing is unavailable. Check ORS_API_KEY or ROUTING_SERVICE_URL and try again.")
 
 
 def get_ad_hoc_route(origin, destination, timeout=8):
@@ -79,7 +78,7 @@ def _ors_route(origin, destination, api_key, timeout=8):
         ORS_DIRECTIONS_URL,
         json=body,
         headers={
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": api_key,
             "Content-Type": "application/json",
             "Accept": "application/json",
         },
@@ -96,19 +95,17 @@ def _ors_route(origin, destination, api_key, timeout=8):
         )
     response.raise_for_status()
     payload = response.json()
-    routes = payload.get("routes") or []
-    if not routes:
+    features = payload.get("features") or []
+    if not features:
         raise RoutingServiceError("OpenRouteService returned no route for these points.")
-
-    route = routes[0]
-    summary = route.get("summary") or {}
+    route = features[0]
+    summary = route.get("properties", {}).get("summary", {})
     distance_m = float(summary.get("distance") or 0)
     duration_s = float(summary.get("duration") or 0)
-
-    geometry = _decode_ors_geometry(route)
+    coordinates = route.get("geometry", {}).get("coordinates", [])
+    geometry = [[c[1], c[0]] for c in coordinates]
     if len(geometry) < 2:
-        # Some responses only return encoded polyline; try geojson if present
-        raise RoutingServiceError("OpenRouteService returned empty geometry.")
+        raise RoutingServiceError("OpenRouteService returned empty road geometry.")
 
     return {
         "geometry": geometry,
@@ -178,9 +175,13 @@ def _osrm_route(origin, destination, base_url, timeout=5):
     )
     response.raise_for_status()
     payload = response.json()
+    if payload.get("code") != "Ok" or not payload.get("routes"):
+        raise RoutingServiceError("No road route found between these points.")
     route = payload["routes"][0]
     coordinates = route["geometry"]["coordinates"]  # [[lng, lat], ...]
-    geometry = [[lat, lng] for lng, lat in coordinates]
+    geometry = [[c[1], c[0]] for c in coordinates]
+    if len(geometry) < 2:
+        raise RoutingServiceError("Routing service returned empty road geometry.")
     return {
         "geometry": geometry,
         "distance_km": round(route["distance"] / 1000, 3),
@@ -189,12 +190,3 @@ def _osrm_route(origin, destination, base_url, timeout=5):
     }
 
 
-def _fallback_route(origin, destination, average_speed_kmh=35.0):
-    distance_km = haversine_km(origin[0], origin[1], destination[0], destination[1])
-    duration_min = (distance_km / average_speed_kmh) * 60
-    return {
-        "geometry": [list(origin), list(destination)],
-        "distance_km": round(distance_km, 3),
-        "duration_min": round(duration_min, 1),
-        "source": "fallback",
-    }
