@@ -10,6 +10,7 @@ Usage:
     # -> {"verified": True, "reason": "ok", "record": {...}}
 """
 import sqlite3
+from django.conf import settings
 from datetime import date
 from pathlib import Path
 
@@ -22,11 +23,12 @@ class DOTUnavailable(Exception):
 
 
 def _connect():
-    if not DOT_DB_PATH.exists():
+    registry_path = Path(getattr(settings, "DOT_REGISTRY_PATH", DOT_DB_PATH))
+    if not registry_path.exists():
         raise DOTUnavailable(
             f"DOT registry not initialised. Run: python init_dot_registry.py"
         )
-    con = sqlite3.connect(DOT_DB_PATH)
+    con = sqlite3.connect(registry_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)
     con.row_factory = sqlite3.Row
     return con
 
@@ -48,7 +50,7 @@ def verify_driver(id_number: str, license_number: str) -> dict:
 
     try:
         con = _connect()
-    except DOTUnavailable:
+    except (DOTUnavailable, sqlite3.Error, OSError):
         return {"verified": False, "reason": "dot_unavailable", "record": None}
 
     try:
@@ -57,6 +59,8 @@ def verify_driver(id_number: str, license_number: str) -> dict:
                WHERE id_number = ? AND license_number = ?""",
             (id_number.strip(), license_number.strip()),
         ).fetchone()
+    except sqlite3.Error:
+        return {"verified": False, "reason": "dot_unavailable", "record": None}
     finally:
         con.close()
 
@@ -74,14 +78,18 @@ def verify_driver(id_number: str, license_number: str) -> dict:
         }
 
     # Licence expiry
-    expiry = date.fromisoformat(rec["license_expiry_date"])
+    try:
+        expiry = date.fromisoformat(rec["license_expiry_date"])
+        pdp_expiry = date.fromisoformat(rec["pdp_valid_until"]) if rec.get("pdp_valid_until") else None
+    except (ValueError, TypeError, KeyError):
+        return {"verified": False, "reason": "dot_unavailable", "record": None}
     if expiry < date.today():
         return {"verified": False, "reason": "license_expired", "record": rec}
 
     # PDP expiry (if a PDP is recorded)
     pdp_until = rec.get("pdp_valid_until")
     if pdp_until:
-        if date.fromisoformat(pdp_until) < date.today():
+        if pdp_expiry < date.today():
             return {"verified": False, "reason": "pdp_expired", "record": rec}
 
     return {"verified": True, "reason": "ok", "record": rec}

@@ -1,7 +1,16 @@
 from django.urls import path
-from . import views
+from . import views, feature_views
 
 urlpatterns = [
+    path("api/driver/memberships/", feature_views.driver_memberships, name="driver_memberships"),
+    path("api/admin/driver-memberships/", feature_views.pending_driver_memberships, name="pending_driver_memberships"),
+    path("api/admin/driver-memberships/<int:membership_id>/approve/", feature_views.decide_driver_membership, {"decision": "approve"}, name="approve_driver_membership"),
+    path("api/admin/driver-memberships/<int:membership_id>/reject/", feature_views.decide_driver_membership, {"decision": "reject"}, name="reject_driver_membership"),
+    path("api/my-bookings/<int:booking_id>/confirm-boarding/", feature_views.passenger_confirm_boarding, name="passenger_confirm_boarding"),
+    path("api/my-trips/<int:trip_id>/bookings/<int:booking_id>/board-group/", feature_views.board_group, name="board_group"),
+    path("api/my-trips/<int:trip_id>/verify-assets/", views.api_verify_trip_assets, name="api_verify_trip_assets"),
+    path("api/admin/drivers/", views.api_admin_drivers, name="api_admin_drivers"),
+    path("api/admin/drivers/<int:driver_id>/verify/", views.api_admin_verify_driver, name="api_admin_verify_driver"),
     # Public
     path("api/routes/",         views.api_list_routes,        name="api_list_routes"),
     path("api/ranks/",          views.api_list_ranks,         name="api_list_ranks"),
@@ -44,7 +53,6 @@ urlpatterns = [
     path("api/admin/feedback/", views.api_admin_feedback, name="api_admin_feedback"),
     path("api/admin/feedback/<int:feedback_id>/confirm-incident/", views.api_admin_confirm_incident, name="api_admin_confirm_incident"),
     path("api/admin/feedback/<int:feedback_id>/dismiss/", views.api_admin_dismiss, name="api_admin_dismiss"),
-    path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
     path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
     # Admin (rank-scoped)
     path("api/admin/me/",                          views.api_admin_me,                       name="api_admin_me"),

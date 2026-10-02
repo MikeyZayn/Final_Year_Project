@@ -25,4 +25,9 @@ class Command(BaseCommand):
             code = compile(f.read(), 'seed.py', 'exec')
         exec(code, namespace)
 
+        from init_dot_registry import DB_PATH, main as init_registry
+        from django.core.management import call_command
+        if not DB_PATH.exists():
+            init_registry()
+        call_command('prepare_demo_drivers')
         self.stdout.write(self.style.SUCCESS('Seed complete.'))

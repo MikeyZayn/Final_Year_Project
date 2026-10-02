@@ -5,8 +5,18 @@ const api = axios.create({
 });
 
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem("token");
-  if (token) config.headers.Authorization = `Token ${token}`;
+  const publicAccountRequest =
+    /\/accounts\/api\/(login|register[^/]*|password-reset)(\/|$)/
+      .test(config.url || "");
+
+  const token = sessionStorage.getItem("token");
+
+  if (token && !publicAccountRequest) {
+    config.headers.Authorization = `Token ${token}`;
+  } else {
+    delete config.headers.Authorization;
+  }
+
   return config;
 });
 

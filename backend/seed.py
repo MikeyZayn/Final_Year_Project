@@ -5,7 +5,7 @@ from accounts.models import (
 )
 from transport.models import (
     Rank, Destination, OperatorAtRank, Route,
-    Vehicle, DriverVehicle, Trip,
+    Vehicle, DriverVehicle, Trip, DriverAtRank,
 )
 
 # ---- Clear ----
@@ -15,6 +15,7 @@ DriverVehicle.objects.all().delete()
 Vehicle.objects.all().delete()
 Route.objects.all().delete()
 OperatorAtRank.objects.all().delete()
+DriverAtRank.objects.all().delete()
 Destination.objects.all().delete()
 Rank.objects.all().delete()
 print("cleared")
@@ -279,3 +280,11 @@ print("Vehicles:        ", Vehicle.objects.count())
 print("Drivers:         ", DriverProfile.objects.count())
 print("Passengers:      ", User.objects.filter(role='passenger').count())
 print("Trips:           ", Trip.objects.count())
+# Mirror existing driver access to ranks; new ranks require admin approval.
+from transport.models import DriverAtRank
+for d in DriverProfile.objects.all():
+    rank_ids = set(Trip.objects.filter(driver=d).values_list("route__departure_id", flat=True))
+    if d.association_id:
+        rank_ids.update(OperatorAtRank.objects.filter(operator__association_id=d.association_id, status="active").values_list("rank_id", flat=True))
+    for rank_id in rank_ids:
+        DriverAtRank.objects.get_or_create(driver=d, rank_id=rank_id, defaults={"status": "active"})

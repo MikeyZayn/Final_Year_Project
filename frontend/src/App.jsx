@@ -1,9 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { CircleMarker, MapContainer, Polyline, TileLayer, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
 import { useAuth } from './auth';
 const roles = ['passenger', 'driver', 'operator', 'administrator'];
 import api from './api';
+import QuickBooking from './features/QuickBooking.jsx';
+import { DrawerTile, PageControls } from './features/Drawer.jsx';
+import { confirmDeliveredBookings } from './services/autoBoarding.js';
+import { DriverRankMemberships, AdminDriverRankRequests, GroupBookingModal, GroupBoarding, DepartureQueue } from './features/TripFeatures.jsx';
 import DriverPage from './pages/DriverPage.jsx';
 import ThembaMap from './components/ThembaMap.jsx';
 
@@ -141,10 +145,11 @@ function getProfileDefaults(role) {
 }
 
 function App() {
+  const { user: sessionUser } = useAuth();
   const [screen, setScreen] = useState('welcome');
   const [role, setRole] = useState('passenger');
   const [activeTrip, setActiveTrip] = useState(null);
-  const [darkMode, setDarkMode] = useState(true);
+  const [darkMode, setDarkMode] = useState(false);
   const [notice, setNotice] = useState('');
   const [profile, setProfile] = useState(getProfileDefaults('passenger'));
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -159,19 +164,27 @@ function App() {
     setProfile(getProfileDefaults(role));
   }, [role]);
 
+  // A restored login resumes receipt detection when the passenger reopens THEMBA.
+  useEffect(() => {
+    if (sessionUser) {
+      setRole(sessionUser.role === 'admin' ? 'administrator' : sessionUser.role);
+      setScreen('dashboard');
+    }
+  }, [sessionUser]);
+
   function enterDashboard(selectedRole = role) {
     setRole(selectedRole);
     setScreen('dashboard');
   }
 
   return (
-    <div className={darkMode ? 'app dark' : 'app light'}>
+    <div className={`${darkMode ? 'app dark' : 'app light'} ${screen === 'welcome' ? 'is-home' : ''}`}>
       <header className="topbar">
         <button className="brand" onClick={() => setScreen('welcome')} type="button">
           <span className="brand-mark">T</span>
           <span>
             <strong>THEMBA</strong>
-            <small>Transport Hub with Evaluated Mobility, Boarding & Accountability</small>
+            <small>Taxi trips. Verified.</small>
           </span>
         </button>
 
@@ -232,6 +245,7 @@ function App() {
         {screen === 'dashboard' && (
           <Dashboard
             role={role}
+            onSignIn={() => setScreen('login')}
             activeTrip={activeTrip}
             setActiveTrip={setActiveTrip}
             notify={notify}
@@ -437,37 +451,27 @@ function ProfileSettings({ role, profile, setProfile, onClose, notify }) {
 }
 
 function Welcome({ onLogin, onGuest, onRegister }) {
-  return (
+  return <>
     <section className="welcome-panel">
-      <div className="eyebrow">South African transport information platform</div>
-      <h1>
-        Travel information.<br />
-        <em>Verified trips.</em><br />
-        Safer journeys.
-      </h1>
-      <p className="lead">
-        Find the right route, understand the fare, and connect every completed trip to accountable passenger feedback.
-      </p>
-
-      <div className="welcome-actions">
-        <button className="primary-button" onClick={onLogin} type="button">
-          Sign in <span>→</span>
-        </button>
-        <button className="secondary-button" onClick={onRegister} type="button">
-          Create an account
-        </button>
-        <button className="text-button" onClick={onGuest} type="button">
-          Continue as guest →
-        </button>
+      <div className="hero-content">
+        <span className="hero-tag">BUILT FOR SOUTH AFRICA</span>
+        <h1>Your next taxi.<br /><em>A little simpler.</em></h1>
+        <p className="lead">A nearby rank. A seat for you. A journey you can trust. Book your minibus trip and let THEMBA take care of the verification.</p>
+        <div className="welcome-actions">
+          <button className="primary-button" onClick={onLogin} type="button">Sign in <span>→</span></button>
+          <button className="secondary-button" onClick={onRegister} type="button">Create an account</button>
+        </div>
+        <button className="hero-guest text-button" onClick={onGuest} type="button">Explore trips without signing in ↗</button>
+        <div className="hero-caption"><span className="live-dot" />Local journeys. Real accountability.</div>
       </div>
-
-      <div className="feature-strip">
-        <span>01 / Route clarity</span>
-        <span>02 / Trip verification</span>
-        <span>03 / Accountable feedback</span>
-      </div>
+      <div className="hero-photo-caption">THE EVERYDAY WAY HOME</div>
     </section>
-  );
+    <section className="home-perks" aria-label="How THEMBA works">
+      <article><span className="perk-index">01</span><h3>Start nearby.</h3><p>Your location suggests the nearest taxi rank. You stay in control.</p></article>
+      <article><span className="perk-index">02</span><h3>Choose your destination.</h3><p>See the fare and reserve your seat. Bring your group along, too.</p></article>
+      <article><span className="perk-index">03</span><h3>Board. We do the rest.</h3><p>Your operator confirms boarding. Your code verifies itself in the app.</p></article>
+    </section>
+  </>;
 }
 
 function Login({ role, setRole, onBack, onAuthed, notify }) {
@@ -805,7 +809,7 @@ function RolePicker({ role, setRole }) {
   );
 }
 
-function Dashboard({ role, activeTrip, setActiveTrip, notify, issuedVerificationCodes, issueVerificationCode }) {
+function Dashboard({ role, onSignIn, activeTrip, setActiveTrip, notify, issuedVerificationCodes, issueVerificationCode }) {
   const { user } = useAuth();
   const displayName =
     [user?.first_name, user?.last_name].filter(Boolean).join(' ') ||
@@ -821,7 +825,7 @@ function Dashboard({ role, activeTrip, setActiveTrip, notify, issuedVerification
         </div>
       </div>
 
-      {role === 'passenger' && <Passenger activeTrip={activeTrip} setActiveTrip={setActiveTrip} notify={notify} issuedVerificationCodes={issuedVerificationCodes} />}
+      {role === 'passenger' && <Passenger onSignIn={onSignIn} activeTrip={activeTrip} setActiveTrip={setActiveTrip} notify={notify} issuedVerificationCodes={issuedVerificationCodes} />}
       {role === 'driver' && <Driver notify={notify} />}
       {role === 'operator' && <Operator notify={notify} />}
       {role === 'administrator' && <Administrator notify={notify} />}
@@ -842,58 +846,18 @@ function FitRouteBounds({ points }) {
 }
 
 function RouteMapPanel({ trip }) {
-  const [routePoints, setRoutePoints] = useState([
-    locationCoordinates[trip.origin],
-    locationCoordinates[trip.destination],
-  ]);
-  const [routeSource, setRouteSource] = useState('Local route preview');
-
+  const [routePoints, setRoutePoints] = useState([]);
+  const [routeSource, setRouteSource] = useState('Loading road route…');
   useEffect(() => {
     let cancelled = false;
-    const fallbackPoints = [locationCoordinates[trip.origin], locationCoordinates[trip.destination]];
-
-    setRoutePoints(fallbackPoints);
-    setRouteSource(openRouteServiceKey ? 'Loading OpenRouteService route...' : 'Local route preview');
-
-    if (!openRouteServiceKey) {
-      return undefined;
-    }
-
-    fetch('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
-      method: 'POST',
-      headers: {
-        Authorization: openRouteServiceKey,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        coordinates: [
-          locationCoordinates[trip.origin].slice().reverse(),
-          locationCoordinates[trip.destination].slice().reverse(),
-        ],
-      }),
-    })
-      .then((response) => {
-        if (!response.ok) {
-          throw new Error('OpenRouteService request failed');
-        }
-        return response.json();
-      })
-      .then((data) => {
-        const coordinates = data.features?.[0]?.geometry?.coordinates;
-        if (!cancelled && coordinates?.length) {
-          setRoutePoints(coordinates.map(([longitude, latitude]) => [latitude, longitude]));
-          setRouteSource('OpenRouteService road route');
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setRouteSource('Local route preview · routing service unavailable');
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    setRoutePoints([]); setRouteSource('Loading road route…');
+    const origin = locationCoordinates[trip.origin];
+    const dest = locationCoordinates[trip.destination];
+    if (!origin || !dest) { setRouteSource('Route coordinates unavailable'); return; }
+    api.post('/transport/api/routing/directions/', { origin: { lat: origin[0], lng: origin[1] }, destination: { lat: dest[0], lng: dest[1] } })
+      .then(({ data }) => { if (!cancelled) { setRoutePoints(data.geometry || []); setRouteSource(`${data.source.toUpperCase()} road route`); } })
+      .catch(() => { if (!cancelled) setRouteSource('Road routing unavailable — try again later'); });
+    return () => { cancelled = true; };
   }, [trip]);
 
   return (
@@ -904,15 +868,15 @@ function RouteMapPanel({ trip }) {
       </div>
 
       <div className="route-map leaflet-map">
-        <MapContainer center={routePoints[0]} zoom={11} scrollWheelZoom={false}>
+        <MapContainer center={locationCoordinates[trip.origin]} zoom={11} scrollWheelZoom={false}>
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
           <FitRouteBounds points={routePoints} />
-          <Polyline positions={routePoints} pathOptions={{ color: '#e3a441', weight: 6 }} />
-          <CircleMarker center={routePoints[0]} radius={8} pathOptions={{ color: '#173d3b', fillColor: '#7fbf7c', fillOpacity: 1 }} />
-          <CircleMarker center={routePoints[routePoints.length - 1]} radius={8} pathOptions={{ color: '#173d3b', fillColor: '#d06d5f', fillOpacity: 1 }} />
+          {routePoints.length >= 2 && <Polyline positions={routePoints} pathOptions={{ color: '#e3a441', weight: 6 }} />}
+          <CircleMarker center={locationCoordinates[trip.origin]} radius={8} pathOptions={{ color: '#173d3b', fillColor: '#7fbf7c', fillOpacity: 1 }} />
+          <CircleMarker center={locationCoordinates[trip.destination]} radius={8} pathOptions={{ color: '#173d3b', fillColor: '#d06d5f', fillOpacity: 1 }} />
         </MapContainer>
       </div>
 
@@ -940,7 +904,8 @@ function RouteMapPanel({ trip }) {
   );
 }
 
-function Passenger({ notify }) {
+function Passenger({ notify, onSignIn }) {
+  const { user } = useAuth();
   // ----- shared state -----
   const [departure, setDeparture] = useState('');
   const [destination, setDestination] = useState('');
@@ -954,31 +919,46 @@ function Passenger({ notify }) {
   const [announcements, setAnnouncements] = useState([]);
   const [panicAlert, setPanicAlert] = useState(null);
   const [selectedTrip, setSelectedTrip] = useState(null);
+  const [groupBookingTripId, setGroupBookingTripId] = useState(null);
+  const tripRequestNumber = useRef(0);
+  const bookingRefreshBusy = useRef(false);
+  const passengerMounted = useRef(true);
+  const [bookingRouteTrip, setBookingRouteTrip] = useState(null);
 
   // ----- loaders -----
   async function loadTrips(params = {}) {
+    const requestNumber = ++tripRequestNumber.current;
     setLoading(true);
     setError('');
     try {
       const query = new URLSearchParams();
       if (params.from) query.set('from', params.from);
       if (params.to) query.set('to', params.to);
+      if (params.departureId) query.set('departure_id', params.departureId);
+      if (params.destinationId) query.set('destination_id', params.destinationId);
       const qs = query.toString() ? `?${query.toString()}` : '';
       const { data } = await api.get(`/transport/api/trips/${qs}`);
-      setTrips(data);
+      if (requestNumber === tripRequestNumber.current) setTrips(data);
     } catch {
-      setError('Could not load trips. Is the backend running?');
-      setTrips([]);
+      if (requestNumber === tripRequestNumber.current) { setError('Could not load trips. Try again in a moment.'); setTrips([]); }
     } finally {
-      setLoading(false);
+      if (requestNumber === tripRequestNumber.current) setLoading(false);
     }
   }
 
   async function loadBookings() {
+    if (bookingRefreshBusy.current) return;
+    bookingRefreshBusy.current = true;
     try {
       const { data } = await api.get('/transport/api/my-bookings/');
-      setBookings(data);
-    } catch { /* ignore */ }
+      if (passengerMounted.current) setBookings(data);
+      const confirmed = await confirmDeliveredBookings(data, async (id, code) => {
+        const result = await api.post(`/transport/api/my-bookings/${id}/confirm-boarding/`, { code });
+        return result.data;
+      });
+      if (passengerMounted.current) setBookings(confirmed);
+    } catch { /* retry on next refresh or reconnect */ }
+    finally { bookingRefreshBusy.current = false; }
   }
 
   async function loadFeedback() {
@@ -1008,16 +988,42 @@ function Passenger({ notify }) {
     loadFeedback();
     loadAnnouncements();
     loadPanic();
-    const t = setInterval(loadAnnouncements, 30000);
-    return () => clearInterval(t);
+    passengerMounted.current = true;
+    const refresh = () => {
+      if (!document.hidden) {
+        loadBookings();
+      }
+    };
+
+    const t = setInterval(refresh, 2000);
+
+    const announcementsTimer = setInterval(() => {
+      if (!document.hidden) {
+        loadAnnouncements();
+        loadFeedback();
+      }
+    }, 30000);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      passengerMounted.current = false;
+      clearInterval(t); clearInterval(announcementsTimer);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
   }, []);
 
   // ----- actions -----
-  async function bookTrip(tripId) {
+  async function bookTrip(tripId, companions) {
+    if (!user) { onSignIn?.(); return; }
+    if (!Array.isArray(companions)) { setGroupBookingTripId(tripId); return; }
     setBookingId(tripId);
     try {
-      await api.post('/transport/api/my-bookings/', { trip_id: tripId });
-      notify('Booking confirmed. Show up at the rank and tell the operator your name.');
+      await api.post('/transport/api/my-bookings/', { trip_id: tripId, companions });
+      setGroupBookingTripId(null);
+      notify('Your seat is reserved. Boarding verification will happen automatically.');
       await loadTrips();
       await loadBookings();
     } catch (err) {
@@ -1072,42 +1078,60 @@ function Passenger({ notify }) {
     <>
       <PassengerPanicBanner alert={panicAlert} onCancel={cancelPanic} />
 
-      <PassengerTripSearch
-        departure={departure}
-        destination={destination}
-        setDeparture={setDeparture}
-        setDestination={setDestination}
-        onSearch={searchTrips}
+      <QuickBooking trips={trips} bookings={bookings} busy={bookingId} signedIn={!!user}
+        onSignIn={onSignIn} onBook={bookTrip} onGroup={id => setGroupBookingTripId(id)}
+        onRouteChange={(rank, dest) => { setSelectedTrip(null); loadTrips({ departureId: rank, destinationId: dest }); }}
       />
 
       <PassengerAnnouncements announcements={announcements} />
 
       <PassengerBookings
-        bookings={bookings}
+        bookings={bookings.filter(b =>
+          ['reserved', 'boarded'].includes(b.status)
+        )}
         feedbackList={feedbackList}
         onRate={setRatingFormFor}
         onCancel={cancelBooking}
         onPanic={raisePanic}
+        selectedRouteTripId={bookingRouteTrip?.id}
+        onViewRoute={booking => {
+          if (!booking.route) {
+            notify(
+              'Route details are unavailable. Restart Django after updating the booking serializer.'
+            );
+            return;
+          }
+
+          setBookingRouteTrip(current =>
+            current?.id === booking.trip
+              ? null
+              : {
+                  id: booking.trip,
+                  trip_code: booking.trip_code,
+                  departure_date: booking.departure_date,
+                  route: booking.route,
+                }
+          );
+        }}
       />
 
-      <PassengerFeedbackList feedbackList={feedbackList} />
-
-      <PassengerUpcomingTrips
-        trips={trips}
-        bookings={bookings}
-        loading={loading}
-        error={error}
-        bookingId={bookingId}
-        onBook={bookTrip}
-        onViewMap={(trip) =>
-          setSelectedTrip((current) => (current?.id === trip.id ? null : trip))
-        }
-        selectedTripId={selectedTrip?.id}
-      />
-
-      {selectedTrip && (
-        <PassengerRouteMap trip={selectedTrip} notify={notify} />
+      {bookingRouteTrip && (
+        <PassengerRouteMap
+          trip={bookingRouteTrip}
+          notify={notify}
+        />
       )}
+      <div className="dashboard-grid">
+        <DrawerTile title="All departures" description="Compare departure times and view road routes" icon="↗"><PassengerUpcomingTrips trips={trips} bookings={bookings} loading={loading} error={error} bookingId={bookingId} onBook={id => bookTrip(id, [])} onGroup={id => user ? setGroupBookingTripId(id) : onSignIn?.()} onViewMap={trip => setSelectedTrip(current => (current?.id === trip.id ? null : trip))} selectedTripId={selectedTrip?.id} />{selectedTrip && <PassengerRouteMap trip={selectedTrip} notify={notify} />}</DrawerTile>
+        <DrawerTile title="Journey history" description="Past trips, group bookings and your feedback" icon="↔"><PassengerBookings bookings={bookings.filter(b => !['reserved','boarded'].includes(b.status))} feedbackList={feedbackList} onRate={setRatingFormFor} onCancel={cancelBooking} onPanic={raisePanic} /><PassengerFeedbackList feedbackList={feedbackList} /></DrawerTile>
+      </div>
+
+      {groupBookingTripId && <GroupBookingModal
+        trip={trips.find(t => t.id === groupBookingTripId)}
+        busy={bookingId !== null}
+        onClose={() => setGroupBookingTripId(null)}
+        onSubmit={companions => bookTrip(groupBookingTripId, companions)}
+      />}
 
       {ratingFormFor && (
         <RatingModal
@@ -1196,12 +1220,12 @@ function PassengerAnnouncements({ announcements }) {
   );
 }
 
-function PassengerBookings({ bookings, feedbackList, onRate, onCancel, onPanic }) {
+function PassengerBookings({ bookings, feedbackList, onRate, onCancel, onPanic, onViewRoute, selectedRouteTripId, }) {
   if (!bookings.length) return null;
   return (
     <article className="module module-wide">
       <div className="module-heading">
-        <span>My bookings</span>
+        <span>Your journeys</span>
         <span className="module-number">{bookings.length}</span>
       </div>
       {bookings.map((b) => {
@@ -1210,15 +1234,29 @@ function PassengerBookings({ bookings, feedbackList, onRate, onCancel, onPanic }
           <div className="trip-row" key={b.id}>
             <span>
               <strong>{b.route_label}</strong>
-              <small>{b.trip_code} · {b.departure_date} · {b.status}</small>
+              <small>{b.trip_code} · {b.departure_date} · {b.status === 'reserved' ? 'Seat reserved — waiting for your operator to confirm boarding' : b.status}</small>
+              {b.boarded_at && <small>Boarding confirmed at {new Date(b.boarded_at).toLocaleTimeString()} · Receipt {b.verification_code}</small>}
+              {b.verification_code && <small>{b.passenger_confirmed_at ? '✓ Trip verified automatically' : 'Verifying automatically — reconnect if this stays pending'}</small>}
+              {b.companions?.length > 0 && <small>Travelling together: {b.companions.map(c => `${c.first_name} ${c.last_name} (${c.status})`).join(', ')} · Shared next of kin: {b.group_next_of_kin_name} · {b.group_next_of_kin_phone}</small>}
             </span>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              {onViewRoute && (
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => onViewRoute(b)}
+                >
+                  {selectedRouteTripId === b.trip
+                    ? 'Hide my route'
+                    : 'View my route'}
+                </button>
+              )}
               {b.status === 'completed' && !alreadyRated && (
                 <button className="primary-button" onClick={() => onRate(b.id)} type="button">
                   Rate this trip
                 </button>
               )}
-              {(b.status === 'reserved' || b.status === 'boarded') && (
+              {b.status === 'reserved' && (
                 <button className="danger-button" onClick={() => onCancel(b.id)} type="button">
                   Cancel
                 </button>
@@ -1294,12 +1332,12 @@ function PassengerFeedbackList({ feedbackList }) {
 }
 
 function PassengerUpcomingTrips({
-  trips, bookings, loading, error, bookingId, onBook, onViewMap, selectedTripId,
+  trips, bookings, loading, error, bookingId, onBook, onGroup, onViewMap, selectedTripId,
 }) {
   return (
     <article className="module module-wide">
       <div className="module-heading">
-        <span>Upcoming trips</span>
+        <span>Available departures</span>
         <span className="module-number">{trips.length}</span>
       </div>
 
@@ -1310,7 +1348,7 @@ function PassengerUpcomingTrips({
       )}
 
       {!loading && trips.map((trip) => {
-        const alreadyBooked = bookings.some((b) => b.trip === trip.id);
+        const alreadyBooked = bookings.some((b) => b.trip === trip.id && !['cancelled', 'no_show'].includes(b.status));
         const isFull = trip.seats_available <= 0;
         const isSelected = selectedTripId === trip.id;
         return (
@@ -1355,6 +1393,7 @@ function PassengerUpcomingTrips({
                   {bookingId === trip.id ? 'Booking…' : 'Book seat'}
                 </button>
               )}
+              {!alreadyBooked && !isFull && trip.seats_available > 1 && <button className="text-button" type="button" onClick={() => onGroup(trip.id)}>Book a group</button>}
             </div>
           </div>
         );
@@ -1367,6 +1406,7 @@ function PassengerRouteMap({ trip, notify }) {
   const [geometry, setGeometry] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [retry, setRetry] = useState(0);
 
   const dep = trip.route.departure;
   const dest = trip.route.destination;
@@ -1378,6 +1418,7 @@ function PassengerRouteMap({ trip, notify }) {
 
     (async () => {
       try {
+        if ([dep.latitude, dep.longitude, dest.latitude, dest.longitude].some(v => v === null || v === undefined || v === '')) throw new Error('Coordinates are not available for this route.');
         const { data } = await api.post('/transport/api/routing/directions/', {
           origin: { lat: Number(dep.latitude), lng: Number(dep.longitude) },
           destination: { lat: Number(dest.latitude), lng: Number(dest.longitude) },
@@ -1385,7 +1426,7 @@ function PassengerRouteMap({ trip, notify }) {
         if (!cancelled) setGeometry(data.geometry || []);
       } catch (err) {
         if (!cancelled) {
-          setError(err.response?.data?.detail || 'Could not load route.');
+          setError(err.response?.data?.detail || err.message || 'Could not load route.');
           notify?.('Route preview unavailable.');
         }
       } finally {
@@ -1394,7 +1435,7 @@ function PassengerRouteMap({ trip, notify }) {
     })();
 
     return () => { cancelled = true; };
-  }, [trip.id]);
+  }, [trip.id, retry]);
 
   const markers = [
     { id: 'dep', lat: Number(dep.latitude), lng: Number(dep.longitude), kind: 'rank', label: dep.name },
@@ -1418,7 +1459,7 @@ function PassengerRouteMap({ trip, notify }) {
       </p>
 
       {loading && <p className="muted">Loading route…</p>}
-      {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
+      {error && <div role="alert"><p>{error}</p><button className="secondary-button" onClick={() => setRetry(n => n + 1)} type="button">Retry road route</button></div>}
 
       {!loading && !error && (
         <LeafletRouteMap geometry={geometry} dep={dep} dest={dest} />
@@ -1426,11 +1467,38 @@ function PassengerRouteMap({ trip, notify }) {
     </article>
   );
 }
+
 function LeafletFitBounds({ points }) {
   const map = useMap();
+
   useEffect(() => {
-    if (points.length > 1) map.fitBounds(points, { padding: [30, 30] });
+    const resize = () => {
+      map.invalidateSize({ pan: false });
+
+      if (points.length > 1) {
+        map.fitBounds(points, {
+          padding: [30, 30],
+          maxZoom: 16,
+        });
+      }
+    };
+
+    const timer = window.setTimeout(resize, 250);
+    const observer =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(resize)
+        : null;
+
+    observer?.observe(map.getContainer());
+    window.addEventListener('resize', resize);
+
+    return () => {
+      window.clearTimeout(timer);
+      observer?.disconnect();
+      window.removeEventListener('resize', resize);
+    };
   }, [map, points]);
+
   return null;
 }
 
@@ -1447,12 +1515,12 @@ function LeafletRouteMap({ geometry, dep, dest }) {
         scrollWheelZoom={false}
         style={{ width: '100%', height: '100%' }}
       >
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
+       <TileLayer
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
+          url="https://tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
         <LeafletFitBounds points={points} />
-        <Polyline positions={points} pathOptions={{ color: '#e3a441', weight: 5 }} />
+        {geometry.length >= 2 && <Polyline positions={geometry} pathOptions={{ color: '#e3a441', weight: 5 }} />}
         <CircleMarker center={depCoord} radius={8} pathOptions={{ color: '#173d3b', fillColor: '#7fbf7c', fillOpacity: 1 }} />
         <CircleMarker center={destCoord} radius={8} pathOptions={{ color: '#173d3b', fillColor: '#d06d5f', fillOpacity: 1 }} />
       </MapContainer>
@@ -1588,6 +1656,7 @@ function Driver({ notify }) {
   const [vehicle, setVehicle] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [mapTrip, setMapTrip] = useState(null);
   const [confirmCode, setConfirmCode] = useState('');
   const [confirmMsg, setConfirmMsg] = useState('');
 
@@ -1646,13 +1715,16 @@ function Driver({ notify }) {
     </article>;
   }
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Johannesburg' });
   const todayTrips = trips.filter((t) => t.departure_date === today);
   const upcoming = trips.filter((t) => t.departure_date > today);
   const past = trips.filter((t) => t.departure_date < today);
 
   return (
     <div className="dashboard-grid">
+      <DrawerTile title="My driver ranks" description="Your rank access and requests to switch ranks" icon="◎"><DriverRankMemberships notify={notify} /></DrawerTile>
+      <article className="module module-wide"><div className="module-heading"><span>Assigned route map</span></div><label>Trip<select value={mapTrip?.id || ''} onChange={e => setMapTrip(trips.find(t => t.id === Number(e.target.value)) || null)}><option value="">Choose a trip to view its road route</option>{trips.map(t => <option key={t.id} value={t.id}>{t.trip_code} · {t.route.departure.name} → {t.route.destination.name}</option>)}</select></label></article>
+      {mapTrip && <PassengerRouteMap trip={mapTrip} notify={notify} />}
       <article className="module module-wide">
         <div className="module-heading">
           <span>My profile</span>
@@ -1738,11 +1810,13 @@ function Driver({ notify }) {
           <span className="module-number">{todayTrips.length}</span>
         </div>
         {todayTrips.length === 0 && <p className="muted">No trips scheduled for today.</p>}
-        {todayTrips.map((t) => (
+        {todayTrips.slice(0, 5).map((t) => (
           <DriverTripRow key={t.id} trip={t} onConfirm={() => acceptTrip(t.trip_code)} />
         ))}
       </article>
 
+      <DrawerTile title="Trip history & upcoming trips" description="Open your assignments across all dates" icon="↔">
+        <article className="module"><h3>All today’s trips</h3>{todayTrips.map(t => <DriverTripRow key={t.id} trip={t} onConfirm={() => acceptTrip(t.trip_code)} />)}</article>
       {upcoming.length > 0 && (
         <article className="module module-wide">
           <div className="module-heading">
@@ -1759,9 +1833,10 @@ function Driver({ notify }) {
             <span>Past trips</span>
             <span className="module-number">{past.length}</span>
           </div>
-          {past.slice(0, 5).map((t) => <DriverTripRow key={t.id} trip={t} />)}
+          {past.map((t) => <DriverTripRow key={t.id} trip={t} />)}
         </article>
       )}
+      </DrawerTile>
     </div>
   );
 }
@@ -1850,22 +1925,12 @@ function Operator({ notify }) {
 
   return (
     <div className="dashboard-grid">
-      <OperatorAlerts notify={notify} />
-      <OperatorAnnouncements notify={notify} />
-      <OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} />
-      <OperatorFeedback notify={notify} />
-      <OperatorMemberships memberships={memberships} />
-      <OperatorRequestRank notify={notify} onRequested={load} />
-
-      <article className="module module-wide" style={{ opacity: 0.55 }}>
-        <div className="module-heading">
-          <span>Complaints</span>
-          <span className="module-number">UI preview</span>
-        </div>
-        <p className="muted">
-          Central contribution tier — Section 5.2.3 of the proposal.
-        </p>
-      </article>
+      <OperatorTripsList trips={trips.filter(t => ['scheduled','boarding','in_progress'].includes(t.status)).slice(0,5)} onSelectTrip={setSelectedTripId} />
+      <DrawerTile title="All my trips" description="Open your full queue and journey history" icon="↗"><OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} /></DrawerTile>
+      <DrawerTile title="Passenger alerts" description="Review and respond to active alerts" icon="!"><OperatorAlerts notify={notify} /></DrawerTile>
+      <DrawerTile title="Feedback" description="Ratings, complaints and responses" icon="☆"><OperatorFeedback notify={notify} /></DrawerTile>
+      <DrawerTile title="Rank access" description="Your memberships and requests to another rank" icon="◎"><OperatorMemberships memberships={memberships} /><OperatorRequestRank notify={notify} onRequested={load} /></DrawerTile>
+      <DrawerTile title="Announcements" description="Service messages for your passengers" icon="↗"><OperatorAnnouncements notify={notify} /></DrawerTile>
     </div>
   );
 }
@@ -2229,7 +2294,7 @@ function OperatorFeedback({ notify }) {
 }
 
 function OperatorTripsList({ trips, onSelectTrip }) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Johannesburg' });
   const todayTrips = trips.filter((t) => t.departure_date === today);
   const upcoming = trips.filter((t) => t.departure_date > today);
 
@@ -2448,7 +2513,13 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     }
   }
 
-  useEffect(() => { load(); }, [tripId]);
+  useEffect(() => {
+    load();
+    const timer = setInterval(async () => {
+      try { const { data } = await api.get(`/transport/api/my-trips/${tripId}/manifest/`); setTrip(data); } catch { /* retry later */ }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [tripId]);
 
   async function engage() {
     try {
@@ -2461,7 +2532,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   }
 
   async function release() {
-    if (!window.confirm('Release this trip? Remaining unverified passengers will be marked no-show.')) return;
+    if (!window.confirm('Depart this trip? Passengers who have not boarded will be marked no-show.')) return;
     try {
       const { data } = await api.post(`/transport/api/my-trips/${tripId}/release/`);
       notify(`Trip released. ${data.bumped} unverified passenger(s) bumped.`);
@@ -2487,7 +2558,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
         `/transport/api/my-trips/${tripId}/bookings/${bookingId}/verify/`
       );
       setLastVerifiedCode({ bookingId, code: data.verification_code });
-      notify(`Verified. Code: ${data.verification_code}`);
+      notify('Passenger boarded. Receipt available in their app.');
       if (data.bumped > 0) {
         notify(`Trip full — ${data.bumped} unverified passenger(s) bumped.`);
       }
@@ -2536,7 +2607,10 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   const engaged = trip.is_engaged;
 
   // -------- Engage prompt --------
-  if (!engaged) {
+  if (!engaged && trip.status !== 'in_progress') {
+    if (['completed', 'cancelled', 'expired'].includes(trip.status)) return (
+      <article className="module module-wide"><p>{trip.trip_code} · {trip.status}</p><button className="secondary-button" onClick={onBack}>← Back</button></article>
+    );
     return (
       <>
         <article className="module module-wide">
@@ -2586,16 +2660,55 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
           <span>{trip.trip_code} · {trip.status.toUpperCase()}</span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="secondary-button" onClick={onBack} type="button">← Back</button>
-            <button className="primary-button" onClick={completeTrip} type="button">
+            <button className="primary-button" onClick={completeTrip} disabled={trip.status !== 'in_progress'} type="button">
               Complete trip
             </button>
-            <button className="danger-button" onClick={release} type="button">
-              Release (abandon)
+            <button className="danger-button" onClick={release} disabled={trip.status !== 'boarding' || !trip.assets_verified_at} type="button">
+              Depart trip
             </button>
           </div>
         </div>
       </article>
-
+      <article className="module module-wide">
+        <div className="module-heading">
+          <span>Asset verification</span>
+          <span className="module-number">
+            {trip.assets_verified_at ? 'Verified' : 'Required'}
+          </span>
+        </div>
+        {trip.assets_verified_at ? (
+          <p className="muted">
+            Verified at {new Date(trip.assets_verified_at).toLocaleTimeString()}.
+            Driver: <strong>{trip.driver_name}</strong> · Vehicle: <strong>{trip.vehicle_plate}</strong>.
+          </p>
+        ) : (
+          <>
+            <p className="muted">
+              Confirm on-site that the driver and vehicle match the assignment before
+              registering passengers.
+            </p>
+            <p className="muted">
+              Assigned driver: <strong>{trip.driver_name || 'Not assigned'}</strong> · Vehicle:{' '}
+              <strong>{trip.vehicle_plate || 'Not assigned'}</strong>
+            </p>
+            <button
+              className="primary-button"
+              onClick={async () => {
+                try {
+                  await api.post(`/transport/api/my-trips/${tripId}/verify-assets/`);
+                  notify('Assets verified. You can now register passengers.');
+                  load();
+                } catch (err) {
+                  notify(err.response?.data?.detail || 'Verification failed.');
+                }
+              }}
+              type="button"
+            >
+              Verify driver and vehicle on-site
+            </button>
+          </>
+        )}
+      </article>
       <article className="module module-wide">
         <div className="module-heading">
           <span>Booked passengers (app users)</span>
@@ -2603,32 +2716,35 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
         </div>
         {booked.length === 0 && <p className="muted">No bookings yet.</p>}
         {booked.map((b) => (
-          <div className="trip-row" key={b.booking_id}>
+          <div key={b.booking_id}>
+          <div className="trip-row">
             <span>
               <strong>{b.name}</strong>
               <small>
                 {b.phone}
                 {b.verification_code ? ` · code ${b.verification_code}` : ''}
-                {b.code_verified ? ' ✓' : ''}
+                {b.passenger_confirmed_at ? ' · verified automatically by passenger app' : ''}
               </small>
             </span>
             {b.status === 'reserved' ? (
               <button
                 className="primary-button"
                 onClick={() => verifyBooking(b.booking_id)}
-                disabled={verifyingId === b.booking_id}
+                disabled={verifyingId !== null || !trip.assets_verified_at || trip.status !== 'boarding'}
                 type="button"
               >
-                {verifyingId === b.booking_id ? 'Verifying…' : 'Verify + issue code'}
+                {verifyingId === b.booking_id ? 'Boarding…' : 'Board passenger'}
               </button>
             ) : (
               <span className="status-pill">{b.status}</span>
             )}
           </div>
+          <GroupBoarding trip={trip} leader={b} notify={notify} onBoarded={load} />
+          </div>
         ))}
         {lastVerifiedCode && (
           <p className="muted" style={{ marginTop: 12 }}>
-            Latest code: <strong>{lastVerifiedCode.code}</strong> — call out the passenger and give it to them.
+            Boarding receipt: <strong>{lastVerifiedCode.code}</strong> — available automatically in the passenger app.
           </p>
         )}
       </article>
@@ -2736,13 +2852,12 @@ function Administrator({ notify }) {
         </p>
       </article>
 
-      <AdminMemberships notify={notify} />
-      <AdminScheduleTrip notify={notify} />
-      <AdminFeedback notify={notify} />
-      <AdminFlags notify={notify} />
-      <AdminTrips notify={notify} />
-      <AdminAccounts notify={notify} />
-      <AdminDrivers notify={notify} />
+      <DrawerTile title="Departure queue" description="Waiting taxis, queue expiry and new departures" icon="↗"><DepartureQueue /><AdminScheduleTrip notify={notify} /></DrawerTile>
+      <DrawerTile title="Rank applications" description="Review operator and driver rank requests" icon="＋"><AdminMemberships notify={notify} /><AdminDriverRankRequests notify={notify} /></DrawerTile>
+      <DrawerTile title="Drivers & DOT checks" description="Licences, demo registry checks and verification status" icon="✓"><AdminDrivers notify={notify} /></DrawerTile>
+      <DrawerTile title="Accounts" description="Search people and manage account access" icon="◎"><AdminAccounts notify={notify} /></DrawerTile>
+      <DrawerTile title="Trip management" description="Journey history and trip controls" icon="↔"><AdminTrips notify={notify} /></DrawerTile>
+      <DrawerTile title="Feedback & flags" description="Passenger feedback and reported trip issues" icon="! "><AdminFeedback notify={notify} /><AdminFlags notify={notify} /></DrawerTile>
     </div>
   );
 }
@@ -3273,6 +3388,7 @@ function AdminFlags({ notify }) {
 }
 
 function AdminTrips({ notify }) {
+  const [page, setPage] = useState(0);
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -3305,7 +3421,7 @@ function AdminTrips({ notify }) {
       <p className="muted">All trips scheduled in the system. Cancel to halt a trip.</p>
       {loading && <p className="muted">Loading…</p>}
       {!loading && trips.length === 0 && <p className="muted">No trips scheduled.</p>}
-      {trips.slice(0, 30).map((t) => (
+      {trips.slice(page * 10, page * 10 + 10).map((t) => (
         <div className="trip-row" key={t.id}>
           <span>
             <strong>{t.trip_code} · {t.route.departure.name} → {t.route.destination.name}</strong>
@@ -3313,18 +3429,20 @@ function AdminTrips({ notify }) {
               {t.operator_name} · {t.departure_date} · {t.seats_taken}/{t.seat_capacity} seats · {t.status}
             </small>
           </span>
-          {t.status !== 'cancelled' && t.status !== 'completed' && (
+          {!['cancelled', 'completed', 'expired'].includes(t.status) && (
             <button className="danger-button" onClick={() => cancelTrip(t.id)} type="button">
               Cancel trip
             </button>
           )}
         </div>
       ))}
+      <PageControls page={page} total={trips.length} onChange={setPage} />
     </article>
   );
 }
 
 function AdminAccounts({ notify }) {
+  const [page, setPage] = useState(0);
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState('');
@@ -3337,7 +3455,7 @@ function AdminAccounts({ notify }) {
       if (q) params.set('q', q);
       if (role) params.set('role', role);
       const { data } = await api.get(`/transport/api/admin/users/?${params.toString()}`);
-      setItems(data);
+      setItems(data); setPage(0);
     } catch { /* ignore */ }
     finally { setLoading(false); }
   }
@@ -3383,7 +3501,7 @@ function AdminAccounts({ notify }) {
       {loading && <p className="muted">Loading…</p>}
       {!loading && items.length === 0 && <p className="muted">No accounts match.</p>}
 
-      {items.map((u) => (
+      {items.slice(page * 10, page * 10 + 10).map((u) => (
         <div className="trip-row" key={u.id}>
           <span>
             <strong>{u.name}</strong>
@@ -3404,6 +3522,7 @@ function AdminAccounts({ notify }) {
           </div>
         </div>
       ))}
+      <PageControls page={page} total={items.length} onChange={setPage} />
     </article>
   );
 }
@@ -3534,6 +3653,7 @@ function PasswordResetModal({ onClose, notify }) {
 
 function AdminDrivers({ notify }) {
   const [items, setItems] = useState([]);
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
   const [scope, setScope] = useState('pending');
 
@@ -3542,6 +3662,7 @@ function AdminDrivers({ notify }) {
     try {
       const { data } = await api.get(`/transport/api/admin/drivers/?scope=${scope}`);
       setItems(data);
+      setPage(0);
     } catch { /* ignore */ }
     finally { setLoading(false); }
   }
@@ -3593,7 +3714,7 @@ function AdminDrivers({ notify }) {
       {loading && <p className="muted">Loading…</p>}
       {!loading && items.length === 0 && <p className="muted">No drivers in this view.</p>}
 
-      {items.map((d) => (
+      {items.slice(page * 10, page * 10 + 10).map((d) => (
         <div key={d.id} style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
             <span>
@@ -3634,6 +3755,7 @@ function AdminDrivers({ notify }) {
           </button>
         </div>
       ))}
+      <PageControls page={page} total={items.length} onChange={setPage} />
     </article>
   );
 }

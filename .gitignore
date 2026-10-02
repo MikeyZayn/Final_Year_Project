@@ -1,73 +1,20 @@
-<<<<<<< HEAD
-# ============ Python / Django ============
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
+Add-Content .gitignore @'
+
+# Local environments and generated files
 venv/
-env/
-ENV/
 .venv/
-*.egg-info/
-.pytest_cache/
-db.sqlite3
-db.sqlite3-journal
-media/
-staticfiles/
-*.log
-
-# ============ Secrets ============
-=======
-# --- OS files ---
-.DS_Store
-Thumbs.db
-
-# --- IDE / editor ---
-.vscode/
-.idea/
-*.swp
-
-# --- Environment / secrets ---
->>>>>>> origin/develop
-.env
-.env.local
-*.pem
-*.key
-
-# ============ Node / Vite ============
 node_modules/
-npm-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-dist/
-build/
-.vite/
-
-# ============ Editor / OS ============
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-Thumbs.db
-
-# ============ Local-only folders (not part of the repo) ============
-themba/
-themba_reference/
-
-# ============ DOT registry — schema yes, db file no ============
-dot_registry/*.db
-dot_registry/*.sqlite*
-
-# --- ML artifacts (scaffold parity) ---
-*.csv.bak
-/data/raw/
-/models/*.pkl
-/models/*.h5
-
-# Local env files
+__pycache__/
+*.pyc
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Extra extracted project copies
+/themba/
+/themba_reference/
+'@
