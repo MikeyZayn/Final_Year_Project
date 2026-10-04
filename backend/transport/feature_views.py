@@ -114,7 +114,7 @@ def board_group(request, trip_id, booking_id):
     trip = get_object_or_404(Trip.objects.select_for_update(), pk=trip_id, operator=op, engaged_by=op)
     if trip.status != Trip.Status.BOARDING or not trip.assets_verified_at:
         return Response({"detail": "Verify assets on a boarding trip first."}, status=400)
-    leader = get_object_or_404(Booking, pk=booking_id, trip=trip, group_leader__isnull=True, passenger__isnull=False)
+    leader = get_object_or_404(Booking, pk=booking_id, trip=trip, group_leader__isnull=True)
     # Explicitly select who is physically present; never auto-board absent members.
     ids = serializers.ListField(child=serializers.IntegerField(min_value=1), allow_empty=False, max_length=51).run_validation(request.data.get('booking_ids'))
     ids = set(ids)

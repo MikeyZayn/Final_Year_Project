@@ -10,6 +10,7 @@ import { confirmDeliveredBookings } from './services/autoBoarding.js';
 import { DriverRankMemberships, AdminDriverRankRequests, GroupBookingModal, GroupBoarding, DepartureQueue } from './features/TripFeatures.jsx';
 import DriverPage from './pages/DriverPage.jsx';
 import ThembaMap from './components/ThembaMap.jsx';
+import { TripEditor, TripGroupEditor, apiMessage } from './features/TripManagement.jsx';
 
 const demoUsers = {
   passenger: 'Sibusiso Dlamini',
@@ -1077,6 +1078,8 @@ function Passenger({ notify, onSignIn }) {
   return (
     <>
       <PassengerPanicBanner alert={panicAlert} onCancel={cancelPanic} />
+      {bookingRouteTrip && <PassengerRouteMap trip={bookingRouteTrip} notify={notify} onClose={() => setBookingRouteTrip(null)} />}
+
 
       <QuickBooking trips={trips} bookings={bookings} busy={bookingId} signedIn={!!user}
         onSignIn={onSignIn} onBook={bookTrip} onGroup={id => setGroupBookingTripId(id)}
@@ -1115,14 +1118,8 @@ function Passenger({ notify, onSignIn }) {
         }}
       />
 
-      {bookingRouteTrip && (
-        <PassengerRouteMap
-          trip={bookingRouteTrip}
-          notify={notify}
-        />
-      )}
       <div className="dashboard-grid">
-        <DrawerTile title="All departures" description="Compare departure times and view road routes" icon="↗"><PassengerUpcomingTrips trips={trips} bookings={bookings} loading={loading} error={error} bookingId={bookingId} onBook={id => bookTrip(id, [])} onGroup={id => user ? setGroupBookingTripId(id) : onSignIn?.()} onViewMap={trip => setSelectedTrip(current => (current?.id === trip.id ? null : trip))} selectedTripId={selectedTrip?.id} />{selectedTrip && <PassengerRouteMap trip={selectedTrip} notify={notify} />}</DrawerTile>
+        <DrawerTile title="All departures" description="Compare departure times and view road routes" icon="↗">{closeDrawer => <>{selectedTrip && <PassengerRouteMap trip={selectedTrip} notify={notify} onClose={() => {setSelectedTrip(null); closeDrawer();}} />}<PassengerUpcomingTrips trips={trips} bookings={bookings} loading={loading} error={error} bookingId={bookingId} onBook={id => bookTrip(id, [])} onGroup={id => user ? setGroupBookingTripId(id) : onSignIn?.()} onViewMap={trip => setSelectedTrip(current => (current?.id === trip.id ? null : trip))} selectedTripId={selectedTrip?.id} /></>}</DrawerTile>
         <DrawerTile title="Journey history" description="Past trips, group bookings and your feedback" icon="↔"><PassengerBookings bookings={bookings.filter(b => !['reserved','boarded'].includes(b.status))} feedbackList={feedbackList} onRate={setRatingFormFor} onCancel={cancelBooking} onPanic={raisePanic} /><PassengerFeedbackList feedbackList={feedbackList} /></DrawerTile>
       </div>
 
@@ -1237,6 +1234,7 @@ function PassengerBookings({ bookings, feedbackList, onRate, onCancel, onPanic, 
               <small>{b.trip_code} · {b.departure_date} · {b.status === 'reserved' ? 'Seat reserved — waiting for your operator to confirm boarding' : b.status}</small>
               {b.boarded_at && <small>Boarding confirmed at {new Date(b.boarded_at).toLocaleTimeString()} · Receipt {b.verification_code}</small>}
               {b.verification_code && <small>{b.passenger_confirmed_at ? '✓ Trip verified automatically' : 'Verifying automatically — reconnect if this stays pending'}</small>}
+              {b.shared_next_of_kin?.name && <small>Trip emergency contact: {b.shared_next_of_kin.name} · {b.shared_next_of_kin.phone}{b.group_leader_id ? ' · Shared with your travel group' : ''}</small>}
               {b.companions?.length > 0 && <small>Travelling together: {b.companions.map(c => `${c.first_name} ${c.last_name} (${c.status})`).join(', ')} · Shared next of kin: {b.group_next_of_kin_name} · {b.group_next_of_kin_phone}</small>}
             </span>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1402,7 +1400,15 @@ function PassengerUpcomingTrips({
   );
 }
 
-function PassengerRouteMap({ trip, notify }) {
+function PassengerRouteMap({ trip, notify, onClose }) {
+  const panel = useRef(null);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      panel.current?.scrollIntoView?.({behavior: 'smooth', block: 'start'});
+      panel.current?.focus({preventScroll: true});
+    }, 50);
+    return () => window.clearTimeout(timer);
+  }, [trip.id]);
   const [geometry, setGeometry] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -1443,13 +1449,14 @@ function PassengerRouteMap({ trip, notify }) {
   ];
 
   const polylines = geometry.length >= 2
-    ? [{ id: 'route', positions: geometry, color: '#e3a441', weight: 5 }]
+    ? [{ id: 'route', positions: geometry, color: '#18834b', weight: 5 }]
     : [];
 
   return (
-    <article className="module module-wide">
+    <article ref={panel} tabIndex={-1} className="module module-wide route-preview-panel">
       <div className="module-heading">
-        <span>Route preview</span>
+        <span>Your route</span>
+        {onClose && <button className="secondary-button" type="button" onClick={onClose}>Hide route · back to dashboard</button>}
         <span className="module-number">{dep.name} → {dest.name}</span>
       </div>
       <p className="muted">
@@ -1462,7 +1469,7 @@ function PassengerRouteMap({ trip, notify }) {
       {error && <div role="alert"><p>{error}</p><button className="secondary-button" onClick={() => setRetry(n => n + 1)} type="button">Retry road route</button></div>}
 
       {!loading && !error && (
-        <LeafletRouteMap geometry={geometry} dep={dep} dest={dest} />
+        <ThembaMap markers={markers} polylines={polylines} fitKey={trip.id} height="420px" />
       )}
     </article>
   );
@@ -1722,9 +1729,10 @@ function Driver({ notify }) {
 
   return (
     <div className="dashboard-grid">
+      {mapTrip && <PassengerRouteMap trip={mapTrip} notify={notify} onClose={() => setMapTrip(null)} />}
       <DrawerTile title="My driver ranks" description="Your rank access and requests to switch ranks" icon="◎"><DriverRankMemberships notify={notify} /></DrawerTile>
       <article className="module module-wide"><div className="module-heading"><span>Assigned route map</span></div><label>Trip<select value={mapTrip?.id || ''} onChange={e => setMapTrip(trips.find(t => t.id === Number(e.target.value)) || null)}><option value="">Choose a trip to view its road route</option>{trips.map(t => <option key={t.id} value={t.id}>{t.trip_code} · {t.route.departure.name} → {t.route.destination.name}</option>)}</select></label></article>
-      {mapTrip && <PassengerRouteMap trip={mapTrip} notify={notify} />}
+
       <article className="module module-wide">
         <div className="module-heading">
           <span>My profile</span>
@@ -2488,6 +2496,8 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   const [trip, setTrip] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [assetVerificationError, setAssetVerificationError] = useState('');
+  const [verifyingAssets, setVerifyingAssets] = useState(false);
 
   // Walk-in form
   const [walkInName, setWalkInName] = useState('');
@@ -2631,6 +2641,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
           </div>
         </article>
 
+        <article className="module module-wide"><TripEditor trip={trip} notify={notify} onSaved={load} /></article>
         <article className="module module-wide">
           <div className="module-heading"><span>Work this trip?</span></div>
           <p className="muted">
@@ -2669,6 +2680,8 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
           </div>
         </div>
       </article>
+      <article className="module module-wide"><TripEditor trip={trip} notify={notify} onSaved={load} /></article>
+      <TripGroupEditor trip={trip} notify={notify} onSaved={load} />
       <article className="module module-wide">
         <div className="module-heading">
           <span>Asset verification</span>
@@ -2694,18 +2707,33 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
             <button
               className="primary-button"
               onClick={async () => {
+                setAssetVerificationError('');
+                setVerifyingAssets(true);
                 try {
                   await api.post(`/transport/api/my-trips/${tripId}/verify-assets/`);
                   notify('Assets verified. You can now register passengers.');
-                  load();
+                  await load();
                 } catch (err) {
-                  notify(err.response?.data?.detail || 'Verification failed.');
+                  const detail = err.response?.data?.detail;
+                  const message = typeof detail === 'string' && detail.trim()
+                    ? detail
+                    : !err.response
+                      ? 'Cannot reach the server. Check your connection and that the backend is running, then try again.'
+                      : `Verification failed (HTTP ${err.response.status}). Please try again or contact the administrator.`;
+                  setAssetVerificationError(message);
+                  notify(message);
+                } finally {
+                  setVerifyingAssets(false);
                 }
               }}
+              disabled={verifyingAssets}
               type="button"
             >
-              Verify driver and vehicle on-site
+              {verifyingAssets ? 'Verifying...' : 'Verify driver and vehicle on-site'}
             </button>
+            {assetVerificationError && (
+              <p className="asset-verification-error" role="alert">{assetVerificationError}</p>
+            )}
           </>
         )}
       </article>
@@ -2739,7 +2767,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
               <span className="status-pill">{b.status}</span>
             )}
           </div>
-          <GroupBoarding trip={trip} leader={b} notify={notify} onBoarded={load} />
+          {!b.group_leader_id && <GroupBoarding trip={trip} leader={b} notify={notify} onBoarded={load} />}
           </div>
         ))}
         {lastVerifiedCode && (
@@ -2786,6 +2814,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
           </p>
         )}
 
+        {walkIns.filter(b => !b.group_leader_id).map(b => <GroupBoarding key={b.booking_id} trip={trip} leader={b} notify={notify} onBoarded={load} />)}
         {walkIns.length > 0 && (
           <>
             <div className="section-title" style={{ marginTop: 20 }}>Registered walk-ins</div>
@@ -3397,16 +3426,17 @@ function AdminTrips({ notify }) {
     try {
       const { data } = await api.get('/transport/api/admin/trips/');
       setTrips(data);
-    } catch { /* ignore */ }
+    } catch (err) { notify(apiMessage(err)); }
     finally { setLoading(false); }
   }
 
   useEffect(() => { load(); }, []);
 
   async function cancelTrip(id) {
-    if (!window.confirm('Cancel this trip? All unboarded passengers will be marked cancelled.')) return;
+    const reason = window.prompt('Reason for cancelling this trip (saved to its audit history):');
+    if (!reason?.trim()) return;
     try {
-      await api.post(`/transport/api/admin/trips/${id}/cancel/`);
+      await api.post(`/transport/api/admin/trips/${id}/cancel/`, {reason: reason.trim()});
       notify('Trip cancelled.');
       load();
     } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
@@ -3418,11 +3448,11 @@ function AdminTrips({ notify }) {
         <span>Trip management</span>
         <span className="module-number">{trips.length}</span>
       </div>
-      <p className="muted">All trips scheduled in the system. Cancel to halt a trip.</p>
+      <p className="muted">Trips at your rank. Edit assignments and schedules, or open the full change history.</p>
       {loading && <p className="muted">Loading…</p>}
       {!loading && trips.length === 0 && <p className="muted">No trips scheduled.</p>}
       {trips.slice(page * 10, page * 10 + 10).map((t) => (
-        <div className="trip-row" key={t.id}>
+        <div className="admin-trip-card" key={t.id}>
           <span>
             <strong>{t.trip_code} · {t.route.departure.name} → {t.route.destination.name}</strong>
             <small>
@@ -3434,6 +3464,7 @@ function AdminTrips({ notify }) {
               Cancel trip
             </button>
           )}
+          <TripEditor trip={t} admin notify={notify} onSaved={load} />
         </div>
       ))}
       <PageControls page={page} total={trips.length} onChange={setPage} />

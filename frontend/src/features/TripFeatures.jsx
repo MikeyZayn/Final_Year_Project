@@ -94,7 +94,7 @@ export function GroupBookingModal({ trip, busy, onClose, onSubmit }) {
 }
 
 export function GroupBoarding({ trip, leader, notify, onBoarded }) {
-  const group = [leader, ...(trip.walk_in_passengers || []).filter(b => b.group_leader_id === leader.booking_id)];
+  const group = [leader, ...[...(trip.booked_passengers || []), ...(trip.walk_in_passengers || [])].filter(b => b.group_leader_id === leader.booking_id)];
   const reserved = group.filter(b => b.status === 'reserved');
   const [selected, setSelected] = useState([]);
   const [busy, setBusy] = useState(false);

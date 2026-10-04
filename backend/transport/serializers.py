@@ -81,7 +81,7 @@ class TripSerializer(serializers.ModelSerializer):
     class Meta:
         model = Trip
         fields = [
-            "id", "trip_code", "operator_name",
+            "id", "trip_code", "operator_name", "driver_id", "vehicle_id", "operator_id",
             "route", "departure_date", "expected_departure_time",
             "actual_departure_time", "seat_capacity", "seats_taken",
             "seats_available", "status", "driver_name", "vehicle_plate",
@@ -139,6 +139,11 @@ class TripWriteSerializer(serializers.ModelSerializer):
 
 
 class BookingSerializer(serializers.ModelSerializer):
+    shared_next_of_kin = serializers.SerializerMethodField()
+    def get_shared_next_of_kin(self, obj):
+        leader = obj.group_leader or obj
+        return {"name": leader.group_next_of_kin_name, "phone": leader.group_next_of_kin_phone}
+
     route = RouteSerializer(source="trip.route", read_only=True)
     verification_code = serializers.CharField(source="verification_code.code", read_only=True, default=None)
     passenger_confirmed_at = serializers.DateTimeField(source="verification_code.passenger_confirmed_at", read_only=True, default=None)
@@ -153,7 +158,7 @@ class BookingSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = [
-            "id", "trip", "trip_code", "route_label", "route",
+            "id", "trip", "trip_code", "route_label", "route", "group_leader_id", "shared_next_of_kin",
             "departure_date", "status", "booked_at", "boarded_at", "verification_code", "trip_status", "passenger_confirmed_at", "companions", "group_next_of_kin_name", "group_next_of_kin_phone",
             "passenger_name", "walk_in_name", "walk_in_phone",
             "walk_in_next_of_kin_name", "walk_in_next_of_kin_phone",
@@ -162,7 +167,7 @@ class BookingSerializer(serializers.ModelSerializer):
         read_only_fields = ["status", "booked_at"]
 
     def get_companions(self, obj):
-        return [{"id": c.id, "first_name": c.companion_first_name, "last_name": c.companion_last_name, "status": c.status} for c in obj.companions.all()]
+        return [{"id": c.id, "first_name": c.companion_first_name or (c.passenger.first_name if c.passenger else c.walk_in_name), "last_name": c.companion_last_name or (c.passenger.last_name if c.passenger else ""), "status": c.status} for c in obj.companions.all()]
 
     def get_route_label(self, obj):
         return f"{obj.trip.route.departure.name} → {obj.trip.route.destination.name}"
