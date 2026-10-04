@@ -249,7 +249,7 @@ class Booking(models.Model):
         ordering = ["-booked_at"]
 
     def display_name(self):
-        if self.group_leader_id:
+        if self.group_leader_id and self.companion_first_name:
             return f"{self.companion_first_name} {self.companion_last_name}".strip()
         if self.passenger:
             return f"{self.passenger.first_name} {self.passenger.last_name}".strip() or self.passenger.phone
@@ -509,3 +509,17 @@ class QueueEntry(models.Model):
 
     def __str__(self):
         return f"#{self.position} {self.vehicle.plate_number} @ {self.rank.name}"
+
+class TripChange(models.Model):
+    """Append-only API history with names and values preserved at edit time."""
+    trip = models.ForeignKey(Trip, on_delete=models.PROTECT, related_name="changes")
+    changed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True)
+    actor_name = models.CharField(max_length=200)
+    actor_role = models.CharField(max_length=30)
+    changed_at = models.DateTimeField(auto_now_add=True)
+    reason = models.TextField()
+    before = models.JSONField()
+    after = models.JSONField()
+
+    class Meta:
+        ordering = ["-changed_at", "-id"]

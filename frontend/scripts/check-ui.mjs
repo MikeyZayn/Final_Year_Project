@@ -3,7 +3,7 @@ import { JSDOM } from 'jsdom';
 import { createServer } from 'vite';
 
 const dom = new JSDOM('<!doctype html><div id="root"></div>', { url: 'http://localhost:5173', pretendToBeVisual: true });
-for (const key of ['window', 'document', 'localStorage', 'HTMLElement', 'Event', 'MouseEvent']) globalThis[key] = dom.window[key];
+for (const key of ['window', 'document', 'localStorage', 'sessionStorage', 'Element', 'HTMLElement', 'SVGElement', 'Event', 'MouseEvent']) globalThis[key] = dom.window[key];
 Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, configurable: true });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const React = await import('react');
@@ -110,6 +110,62 @@ try {
   await act(async () => document.querySelector('input[type="checkbox"]').click());
   assert.equal(button('Board 1').disabled, false);
   console.log('PASS: operator must select present group members before boarding.');
+
+  const {TripEditor, TripGroupEditor} = await server.ssrLoadModule('/src/features/TripManagement.jsx');
+  let editPayload = null;
+  let groupPayload = null;
+  api.defaults.adapter = async config => {
+    let data = [];
+    if (config.url.endsWith('/edit-options/')) data = {drivers: [{id: 1, name: 'Current driver'}, {id: 2, name: 'Approved replacement'}], vehicles: [{id: 1, plate_number: 'ABC', seat_capacity: 15}]};
+    if (config.url.endsWith('/reassign/')) editPayload = JSON.parse(config.data);
+    if (config.url.endsWith('/group/')) groupPayload = JSON.parse(config.data);
+    return {data, status: 200, statusText: 'OK', headers: {}, config};
+  };
+  const editTrip = {...trip, driver_id: 1, vehicle_id: 1, operator_id: 1, status: 'boarding', route: {...trip.route, id: 1}, driver_name: 'Current driver'};
+  await act(async () => root.render(React.createElement(TripEditor, {trip: editTrip, notify() {}, onSaved() {}})));
+  await click('Change driver / vehicle');
+  const driverSelect = document.querySelector('select');
+  await act(async () => {selectSetter.call(driverSelect, '2'); driverSelect.dispatchEvent(new Event('change', {bubbles: true}));});
+  assert.equal(document.querySelector('input[type=date]'), null, 'Operators must not see schedule controls');
+  const textSetter = Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value').set;
+  for (const [i, el] of [...document.querySelectorAll('textarea')].entries()) {
+    await act(async () => {textSetter.call(el, i ? 'Driver unavailable' : 'Shift adjustment'); el.dispatchEvent(new Event('input', {bubbles:true}));});
+  }
+  await act(async () => document.querySelector('form').dispatchEvent(new Event('submit', {bubbles:true, cancelable:true})));
+  await flush();
+  assert.deepEqual(editPayload, {reason: 'Shift adjustment', driver_id: 2, driver_reason: 'Driver unavailable'});
+  console.log('PASS: operator editor sends only changed assets and explicit reasons.');
+
+  const registered = {booking_id: 13, name: 'Registered sibling', status: 'reserved', group_size: 1};
+  const familyTrip = {...editTrip, seats_available: 5, booked_passengers: [leader, registered], walk_in_passengers: []};
+  await act(async () => root.render(React.createElement(TripGroupEditor, {trip: familyTrip, notify() {}, onSaved() {}})));
+  const leadSelect = document.querySelector('select');
+  await act(async () => {selectSetter.call(leadSelect, '11'); leadSelect.dispatchEvent(new Event('change', {bubbles:true}));});
+  await act(async () => document.querySelector('fieldset input').click());
+  await click('Add child / companion');
+  const companionFields = document.querySelectorAll('.companion-row input');
+  await input(companionFields[0], 'Child'); await input(companionFields[1], 'Family');
+  const consent = [...document.querySelectorAll('input[type=checkbox]')].at(-1);
+  await act(async () => consent.click());
+  await act(async () => document.querySelector('form').dispatchEvent(new Event('submit', {bubbles:true, cancelable:true})));
+  await flush();
+  assert.equal(groupPayload.leader_id, 11);
+  assert.deepEqual(groupPayload.booking_ids, [13]);
+  assert.deepEqual(groupPayload.companions, [{first_name: 'Child', last_name: 'Family'}]);
+  assert.equal(groupPayload.next_of_kin_phone, '0822222222');
+  console.log('PASS: trip groups combine registered members and children with one emergency contact.');
+
+  const {default: ThembaMap} = await server.ssrLoadModule('/src/components/ThembaMap.jsx');
+  await act(async () => root.render(React.createElement(ThembaMap, {markers: [
+    {id:'dep', kind:'rank', label:'Ongoye Main Rank', lat:-28.84, lng:31.89},
+    {id:'dest', kind:'destination', label:'Empangeni', lat:-28.74, lng:31.89}
+  ]})));
+  await act(async () => document.querySelector('[aria-label="Ongoye Main Rank operating hours"]').click());
+  assert.match(document.querySelector('.leaflet-popup-content').textContent, /06:30–19:30 daily/);
+  await act(async () => document.querySelector('[aria-label="Empangeni operating hours"]').click());
+  assert.match(document.querySelector('.leaflet-popup-content').textContent, /Empangeni/);
+  console.log('PASS: both rank markers/cards open operating hours in map popups.');
+
 } finally {
   await act(async () => root.unmount());
   await server.close();

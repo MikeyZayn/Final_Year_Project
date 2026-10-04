@@ -1,7 +1,11 @@
 from django.urls import path
-from . import views, feature_views
+from . import views, feature_views, trip_management, trip_groups
 
 urlpatterns = [
+    path("api/trips/<int:trip_id>/history/", trip_management.history, name="trip_history"),
+    path("api/trips/<int:trip_id>/edit-options/", trip_management.options, name="trip_edit_options"),
+    path("api/my-trips/<int:trip_id>/group/", trip_groups.save_group, name="trip_group"),
+
     path("api/driver/memberships/", feature_views.driver_memberships, name="driver_memberships"),
     path("api/admin/driver-memberships/", feature_views.pending_driver_memberships, name="pending_driver_memberships"),
     path("api/admin/driver-memberships/<int:membership_id>/approve/", feature_views.decide_driver_membership, {"decision": "approve"}, name="approve_driver_membership"),
@@ -31,7 +35,7 @@ urlpatterns = [
     path("api/admin/flags/",    views.api_admin_flags,        name="api_admin_flags"),
 
     path("api/available-assets/",                       views.api_available_drivers_vehicles, name="api_available_assets"),
-    path("api/my-trips/<int:trip_id>/reassign/",        views.api_reassign_trip,              name="api_reassign_trip"),
+    path("api/my-trips/<int:trip_id>/reassign/",        trip_management.operator_edit,              name="api_reassign_trip"),
     path("api/my-trips/<int:trip_id>/asset-changes/",   views.api_trip_asset_changes,         name="api_trip_asset_changes"),
     path("api/my-trips/<int:trip_id>/engage/",                           views.api_engage_trip,    name="api_engage_trip"),
     path("api/my-trips/<int:trip_id>/release/",                        views.api_release_trip,   name="api_release_trip"),
@@ -62,7 +66,7 @@ urlpatterns = [
     path("api/admin/trip-flags/",                  views.api_admin_trip_flags,               name="api_admin_trip_flags"),
     path("api/admin/trip-flags/<int:flag_id>/acknowledge/", views.api_admin_acknowledge_flag, name="api_admin_acknowledge_flag"),
     path("api/admin/trip-flags/<int:flag_id>/resolve/",     views.api_admin_resolve_flag,     name="api_admin_resolve_flag"),
-    path("api/admin/trips/<int:trip_id>/cancel/",  views.api_admin_cancel_trip,              name="api_admin_cancel_trip"),
+    path("api/admin/trips/<int:trip_id>/cancel/",  trip_management.admin_cancel,              name="api_admin_cancel_trip"),
     path("api/admin/memberships/<int:membership_id>/",         views.api_admin_membership_detail,   name="api_admin_membership_detail"),
     path("api/admin/rank-trips/",                              views.api_admin_rank_trips,          name="api_admin_rank_trips"),
     path("api/admin/schedule-trip/",                           views.api_admin_schedule_trip,       name="api_admin_schedule_trip"),
@@ -89,7 +93,7 @@ urlpatterns = [
 
 
     # Admin — edit trip
-    path("api/admin/trips/<int:trip_id>/edit/", views.api_admin_edit_trip, name="api_admin_edit_trip"),
+    path("api/admin/trips/<int:trip_id>/edit/", trip_management.admin_edit, name="api_admin_edit_trip"),
 
     # Admin — queue
     path("api/admin/queue/", views.api_admin_queue, name="api_admin_queue"),

@@ -332,7 +332,7 @@ def api_admin_trips(request):
         return Response({"detail": "Not an admin account."}, status=403)
 
     if request.method == "GET":
-        qs = Trip.objects.all().select_related(
+        qs = Trip.objects.filter(route__departure=admin_profile.rank).select_related(
             "route__departure", "route__destination",
             "operator__association", "vehicle",
         ).order_by("-departure_date")
@@ -645,8 +645,10 @@ def api_my_bookings(request):
     if booking and booking.status != Booking.Status.CANCELLED:
         return Response({"detail": "You already booked this trip."}, status=400)
     if booking:
-        booking.companions.all().delete()
+        booking.companions.filter(passenger__isnull=True).delete()
+        booking.companions.filter(passenger__isnull=False).update(group_leader=None)
         booking.status = Booking.Status.RESERVED
+        booking.group_leader = None
         booking.group_next_of_kin_name = profile.next_of_kin_name if companions else ""
         booking.group_next_of_kin_phone = profile.next_of_kin_phone if companions else ""
         booking.save()
@@ -928,7 +930,11 @@ def api_cancel_booking(request, booking_id):
     Trip.objects.select_for_update().get(pk=booking.trip_id)
     if booking.companions.exclude(status__in=[Booking.Status.RESERVED, Booking.Status.CANCELLED]).exists():
         return Response({"detail": "A companion has boarded; contact the operator to change the group."}, status=400)
-    booking.companions.update(status=Booking.Status.CANCELLED)
+    # Registered members retain their own booking when the lead cancels.
+    booking.companions.filter(passenger__isnull=False).update(
+        group_leader=None, group_next_of_kin_name=booking.group_next_of_kin_name,
+        group_next_of_kin_phone=booking.group_next_of_kin_phone)
+    booking.companions.filter(passenger__isnull=True).update(status=Booking.Status.CANCELLED)
     booking.status = Booking.Status.CANCELLED
     booking.save()
     return Response(BookingSerializer(booking).data)
