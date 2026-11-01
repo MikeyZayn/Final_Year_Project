@@ -20,6 +20,7 @@ urlpatterns = [
     path("api/ranks/",          views.api_list_ranks,         name="api_list_ranks"),
     path("api/destinations/",   views.api_list_destinations,  name="api_list_destinations"),
     path("api/trips/",          views.api_list_trips,         name="api_list_trips"),
+    path("api/trips/<int:trip_id>/", views.api_trip_detail,   name="api_trip_detail"),
 
     # Operator
     path("api/my-memberships/",             views.api_my_memberships,   name="api_my_memberships"),
@@ -42,6 +43,7 @@ urlpatterns = [
     path("api/my-trips/<int:trip_id>/complete/", views.api_complete_trip, name="api_complete_trip"),
     path("api/my-trips/<int:trip_id>/bookings/<int:booking_id>/verify/", views.api_verify_booking, name="api_verify_booking"),
     path("api/my-bookings/", views.api_my_bookings, name="api_my_bookings"),
+    path("api/my-notifications/", views.api_my_notifications, name="api_my_notifications"),
 
     # Passenger
     path("api/my-bookings/<int:booking_id>/feedback/", views.api_submit_feedback, name="api_submit_feedback"),
@@ -58,6 +60,8 @@ urlpatterns = [
     path("api/admin/feedback/<int:feedback_id>/confirm-incident/", views.api_admin_confirm_incident, name="api_admin_confirm_incident"),
     path("api/admin/feedback/<int:feedback_id>/dismiss/", views.api_admin_dismiss, name="api_admin_dismiss"),
     path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
+    path("api/my-trips/<int:trip_id>/bookings/<int:booking_id>/verify-cash/", views.api_verify_cash_payment, name="api_verify_cash_payment"),
+    path("api/my-trips/<int:trip_id>/driver-no-show-refunds/", views.api_trip_driver_no_show_refunds, name="api_trip_driver_no_show_refunds"),
     # Admin (rank-scoped)
     path("api/admin/me/",                          views.api_admin_me,                       name="api_admin_me"),
     path("api/admin/pending-memberships/",         views.api_admin_pending_memberships,      name="api_admin_pending_memberships"),

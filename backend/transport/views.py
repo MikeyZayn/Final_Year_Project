@@ -113,14 +113,63 @@ def api_list_trips(request):
     if route_id:
         qs = qs.filter(route_id=route_id)
     if from_q:
-        qs = qs.filter(
-            models.Q(route__departure__name__icontains=from_q) |
-            models.Q(route__departure__area__icontains=from_q)
-        )
+        from .services.payment import town_search_terms
+        terms = town_search_terms(from_q) or [from_q]
+        q = models.Q()
+        for term in terms:
+            q |= (
+                models.Q(route__departure__name__icontains=term)
+                | models.Q(route__departure__area__icontains=term)
+            )
+        qs = qs.filter(q)
     if to_q:
-        qs = qs.filter(route__destination__name__icontains=to_q)
+        from .services.payment import town_search_terms
+        terms = town_search_terms(to_q) or [to_q]
+        q = models.Q()
+        for term in terms:
+            q |= (
+                models.Q(route__destination__name__icontains=term)
+                | models.Q(route__destination__area__icontains=term)
+            )
+        qs = qs.filter(q)
 
     return Response(TripSerializer(qs, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def api_trip_detail(request, trip_id):
+    """Everything the passenger trip-details screen shows for one departure.
+
+    Includes the route (departure rank -> destination), operator, driver,
+    driver rating and live driver check-in state. Public so the details screen
+    can be opened before signing in; booking itself still requires auth.
+    """
+    trip = (
+        Trip.objects.select_related(
+            "route__departure",
+            "route__destination",
+            "operator__association",
+            "operator__user",
+            "vehicle",
+            "driver__user",
+        )
+        .filter(pk=trip_id)
+        .first()
+    )
+    if trip is None:
+        return Response({"detail": "Trip not found."}, status=404)
+
+    data = TripSerializer(trip).data
+    data["driver_checked_in"] = trip.driver_checked_in
+    data["driver_last_seen_at"] = (
+        trip.driver_last_seen_at.isoformat() if trip.driver_last_seen_at else None
+    )
+    data["driver_at_rank_at"] = (
+        trip.driver_at_rank_at.isoformat() if trip.driver_at_rank_at else None
+    )
+    return Response(data)
+
 
 # ---------- Operator ----------
 
@@ -210,6 +259,13 @@ def api_trip_manifest(request, trip_id):
             "walk_in": b.passenger is None,
             "verification_code": vc.code if vc else None,
             "code_verified": bool(vc and vc.verified_at),
+            # Payment state — the operator uses this to verify cash passengers.
+            "payment_method": b.payment_method,
+            "payment_status": b.payment_status,
+            "passenger_display_status": b.passenger_display_status(),
+            "fare_amount": str(b.fare_amount) if b.fare_amount is not None else None,
+            "amount_paid": str(b.amount_paid) if b.amount_paid is not None else None,
+            "refund_amount": str(b.refund_amount) if b.refund_amount is not None else None,
         }
         if b.passenger is None:
             walk_ins.append(entry)
@@ -633,9 +689,22 @@ def api_my_bookings(request):
     if request.user.role != User.Role.PASSENGER:
         return Response({"detail": "Only passenger accounts can book trips."}, status=403)
     from .feature_serializers import GroupBookingRequestSerializer
+    from .services.payment import (
+        apply_card_payment,
+        apply_cash_pending,
+        fare_for_trip,
+        trip_departure_dt,
+    )
     form = GroupBookingRequestSerializer(data=request.data)
     form.is_valid(raise_exception=True)
     companions = form.validated_data.get("companions", [])
+    payment_method = form.validated_data["payment_method"]
+    departure = trip_departure_dt(trip)
+    if trip.expected_departure_time and departure and timezone.now() >= departure:
+        return Response(
+            {"detail": "This departure has already left. Choose a later trip."},
+            status=400,
+        )
     profile = getattr(request.user, "passenger_profile", None)
     if companions and (not profile or not profile.next_of_kin_name or not profile.next_of_kin_phone):
         return Response({"detail": "Add next-of-kin details to your profile before booking a group."}, status=400)
@@ -651,6 +720,10 @@ def api_my_bookings(request):
         booking.group_leader = None
         booking.group_next_of_kin_name = profile.next_of_kin_name if companions else ""
         booking.group_next_of_kin_phone = profile.next_of_kin_phone if companions else ""
+        # A re-book after cancelling starts from a clean payment slate.
+        booking.cancellation_fee = None
+        booking.refund_amount = None
+        booking.refund_reason = ""
         booking.save()
     else:
         booking = Booking.objects.create(trip=trip, passenger=request.user,
@@ -659,7 +732,46 @@ def api_my_bookings(request):
     for c in companions:
         Booking.objects.create(trip=trip, group_leader=booking,
             companion_first_name=c["first_name"], companion_last_name=c["last_name"])
-    return Response(BookingSerializer(booking).data, status=201)
+
+    seats = 1 + len(companions)
+    booking.fare_amount = fare_for_trip(trip, seats)
+    booking.save(update_fields=["fare_amount"])
+
+    if payment_method == "card":
+        apply_card_payment(
+            booking,
+            form.validated_data.get("card_holder_name", ""),
+            form.validated_data.get("card_number", ""),
+        )
+        notification = (
+            "Payment successful. You are a verified passenger. "
+            "Show this confirmation when you board — arrive on time at the departure rank."
+        )
+    else:
+        apply_cash_pending(booking)
+        notification = (
+            "Cash booking received. You are a pending passenger. "
+            "Arrive at least 30 minutes early with cash. The operator must verify you "
+            "before the trip or you may lose your seat."
+        )
+
+    data = BookingSerializer(booking).data
+    data["notification"] = notification
+    return Response(data, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_notifications(request):
+    """The passenger's notification feed (payment confirmed, pending, refund…).
+
+    Notifications are derived from booking state so they can never drift from
+    the booking that produced them. Each item is a proof-of-booking record the
+    passenger can show at the rank.
+    """
+    from .services.notifications import notifications_for_user
+
+    return Response(notifications_for_user(request.user))
 
 
 # ---------- Feedback ----------
@@ -937,7 +1049,12 @@ def api_cancel_booking(request, booking_id):
     booking.companions.filter(passenger__isnull=True).update(status=Booking.Status.CANCELLED)
     booking.status = Booking.Status.CANCELLED
     booking.save()
-    return Response(BookingSerializer(booking).data)
+    from .services.payment import cancel_with_policy
+    policy = cancel_with_policy(booking)
+    data = BookingSerializer(booking).data
+    data["refund"] = policy
+    data["notification"] = policy.get("refund_reason") or "Booking cancelled."
+    return Response(data)
 
 # ---------- Driver endpoints ----------
 
@@ -1076,16 +1193,97 @@ def api_driver_confirm_trip(request):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def api_driver_post_location(request, vehicle_id):
-    """Stub — GPS location ingestion not implemented in the prototype.
-    Returns a benign response so the driver UI can render without error."""
-    return Response({
-        "lat": request.data.get("lat"),
-        "lng": request.data.get("lng"),
-        "trip_id": request.data.get("trip_id"),
-        "route_status": "on_route",
-        "distance_from_route_m": 0,
-        "note": "GPS ingestion not implemented in the prototype.",
-    })
+    """Driver GPS ping.
+
+    The driver app pushes lat/lng every few seconds while a trip is active.
+    A ping within 350 m of the departure rank records ``driver_at_rank_at`` on
+    the trip. If that timestamp is missing when the trip starts, paid passengers
+    are refunded (see ``api_trip_driver_no_show_refunds``).
+    """
+    from .services.driver_location import parse_coordinate, record_driver_location
+
+    profile = getattr(request.user, "driver_profile", None)
+    if profile is None:
+        return Response({"detail": "Not a driver account."}, status=403)
+
+    try:
+        vehicle = Vehicle.objects.get(pk=vehicle_id)
+    except Vehicle.DoesNotExist:
+        return Response({"detail": "Vehicle not found."}, status=404)
+
+    lat, error = parse_coordinate(request.data.get("lat"), "lat")
+    if error:
+        return Response({"detail": error}, status=400)
+    lng, error = parse_coordinate(request.data.get("lng"), "lng")
+    if error:
+        return Response({"detail": error}, status=400)
+
+    trip_id = request.data.get("trip_id")
+    trip = None
+    if trip_id not in (None, "", "null"):
+        try:
+            trip_id = int(trip_id)
+        except (TypeError, ValueError):
+            return Response({"detail": "trip_id must be an integer."}, status=400)
+        trip = (
+            Trip.objects.select_related("route__departure")
+            .filter(pk=trip_id)
+            .first()
+        )
+        if trip is None:
+            return Response({"detail": "Trip not found."}, status=404)
+        # A trip belongs to exactly one driver. An unassigned trip may be
+        # claimed by whatever driver is currently using the vehicle.
+        if trip.driver_id and trip.driver_id != profile.id:
+            return Response(
+                {"detail": "This trip is assigned to another driver."}, status=403
+            )
+        if trip.driver_id is None and trip.vehicle_id != vehicle.id:
+            return Response(
+                {"detail": "This trip is not assigned to you."}, status=403
+            )
+    else:
+        trip = (
+            Trip.objects.select_related("route__departure")
+            .filter(
+                driver=profile,
+                status__in=[Trip.Status.BOARDING, Trip.Status.IN_PROGRESS],
+            )
+            .order_by("departure_date", "expected_departure_time")
+            .first()
+        )
+
+    if trip is None:
+        return Response(
+            {
+                "lat": lat,
+                "lng": lng,
+                "trip_id": None,
+                "route_status": "idle",
+                "at_rank": False,
+                "distance_from_rank_m": None,
+                "distance_from_route_m": None,
+                "note": "No active trip assigned to this driver.",
+            }
+        )
+
+    result = record_driver_location(trip, lat, lng)
+    result.update(
+        {
+            "lat": lat,
+            "lng": lng,
+            "trip_id": trip.id,
+            "trip_code": trip.trip_code,
+            "rank_name": trip.route.departure.name,
+            "rank_lat": float(trip.route.departure.latitude)
+            if trip.route.departure.latitude is not None
+            else None,
+            "rank_lng": float(trip.route.departure.longitude)
+            if trip.route.departure.longitude is not None
+            else None,
+        }
+    )
+    return Response(result)
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
@@ -2160,3 +2358,139 @@ def api_verify_trip_assets(request, trip_id):
     trip.assets_verified_by = request.user
     trip.save()
     return Response(TripSerializer(trip).data)
+
+# ---------- Payment verification & driver-location refunds ----------
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def api_verify_cash_payment(request, trip_id, booking_id):
+    """Operator marks a cash passenger as paid / verified on the day of travel.
+
+    Cash passengers stay PENDING until this call. They must be verified at the
+    rank before the trip starts, otherwise the seat may be released.
+    """
+    op = _get_operator_or_none(request)
+    if op is None and not request.user.is_superuser:
+        return Response({"detail": "Only operators can verify cash payments."}, status=403)
+    try:
+        trip = Trip.objects.select_related("route__departure").get(pk=trip_id)
+        booking = Booking.objects.get(pk=booking_id, trip=trip)
+    except (Trip.DoesNotExist, Booking.DoesNotExist):
+        return Response({"detail": "Booking not found on this trip."}, status=404)
+
+    if op is not None and trip.operator_id != op.id:
+        return Response({"detail": "This trip belongs to another operator."}, status=404)
+    if booking.payment_method != Booking.PaymentMethod.CASH:
+        return Response({"detail": "This booking is not a cash payment."}, status=400)
+    if booking.status == Booking.Status.CANCELLED:
+        return Response({"detail": "Booking is cancelled."}, status=400)
+    if trip.status in (
+        Trip.Status.IN_PROGRESS,
+        Trip.Status.COMPLETED,
+        Trip.Status.CANCELLED,
+        Trip.Status.EXPIRED,
+    ):
+        return Response(
+            {"detail": "This trip is no longer accepting cash verification."},
+            status=400,
+        )
+
+    from .services.payment import operator_verify_cash
+    try:
+        operator_verify_cash(booking, request.user)
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=400)
+
+    return Response({
+        "booking": BookingSerializer(booking).data,
+        "passenger_display_status": booking.passenger_display_status(),
+        "notification": f"{booking.display_name()} is now a verified (cash paid) passenger.",
+    })
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def api_trip_driver_no_show_refunds(request, trip_id):
+    """Refund paid passengers when the driver was not at the rank at trip start.
+
+    The decision is made from the driver's own GPS pings (see
+    ``services.driver_location``), not from a manual checkbox:
+
+    * a ping inside 350 m of the departure rank before departure -> no refunds
+    * no qualifying ping and the trip has started -> full refund for every paid
+      passenger still reserved
+
+    Body (optional):
+      ``{"force": true}``    — skip the "trip has not started yet" guard.
+      ``{"override": true}`` — ignore GPS evidence (GPS unavailable, driver
+      confirmed absent in person). Use sparingly: it refunds everyone paid.
+    """
+    try:
+        trip = Trip.objects.select_related("route__departure", "driver").get(pk=trip_id)
+    except Trip.DoesNotExist:
+        return Response({"detail": "Trip not found."}, status=404)
+
+    is_driver = (
+        getattr(request.user, "role", None) == User.Role.DRIVER
+        and trip.driver_id
+        and getattr(trip.driver, "user_id", None) == request.user.id
+    )
+    is_operator = _get_operator_or_none(request) is not None
+    if not (is_driver or is_operator or request.user.is_superuser):
+        return Response({"detail": "Not allowed."}, status=403)
+
+    from .services.driver_location import driver_was_at_rank
+    from .services.payment import refund_driver_no_show, trip_departure_dt
+
+    force = bool(request.data.get("force", False))
+    override = bool(request.data.get("override", False))
+    dep = trip_departure_dt(trip)
+    now = timezone.now()
+
+    if dep and now < dep and not force:
+        return Response(
+            {"detail": "Trip start time has not been reached yet.", "refunded": []},
+            status=400,
+        )
+
+    checked_in = driver_was_at_rank(trip)
+    if checked_in and not override:
+        return Response(
+            {
+                "detail": (
+                    "Driver was at the departure rank at trip start "
+                    f"({trip.driver_at_rank_at:%H:%M}) — no refunds issued."
+                ),
+                "driver_at_rank_at": trip.driver_at_rank_at,
+                "refunded": [],
+            }
+        )
+
+    refunded = []
+    qs = trip.bookings.filter(
+        status=Booking.Status.RESERVED,
+        payment_status=Booking.PaymentStatus.PAID,
+    )
+    for booking in qs:
+        refund_driver_no_show(booking)
+        refunded.append(booking.id)
+
+    if not checked_in:
+        trip.driver_location_status = "no_show"
+        trip.save(update_fields=["driver_location_status"])
+
+    return Response(
+        {
+            "detail": (
+                f"Refunded {len(refunded)} paid passenger(s) — the driver was not "
+                "at the departure rank at trip start."
+                if refunded
+                else "No paid passengers were waiting for a refund."
+            ),
+            "driver_at_rank_at": trip.driver_at_rank_at,
+            "refunded": refunded,
+        }
+    )
+

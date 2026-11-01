@@ -4,13 +4,14 @@ import 'leaflet/dist/leaflet.css';
 import { useAuth } from './auth';
 const roles = ['passenger', 'driver', 'operator', 'administrator'];
 import api from './api';
-import QuickBooking from './features/QuickBooking.jsx';
 import { DrawerTile, PageControls } from './features/Drawer.jsx';
 import { confirmDeliveredBookings } from './services/autoBoarding.js';
 import { DriverRankMemberships, AdminDriverRankRequests, GroupBookingModal, GroupBoarding, DepartureQueue } from './features/TripFeatures.jsx';
 import DriverPage from './pages/DriverPage.jsx';
 import ThembaMap from './components/ThembaMap.jsx';
 import { TripEditor, TripGroupEditor, apiMessage } from './features/TripManagement.jsx';
+import PassengerBookingFlow from './pages/PassengerBookingFlow.jsx';
+import PaymentModal from './features/PaymentModal.jsx';
 
 const demoUsers = {
   passenger: 'Sibusiso Dlamini',
@@ -919,12 +920,16 @@ function Passenger({ notify, onSignIn }) {
   const [ratingFormFor, setRatingFormFor] = useState(null);
   const [announcements, setAnnouncements] = useState([]);
   const [panicAlert, setPanicAlert] = useState(null);
-  const [selectedTrip, setSelectedTrip] = useState(null);
   const [groupBookingTripId, setGroupBookingTripId] = useState(null);
   const tripRequestNumber = useRef(0);
   const bookingRefreshBusy = useRef(false);
   const passengerMounted = useRef(true);
-  const [bookingRouteTrip, setBookingRouteTrip] = useState(null);
+
+  // ----- payment + notifications (new booking flow) -----
+  const [notifications, setNotifications] = useState([]);
+  const [paymentTrip, setPaymentTrip] = useState(null);
+  const [paymentCompanions, setPaymentCompanions] = useState([]);
+  const [paymentOpen, setPaymentOpen] = useState(false);
 
   // ----- loaders -----
   async function loadTrips(params = {}) {
@@ -969,6 +974,13 @@ function Passenger({ notify, onSignIn }) {
     } catch { /* ignore */ }
   }
 
+  async function loadNotifications() {
+    try {
+      const { data } = await api.get('/transport/api/my-notifications/');
+      if (passengerMounted.current) setNotifications(data);
+    } catch { /* ignore — the dashboard falls back to booking state */ }
+  }
+
   async function loadAnnouncements() {
     try {
       const { data } = await api.get('/transport/api/announcements/');
@@ -989,10 +1001,12 @@ function Passenger({ notify, onSignIn }) {
     loadFeedback();
     loadAnnouncements();
     loadPanic();
+    loadNotifications();
     passengerMounted.current = true;
     const refresh = () => {
       if (!document.hidden) {
         loadBookings();
+        loadNotifications();
       }
     };
 
@@ -1017,30 +1031,67 @@ function Passenger({ notify, onSignIn }) {
   }, []);
 
   // ----- actions -----
-  async function bookTrip(tripId, companions) {
-    if (!user) { onSignIn?.(); return; }
-    if (!Array.isArray(companions)) { setGroupBookingTripId(tripId); return; }
+  // Payment is mandatory: the booking is only created after the passenger picks
+  // card or cash in PaymentModal. `payment` is the payload from that modal.
+  async function bookTrip(tripId, companions, payment) {
+    if (!user) { onSignIn?.(); return null; }
+    if (!payment) {
+      notify('Choose a payment method before booking your trip.');
+      const trip = trips.find((item) => item.id === tripId);
+      if (trip) openPayment(trip);
+      return null;
+    }
     setBookingId(tripId);
     try {
-      await api.post('/transport/api/my-bookings/', { trip_id: tripId, companions });
+      const { data } = await api.post('/transport/api/my-bookings/', {
+        trip_id: tripId,
+        companions: companions || [],
+        ...payment,
+      });
       setGroupBookingTripId(null);
-      notify('Your seat is reserved. Boarding verification will happen automatically.');
+      notify(data.notification || 'Your booking is confirmed.');
       await loadTrips();
       await loadBookings();
+      await loadNotifications();
+      return data;
     } catch (err) {
       notify(err.response?.data?.detail || 'Booking failed.');
+      throw err;
     } finally {
       setBookingId(null);
     }
   }
 
+  function openPayment(trip) {
+    if (!trip) return;
+    if (!user) { onSignIn?.(); return; }
+    setPaymentCompanions([]);
+    setPaymentTrip(trip);
+    setPaymentOpen(true);
+  }
+
+  function openGroupPayment(companions) {
+    const trip = trips.find((item) => item.id === groupBookingTripId);
+    setGroupBookingTripId(null);
+    if (!trip) return;
+    setPaymentCompanions(companions || []);
+    setPaymentTrip(trip);
+    setPaymentOpen(true);
+  }
+
+  function closePayment() {
+    setPaymentOpen(false);
+    setPaymentCompanions([]);
+  }
+
   async function cancelBooking(bId) {
-    if (!window.confirm('Cancel this booking? You can rebook if seats are still available.')) return;
+    if (!window.confirm('Cancel this booking? You can rebook if seats are still available. A 30% fee applies when cancelling within 1 hour of departure.')) return;
     try {
-      await api.post(`/transport/api/my-bookings/${bId}/cancel/`);
-      notify('Booking cancelled.');
+      const { data } = await api.post(`/transport/api/my-bookings/${bId}/cancel/`);
+      notify(data?.notification || 'Booking cancelled.');
       await loadBookings();
       await loadTrips();
+      await loadNotifications();
     } catch (err) {
       notify(err.response?.data?.detail || 'Cancellation failed.');
     }
@@ -1069,66 +1120,54 @@ function Passenger({ notify, onSignIn }) {
     }
   }
 
-  function searchTrips() {
-    setSelectedTrip(null);
-    loadTrips({ from: departure.trim(), to: destination.trim() });
-  }
-
   // ----- render -----
   return (
     <>
       <PassengerPanicBanner alert={panicAlert} onCancel={cancelPanic} />
-      {bookingRouteTrip && <PassengerRouteMap trip={bookingRouteTrip} notify={notify} onClose={() => setBookingRouteTrip(null)} />}
 
-
-      <QuickBooking trips={trips} bookings={bookings} busy={bookingId} signedIn={!!user}
-        onSignIn={onSignIn} onBook={bookTrip} onGroup={id => setGroupBookingTripId(id)}
-        onRouteChange={(rank, dest) => { setSelectedTrip(null); loadTrips({ departureId: rank, destinationId: dest }); }}
-      />
-
-      <PassengerAnnouncements announcements={announcements} />
-
-      <PassengerBookings
-        bookings={bookings.filter(b =>
-          ['reserved', 'boarded'].includes(b.status)
-        )}
-        feedbackList={feedbackList}
-        onRate={setRatingFormFor}
+      <PassengerBookingFlow
+        trips={trips}
+        bookings={bookings}
+        loading={loading}
+        error={error}
+        signedIn={!!user}
+        onSignIn={onSignIn}
+        from={departure}
+        to={destination}
+        onSearch={(from, to) => {
+          setDeparture(from);
+          setDestination(to);
+          loadTrips({ from, to });
+        }}
+        onBook={openPayment}
+        onGroup={(trip) => (user ? setGroupBookingTripId(trip?.id ?? trip) : onSignIn?.())}
+        notifications={notifications}
         onCancel={cancelBooking}
         onPanic={raisePanic}
-        selectedRouteTripId={bookingRouteTrip?.id}
-        onViewRoute={booking => {
-          if (!booking.route) {
-            notify(
-              'Route details are unavailable. Restart Django after updating the booking serializer.'
-            );
-            return;
-          }
-
-          setBookingRouteTrip(current =>
-            current?.id === booking.trip
-              ? null
-              : {
-                  id: booking.trip,
-                  trip_code: booking.trip_code,
-                  departure_date: booking.departure_date,
-                  route: booking.route,
-                }
-          );
-        }}
+        feedbackList={feedbackList}
+        onRate={setRatingFormFor}
+        announcements={announcements}
+        passengerName={
+          [user?.first_name, user?.last_name].filter(Boolean).join(' ') ||
+          demoUsers.passenger
+        }
       />
-
-      <div className="dashboard-grid">
-        <DrawerTile title="All departures" description="Compare departure times and view road routes" icon="↗">{closeDrawer => <>{selectedTrip && <PassengerRouteMap trip={selectedTrip} notify={notify} onClose={() => {setSelectedTrip(null); closeDrawer();}} />}<PassengerUpcomingTrips trips={trips} bookings={bookings} loading={loading} error={error} bookingId={bookingId} onBook={id => bookTrip(id, [])} onGroup={id => user ? setGroupBookingTripId(id) : onSignIn?.()} onViewMap={trip => setSelectedTrip(current => (current?.id === trip.id ? null : trip))} selectedTripId={selectedTrip?.id} /></>}</DrawerTile>
-        <DrawerTile title="Journey history" description="Past trips, group bookings and your feedback" icon="↔"><PassengerBookings bookings={bookings.filter(b => !['reserved','boarded'].includes(b.status))} feedbackList={feedbackList} onRate={setRatingFormFor} onCancel={cancelBooking} onPanic={raisePanic} /><PassengerFeedbackList feedbackList={feedbackList} /></DrawerTile>
-      </div>
 
       {groupBookingTripId && <GroupBookingModal
         trip={trips.find(t => t.id === groupBookingTripId)}
         busy={bookingId !== null}
         onClose={() => setGroupBookingTripId(null)}
-        onSubmit={companions => bookTrip(groupBookingTripId, companions)}
+        onSubmit={openGroupPayment}
       />}
+
+      <PaymentModal
+        open={paymentOpen}
+        trip={paymentTrip}
+        seats={1 + paymentCompanions.length}
+        busy={bookingId !== null}
+        onClose={closePayment}
+        onComplete={payload => bookTrip(paymentTrip?.id, paymentCompanions, payload)}
+      />
 
       {ratingFormFor && (
         <RatingModal
@@ -1335,7 +1374,7 @@ function PassengerUpcomingTrips({
   return (
     <article className="module module-wide">
       <div className="module-heading">
-        <span>Available departures</span>
+        <span>Available trips</span>
         <span className="module-number">{trips.length}</span>
       </div>
 
@@ -2510,6 +2549,10 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   const [verifyingId, setVerifyingId] = useState(null);
   const [lastVerifiedCode, setLastVerifiedCode] = useState(null);
 
+  // Payment verification + driver no-show refunds
+  const [verifyingCashId, setVerifyingCashId] = useState(null);
+  const [refunding, setRefunding] = useState(false);
+
   async function load() {
     setLoading(true);
     setError('');
@@ -2577,6 +2620,44 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
       notify(err.response?.data?.detail || 'Verification failed.');
     } finally {
       setVerifyingId(null);
+    }
+  }
+
+  // Cash passengers stay PENDING until the operator confirms the cash at the
+  // rank. This is the step that converts them to a verified passenger.
+  async function verifyCashPayment(bookingId) {
+    setVerifyingCashId(bookingId);
+    try {
+      const { data } = await api.post(
+        `/transport/api/my-trips/${tripId}/bookings/${bookingId}/verify-cash/`
+      );
+      notify(data.notification || 'Cash payment verified.');
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Could not verify cash payment.');
+    } finally {
+      setVerifyingCashId(null);
+    }
+  }
+
+  // Refunds every paid passenger if the driver's GPS shows they were never at
+  // the rank when the trip started. The backend makes the decision.
+  async function refundDriverNoShow() {
+    if (!window.confirm(
+      'Refund every paid passenger on this trip? This is correct when the driver was not at the departure rank at trip start.'
+    )) return;
+    setRefunding(true);
+    try {
+      const { data } = await api.post(
+        `/transport/api/my-trips/${tripId}/driver-no-show-refunds/`,
+        { force: true }
+      );
+      notify(data.detail || 'Refund check complete.');
+      load();
+    } catch (err) {
+      notify(err.response?.data?.detail || 'Could not issue refunds.');
+    } finally {
+      setRefunding(false);
     }
   }
 
@@ -2677,6 +2758,9 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
             <button className="danger-button" onClick={release} disabled={trip.status !== 'boarding' || !trip.assets_verified_at} type="button">
               Depart trip
             </button>
+            <button className="secondary-button" onClick={refundDriverNoShow} disabled={refunding} type="button">
+              {refunding ? 'Checking driver…' : 'Driver no-show refunds'}
+            </button>
           </div>
         </div>
       </article>
@@ -2753,19 +2837,44 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
                 {b.verification_code ? ` · code ${b.verification_code}` : ''}
                 {b.passenger_confirmed_at ? ' · verified automatically by passenger app' : ''}
               </small>
+              <small>
+                {b.payment_method === 'cash' ? 'Cash' : b.payment_method === 'card' ? 'Card' : 'Payment not set'}
+                {b.fare_amount ? ` · R${b.fare_amount}` : ''}
+                {' · '}
+                <strong>
+                  {b.passenger_display_status === 'verified'
+                    ? 'Verified passenger'
+                    : b.passenger_display_status === 'pending'
+                      ? 'Cash pending — verify before departure'
+                      : b.passenger_display_status || b.payment_status || b.status}
+                </strong>
+                {b.payment_status === 'refunded' ? ' · refunded' : ''}
+              </small>
             </span>
-            {b.status === 'reserved' ? (
-              <button
-                className="primary-button"
-                onClick={() => verifyBooking(b.booking_id)}
-                disabled={verifyingId !== null || !trip.assets_verified_at || trip.status !== 'boarding'}
-                type="button"
-              >
-                {verifyingId === b.booking_id ? 'Boarding…' : 'Board passenger'}
-              </button>
-            ) : (
-              <span className="status-pill">{b.status}</span>
-            )}
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              {b.payment_status === 'pending' && b.status === 'reserved' && (
+                <button
+                  className="secondary-button"
+                  onClick={() => verifyCashPayment(b.booking_id)}
+                  disabled={verifyingCashId !== null}
+                  type="button"
+                >
+                  {verifyingCashId === b.booking_id ? 'Verifying cash…' : 'Verify cash'}
+                </button>
+              )}
+              {b.status === 'reserved' ? (
+                <button
+                  className="primary-button"
+                  onClick={() => verifyBooking(b.booking_id)}
+                  disabled={verifyingId !== null || !trip.assets_verified_at || trip.status !== 'boarding'}
+                  type="button"
+                >
+                  {verifyingId === b.booking_id ? 'Boarding…' : 'Board passenger'}
+                </button>
+              ) : (
+                <span className="status-pill">{b.status}</span>
+              )}
+            </div>
           </div>
           {!b.group_leader_id && <GroupBoarding trip={trip} leader={b} notify={notify} onBoarded={load} />}
           </div>
