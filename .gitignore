@@ -1,7 +1,4 @@
-Add-Content .gitignore @'
-
-# Local environments and generated files
-venv/
+﻿venv/
 .venv/
 node_modules/
 __pycache__/
@@ -13,11 +10,8 @@ __pycache__/
 *.sqlite3-journal
 *.sqlite3-wal
 *.sqlite3-shm
-
-# Extra extracted project copies
+.vite/
+backend/media/
+/package-lock.json
 /themba/
 /themba_reference/
-'@
-
-# Vite development/test cache
-.vite/

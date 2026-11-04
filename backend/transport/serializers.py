@@ -74,6 +74,12 @@ class TripSerializer(serializers.ModelSerializer):
         source="operator.association.association_name", read_only=True
     )
     driver_name = serializers.SerializerMethodField()
+    driver_rating = serializers.SerializerMethodField()
+    driver_rating_count = serializers.SerializerMethodField()
+    driver_trips_count = serializers.SerializerMethodField()
+    duration_minutes = serializers.SerializerMethodField()
+    verified_passengers = serializers.SerializerMethodField()
+    pending_passengers = serializers.SerializerMethodField()
     vehicle_plate = serializers.CharField(source="vehicle.plate_number", read_only=True)
     seats_taken = serializers.IntegerField(read_only=True)
     seats_available = serializers.IntegerField(read_only=True)
@@ -84,7 +90,9 @@ class TripSerializer(serializers.ModelSerializer):
             "id", "trip_code", "operator_name", "driver_id", "vehicle_id", "operator_id",
             "route", "departure_date", "expected_departure_time",
             "actual_departure_time", "seat_capacity", "seats_taken",
-            "seats_available", "status", "driver_name", "vehicle_plate",
+            "seats_available", "status", "driver_name", "driver_rating",
+            "driver_rating_count", "driver_trips_count", "duration_minutes",
+            "verified_passengers", "pending_passengers", "vehicle_plate",
             "engaged_by_name", "is_engaged",
             "notes", "created_at", "assets_verified_at", "queue_expires_at",
         ]
@@ -93,6 +101,48 @@ class TripSerializer(serializers.ModelSerializer):
             return None
         u = obj.driver.user
         return f"{u.first_name} {u.last_name}".strip() or u.phone
+
+    def _driver_feedback(self, obj):
+        # Cached per instance so list views don't hit the database repeatedly.
+        if not hasattr(obj, "_driver_feedback_cache"):
+            qs = Feedback.objects.filter(trip__driver_id=obj.driver_id)
+            obj._driver_feedback_cache = qs
+        return obj._driver_feedback_cache
+
+    def get_driver_rating(self, obj):
+        if not obj.driver_id:
+            return None
+        from django.db.models import Avg
+
+        value = self._driver_feedback(obj).aggregate(value=Avg("rating"))["value"]
+        return round(float(value), 1) if value is not None else None
+
+    def get_driver_rating_count(self, obj):
+        if not obj.driver_id:
+            return 0
+        return self._driver_feedback(obj).count()
+
+    def get_driver_trips_count(self, obj):
+        if not obj.driver_id:
+            return 0
+        return Trip.objects.filter(driver_id=obj.driver_id).count()
+
+    def get_duration_minutes(self, obj):
+        return obj.route.typical_duration_minutes if obj.route_id else None
+
+    def get_verified_passengers(self, obj):
+        """Paid passengers still travelling on this trip (driver/operator view)."""
+        return obj.bookings.filter(
+            payment_status=Booking.PaymentStatus.PAID,
+            status__in=[Booking.Status.RESERVED, Booking.Status.BOARDED],
+        ).count()
+
+    def get_pending_passengers(self, obj):
+        """Cash passengers still waiting for operator verification."""
+        return obj.bookings.filter(
+            payment_status=Booking.PaymentStatus.PENDING,
+            status=Booking.Status.RESERVED,
+        ).count()
 
     engaged_by_name = serializers.SerializerMethodField()
     is_engaged = serializers.SerializerMethodField()
@@ -153,18 +203,31 @@ class BookingSerializer(serializers.ModelSerializer):
     trip_code = serializers.CharField(source="trip.trip_code", read_only=True)
     route_label = serializers.SerializerMethodField()
     departure_date = serializers.DateField(source="trip.departure_date", read_only=True)
+    departure_time = serializers.TimeField(
+        source="trip.expected_departure_time", read_only=True, default=None
+    )
     passenger_name = serializers.SerializerMethodField()
+    passenger_display_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Booking
         fields = [
             "id", "trip", "trip_code", "route_label", "route", "group_leader_id", "shared_next_of_kin",
-            "departure_date", "status", "booked_at", "boarded_at", "verification_code", "trip_status", "passenger_confirmed_at", "companions", "group_next_of_kin_name", "group_next_of_kin_phone",
+            "departure_date", "departure_time", "status", "booked_at", "boarded_at", "verification_code", "trip_status",
+            "passenger_confirmed_at", "companions", "group_next_of_kin_name", "group_next_of_kin_phone",
             "passenger_name", "walk_in_name", "walk_in_phone",
             "walk_in_next_of_kin_name", "walk_in_next_of_kin_phone",
+            # Payment
+            "payment_method", "payment_status", "fare_amount", "amount_paid",
+            "cancellation_fee", "refund_amount", "refund_reason",
+            "card_last_four", "card_holder_name", "paid_at",
+            "payment_verified_at", "passenger_display_status",
         ]
 
-        read_only_fields = ["status", "booked_at"]
+        read_only_fields = ["status", "booked_at", "payment_status", "amount_paid",
+                            "cancellation_fee", "refund_amount", "refund_reason",
+                            "card_last_four", "paid_at", "payment_verified_at",
+                            "passenger_display_status"]
 
     def get_companions(self, obj):
         return [{"id": c.id, "first_name": c.companion_first_name or (c.passenger.first_name if c.passenger else c.walk_in_name), "last_name": c.companion_last_name or (c.passenger.last_name if c.passenger else ""), "status": c.status} for c in obj.companions.all()]
@@ -174,6 +237,9 @@ class BookingSerializer(serializers.ModelSerializer):
 
     def get_passenger_name(self, obj):
         return obj.display_name()
+
+    def get_passenger_display_status(self, obj):
+        return obj.passenger_display_status()
 
 
 class VerificationCodeSerializer(serializers.ModelSerializer):

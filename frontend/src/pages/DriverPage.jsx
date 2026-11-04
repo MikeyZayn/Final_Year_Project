@@ -300,23 +300,50 @@ export default function DriverPage({ notify }) {
             <strong>Seats:</strong> {activeTrip.seats_taken}/
             {activeTrip.seat_capacity}
           </p>
+          <p>
+            <strong>Passengers:</strong> {activeTrip.verified_passengers ?? 0} verified
+            {' · '}
+            {activeTrip.pending_passengers ?? 0} cash pending verification
+          </p>
         </section>
       )}
 
       {/* ---------- Last server response ---------- */}
       {last && (
         <section className="card">
-          <h2>Last server response</h2>
+          <h2>Rank check-in</h2>
+          <p>
+            {last.at_rank ? (
+              <>
+                <strong>You are at {last.rank_name || 'the departure rank'}.</strong>{' '}
+                Passengers will not be refunded for a driver no-show.
+              </>
+            ) : last.route_status === 'idle' ? (
+              'No active trip assigned — pick a trip above.'
+            ) : (
+              <>
+                <strong>Not at the rank yet.</strong>{' '}
+                {last.distance_from_rank_m != null
+                  ? `${Math.round(last.distance_from_rank_m)} m away. `
+                  : ''}
+                Move to {last.rank_name || 'the departure rank'} before departure.
+              </>
+            )}
+          </p>
           <dl className="kv">
             <dt>Route status</dt>
             <dd className={last.route_status === 'off_route' ? 'warn' : ''}>
               {last.route_status}
             </dd>
-            <dt>Distance from route</dt>
+            <dt>Distance from rank</dt>
             <dd>
-              {last.distance_from_route_m != null
-                ? `${Math.round(last.distance_from_route_m)} m`
+              {last.distance_from_rank_m != null
+                ? `${Math.round(last.distance_from_rank_m)} m`
                 : '—'}
+            </dd>
+            <dt>At rank since</dt>
+            <dd>
+              {last.at_rank_at ? new Date(last.at_rank_at).toLocaleTimeString() : 'Not yet'}
             </dd>
             <dt>Position</dt>
             <dd>
