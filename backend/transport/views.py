@@ -184,31 +184,12 @@ def api_my_memberships(request):
     return Response(OperatorAtRankSerializer(qs, many=True).data)
 
 
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def api_request_rank(request):
-    """Operator requests to operate at another rank."""
-    op = _get_operator_or_none(request)
-    if op is None:
-        return Response({"detail": "Not an operator account."}, status=403)
-
-    rank_id = request.data.get("rank_id")
-    notes = request.data.get("notes", "").strip()
-    if not rank_id:
-        return Response({"detail": "rank_id is required."}, status=400)
-    try:
-        rank = Rank.objects.get(pk=rank_id)
-    except Rank.DoesNotExist:
-        return Response({"detail": "Rank not found."}, status=404)
-    if OperatorAtRank.objects.filter(operator=op, rank=rank).exists():
-        return Response({"detail": "You already have a membership at that rank."}, status=400)
-    m = OperatorAtRank.objects.create(operator=op, rank=rank, notes=notes)
-    return Response(OperatorAtRankSerializer(m).data, status=201)
-
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_my_trips(request):
+    from .services.scheduled_departures import start_due_trips
+    start_due_trips()
     expire_queues()
     """Trips assigned to the logged-in operator."""
     op = _get_operator_or_none(request)
@@ -766,12 +747,20 @@ def api_my_notifications(request):
     """The passenger's notification feed (payment confirmed, pending, refund…).
 
     Notifications are derived from booking state so they can never drift from
-    the booking that produced them. Each item is a proof-of-booking record the
-    passenger can show at the rank.
+    the booking that produced them. They are returned most urgent first, and
+    ``limit``/``offset`` let the refresh control page through three at a time.
     """
     from .services.notifications import notifications_for_user
 
-    return Response(notifications_for_user(request.user))
+    try:
+        limit = int(request.query_params.get("limit", 40))
+        offset = int(request.query_params.get("offset", 0))
+    except (TypeError, ValueError):
+        return Response({"detail": "limit and offset must be integers."}, status=400)
+
+    limit = max(1, min(limit, 40))
+    offset = max(0, offset)
+    return Response(notifications_for_user(request.user, limit=limit, offset=offset))
 
 
 # ---------- Feedback ----------
@@ -825,6 +814,7 @@ def api_my_feedback(request):
         "trip__route__departure", "trip__route__destination", "passenger",
     )
     return Response(FeedbackSerializer(qs, many=True).data)
+
 
 
 @api_view(["GET"])
@@ -1061,7 +1051,7 @@ def api_cancel_booking(request, booking_id):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_driver_profile(request):
-    """Profile for the logged-in driver — includes ratings + complaints summary."""
+    """Profile for the logged-in driver — identity, vehicle and public rating summary."""
     try:
         profile = request.user.driver_profile
     except Exception:
@@ -1076,11 +1066,6 @@ def api_driver_profile(request):
     rating_qs = feedback.exclude(rating__isnull=True)
     avg = rating_qs.aggregate(avg=models.Avg("rating"))["avg"]
     rating_count = rating_qs.count()
-    complaint_count = feedback.filter(has_complaint=True).count()
-    open_complaints = feedback.filter(
-        has_complaint=True,
-        status__in=[Feedback.Status.SUBMITTED, Feedback.Status.UNDER_REVIEW, Feedback.Status.ESCALATED],
-    ).count()
 
     return Response({
         "user": {
@@ -1097,8 +1082,6 @@ def api_driver_profile(request):
         "external_verification_reason": profile.external_verification_reason,
         "rating_avg": round(avg, 2) if avg else None,
         "rating_count": rating_count,
-        "complaint_count": complaint_count,
-        "open_complaints": open_complaints,
         "notifications": [],   # placeholder until a notifications model exists
     })
 
@@ -1135,6 +1118,8 @@ def api_driver_vehicle(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def api_driver_trips(request):
+    from .services.scheduled_departures import start_due_trips
+    start_due_trips()
     expire_queues()
     """Trips where this user is the assigned driver."""
     try:
@@ -1232,16 +1217,26 @@ def api_driver_post_location(request, vehicle_id):
         )
         if trip is None:
             return Response({"detail": "Trip not found."}, status=404)
-        # A trip belongs to exactly one driver. An unassigned trip may be
-        # claimed by whatever driver is currently using the vehicle.
-        if trip.driver_id and trip.driver_id != profile.id:
+        # Location updates are accepted only for this driver's own assigned trip.
+        if trip.driver_id != profile.id:
             return Response(
-                {"detail": "This trip is assigned to another driver."}, status=403
+                {"detail": "This trip is not assigned to this driver."}, status=403
             )
-        if trip.driver_id is None and trip.vehicle_id != vehicle.id:
-            return Response(
-                {"detail": "This trip is not assigned to you."}, status=403
-            )
+        if trip.vehicle_id != vehicle.pk:
+            return Response({"detail": "Vehicle is not assigned to this trip."}, status=403)
+        if trip.status not in (Trip.Status.SCHEDULED, Trip.Status.BOARDING, Trip.Status.IN_PROGRESS):
+            return Response({"detail": "Location tracking is closed for this trip."}, status=400)
+        # Pre-departure rank check-in starts only 15 minutes before scheduled time.
+        from .services.scheduled_departures import scheduled_at
+        scheduled_time = scheduled_at(trip)
+        if scheduled_time and timezone.now() < scheduled_time - timedelta(minutes=15):
+            return Response({"detail": "Location sharing opens 15 minutes before departure."}, status=400)
+        if scheduled_time and timezone.now() > scheduled_time + timedelta(minutes=15):
+            from .services.driver_location import driver_was_at_rank
+            # After check-in, the driver may continue reporting GPS throughout
+            # the journey; only a *new* late check-in is disallowed.
+            if not driver_was_at_rank(trip):
+                return Response({"detail": "Rank A check-in closed 15 minutes after departure."}, status=400)
     else:
         trip = (
             Trip.objects.select_related("route__departure")
@@ -1267,7 +1262,13 @@ def api_driver_post_location(request, vehicle_id):
             }
         )
 
-    result = record_driver_location(trip, lat, lng)
+    if trip.vehicle_id != vehicle.pk:
+        return Response({"detail": "Vehicle is not assigned to this trip."}, status=403)
+
+    try:
+        result = record_driver_location(trip, lat, lng)
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=400)
     result.update(
         {
             "lat": lat,
@@ -1322,11 +1323,79 @@ def api_routing_directions(request):
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def api_list_announcements(request):
-    """Public feed of active announcements."""
-    qs = Announcement.objects.filter(active=True).select_related(
-        "operator__association", "route__departure", "route__destination", "created_by",
+    """Original public announcement feed, with rank-scoped results for staff.
+
+    Passengers and guests see all active, non-expired admin/operator messages.
+    Drivers only see their approved rank(s) plus genuinely global messages.
+    Old announcements without a rank use their route, active operator ranks,
+    or the creating administrator's rank for backwards compatibility.
+    """
+    now = timezone.now()
+    qs = Announcement.objects.filter(active=True).filter(
+        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=now)
+    )
+
+    user = request.user
+    if user.is_authenticated and user.role in (User.Role.DRIVER, User.Role.OPERATOR):
+        rank_ids = set()
+        if user.role == User.Role.DRIVER:
+            driver = DriverProfile.objects.filter(user=user).first()
+            if driver:
+                rank_ids = set(DriverAtRank.objects.filter(
+                    driver=driver, status=OperatorAtRank.Status.ACTIVE,
+                ).values_list('rank_id', flat=True))
+        else:
+            operator = OperatorProfile.objects.filter(user=user).first()
+            if operator:
+                rank_ids = set(OperatorAtRank.objects.filter(
+                    operator=operator, status=OperatorAtRank.Status.ACTIVE,
+                ).values_list('rank_id', flat=True))
+
+        # No operator+no route+no target+no ranked admin = global notice.
+        global_notice = models.Q(
+            rank__isnull=True, route__isnull=True, operator__isnull=True,
+            created_by__admin_profile__rank__isnull=True,
+        )
+        scoped = (
+            models.Q(rank_id__in=rank_ids)
+            # Older posts made before the explicit Announcement.rank column:
+            | models.Q(rank__isnull=True, route__departure_id__in=rank_ids)
+            | models.Q(
+                rank__isnull=True, route__isnull=True,
+                operator__rank_memberships__rank_id__in=rank_ids,
+                operator__rank_memberships__status=OperatorAtRank.Status.ACTIVE,
+            )
+            | models.Q(
+                rank__isnull=True, route__isnull=True, operator__isnull=True,
+                created_by__admin_profile__rank_id__in=rank_ids,
+            )
+        )
+        if user.role == User.Role.OPERATOR:
+            # An operator may always review their own announcements.
+            scoped |= models.Q(created_by=user)
+        qs = qs.filter(global_notice | scoped).distinct()
+
+    qs = qs.select_related(
+        "rank", "operator__association", "route__departure", "route__destination",
+        "created_by__admin_profile__rank",
     ).order_by("-created_at")[:50]
     return Response(AnnouncementSerializer(qs, many=True).data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_my_announcement_ranks(request):
+    """Rank options an operator is allowed to publish an announcement for."""
+    operator = _get_operator_or_none(request)
+    if operator is None:
+        return Response({"detail": "Not an operator account."}, status=403)
+    memberships = OperatorAtRank.objects.filter(
+        operator=operator, status=OperatorAtRank.Status.ACTIVE,
+    ).select_related("rank").order_by("rank__name")
+    return Response([
+        {"id": m.rank_id, "name": m.rank.name, "area": m.rank.area}
+        for m in memberships
+    ])
 
 
 @api_view(["GET", "POST"])
@@ -1347,10 +1416,26 @@ def api_my_announcements(request):
     s.is_valid(raise_exception=True)
     data = s.validated_data
     route_id = data.pop("route_id", None)
+    rank_id = data.pop("rank_id", None)
     route = Route.objects.filter(pk=route_id).first() if route_id else None
+    if route_id and route is None:
+        return Response({"detail": "The selected route does not exist."}, status=400)
+
+    allowed_rank_ids = list(OperatorAtRank.objects.filter(
+        operator=op, status=OperatorAtRank.Status.ACTIVE,
+    ).values_list("rank_id", flat=True))
+    # For a single-rank operator, default to their rank like the original UI.
+    if rank_id is None and route:
+        rank_id = route.departure_id
+    if rank_id is None and len(allowed_rank_ids) == 1:
+        rank_id = allowed_rank_ids[0]
+    if rank_id is None or rank_id not in allowed_rank_ids:
+        return Response({"detail": "Select a rank where you have an active operator membership."}, status=400)
+    if route and route.departure_id != rank_id:
+        return Response({"detail": "The route must depart from the selected rank."}, status=400)
 
     ann = Announcement.objects.create(
-        operator=op, route=route,
+        operator=op, route=route, rank_id=rank_id,
         created_by=request.user,
         **data,
     )
@@ -1376,11 +1461,78 @@ def api_announcement_detail(request, announcement_id):
     for field in ["title", "body", "active"]:
         if field in request.data:
             setattr(ann, field, request.data[field])
-    if "route_id" in request.data:
-        rid = request.data["route_id"]
-        ann.route = Route.objects.filter(pk=rid).first() if rid else None
+    requested_rank = request.data.get("rank_id", ann.rank_id)
+    requested_route = request.data.get("route_id", ann.route_id)
+    membership_ids = set(OperatorAtRank.objects.filter(
+        operator=op, status=OperatorAtRank.Status.ACTIVE,
+    ).values_list("rank_id", flat=True))
+    try:
+        rank_id = int(requested_rank) if requested_rank not in (None, "") else None
+        route_id = int(requested_route) if requested_route not in (None, "") else None
+    except (ValueError, TypeError):
+        return Response({"detail": "Invalid rank or route."}, status=400)
+    if rank_id is None or rank_id not in membership_ids:
+        return Response({"detail": "Select one of your active ranks."}, status=400)
+    route = Route.objects.filter(pk=route_id).first() if route_id else None
+    if route_id and (route is None or route.departure_id != rank_id):
+        return Response({"detail": "Route must depart from the selected rank."}, status=400)
+    ann.rank_id = rank_id
+    ann.route = route
     ann.save()
     return Response(AnnouncementSerializer(ann).data)
+
+# ---------- Rank administrator announcements ----------
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def api_admin_announcements(request):
+    """Rank admins can publish announcements for their own rank."""
+    if request.user.role != User.Role.ADMIN:
+        return Response({"detail": "Administrator access required."}, status=403)
+    admin_profile = _get_admin_or_none(request)
+    if not admin_profile or not admin_profile.rank_id:
+        return Response({"detail": "You must be assigned to a rank."}, status=403)
+
+    if request.method == "GET":
+        qs = Announcement.objects.filter(
+            created_by=request.user, operator__isnull=True,
+        ).select_related("rank", "created_by__admin_profile__rank", "route__departure", "route__destination")
+        return Response(AnnouncementSerializer(qs, many=True).data)
+
+    s = AnnouncementWriteSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+    values = s.validated_data
+    values.pop("rank_id", None)  # Never trust a supplied rank for an administrator.
+    route_id = values.pop("route_id", None)
+    route = Route.objects.filter(pk=route_id).first() if route_id else None
+    if route_id and (route is None or route.departure_id != admin_profile.rank_id):
+        return Response({"detail": "The route must start at your rank."}, status=400)
+    ann = Announcement.objects.create(
+        rank_id=admin_profile.rank_id, route=route,
+        created_by=request.user, operator=None, **values,
+    )
+    return Response(AnnouncementSerializer(ann).data, status=201)
+
+
+@api_view(["DELETE"])
+@permission_classes([IsAuthenticated])
+def api_admin_announcement_detail(request, announcement_id):
+    if request.user.role != User.Role.ADMIN:
+        return Response({"detail": "Administrator access required."}, status=403)
+    admin_profile = _get_admin_or_none(request)
+    if not admin_profile or not admin_profile.rank_id:
+        return Response({"detail": "You must be assigned to a rank."}, status=403)
+    try:
+        ann = Announcement.objects.get(
+            pk=announcement_id, operator__isnull=True,
+            created_by=request.user, rank_id=admin_profile.rank_id,
+        )
+    except Announcement.DoesNotExist:
+        return Response({"detail": "Announcement not found."}, status=404)
+    ann.active = False
+    ann.save(update_fields=["active", "updated_at"])
+    return Response(status=204)
+
 
 # ---------- Panic alerts ----------
 
@@ -1499,58 +1651,7 @@ def _admin_rank(admin_profile):
     return admin_profile.rank
 
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def api_admin_pending_memberships(request):
-    """Pending OperatorAtRank requests for this admin's rank."""
-    admin_profile = _get_admin_or_none(request)
-    if admin_profile is None:
-        return Response({"detail": "Not an admin account."}, status=403)
-    if not admin_profile.rank:
-        return Response({"detail": "You are not assigned to a rank."}, status=400)
 
-    qs = OperatorAtRank.objects.filter(
-        rank=admin_profile.rank,
-        status=OperatorAtRank.Status.PENDING,
-    ).select_related("operator__user", "operator__association", "rank")
-    return Response(OperatorAtRankSerializer(qs, many=True).data)
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def api_admin_approve_membership(request, membership_id):
-    admin_profile = _get_admin_or_none(request)
-    if admin_profile is None:
-        return Response({"detail": "Not an admin account."}, status=403)
-    try:
-        m = OperatorAtRank.objects.get(pk=membership_id, rank=admin_profile.rank)
-    except OperatorAtRank.DoesNotExist:
-        return Response({"detail": "Membership not found for your rank."}, status=404)
-
-    m.status = OperatorAtRank.Status.ACTIVE
-    m.approved_by = admin_profile
-    m.approved_at = timezone.now()
-    m.save()
-    return Response(OperatorAtRankSerializer(m).data)
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-def api_admin_reject_membership(request, membership_id):
-    admin_profile = _get_admin_or_none(request)
-    if admin_profile is None:
-        return Response({"detail": "Not an admin account."}, status=403)
-    try:
-        m = OperatorAtRank.objects.get(pk=membership_id, rank=admin_profile.rank)
-    except OperatorAtRank.DoesNotExist:
-        return Response({"detail": "Membership not found for your rank."}, status=404)
-
-    m.status = OperatorAtRank.Status.REJECTED
-    m.notes = request.data.get("notes", m.notes)
-    m.approved_by = admin_profile
-    m.approved_at = timezone.now()
-    m.save()
-    return Response(OperatorAtRankSerializer(m).data)
 
 
 @api_view(["GET"])
@@ -1646,47 +1747,6 @@ def api_admin_me(request):
         "rank": RankSerializer(admin_profile.rank).data if admin_profile.rank else None,
     })
 
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def api_admin_membership_detail(request, membership_id):
-    """Full operator details for admin verification."""
-    admin_profile = _get_admin_or_none(request)
-    if admin_profile is None:
-        return Response({"detail": "Not an admin account."}, status=403)
-    try:
-        m = OperatorAtRank.objects.get(pk=membership_id, rank=admin_profile.rank)
-    except OperatorAtRank.DoesNotExist:
-        return Response({"detail": "Not found."}, status=404)
-
-    op = m.operator
-    u = op.user
-    return Response({
-        "id": m.id,
-        "status": m.status,
-        "notes": m.notes,
-        "requested_at": m.requested_at,
-        "approved_at": m.approved_at,
-        "rank": RankSerializer(m.rank).data,
-        "operator": {
-            "id": op.id,
-            "name": f"{u.first_name} {u.last_name}".strip() or u.phone,
-            "first_name": u.first_name,
-            "last_name": u.last_name,
-            "phone": u.phone,
-            "email": u.email,
-            "association_code": op.association.code,
-            "association_name": op.association.association_name,
-            "account_created": u.date_joined,
-            "membership_count": OperatorAtRank.objects.filter(operator=op).count(),
-            "active_memberships": OperatorAtRank.objects.filter(
-                operator=op, status=OperatorAtRank.Status.ACTIVE
-            ).count(),
-            "routes_served": Route.objects.filter(
-                trips__operator=op
-            ).distinct().count(),
-            "trips_operated": Trip.objects.filter(operator=op).count(),
-        },
-    })
 
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
@@ -2411,86 +2471,33 @@ def api_verify_cash_payment(request, trip_id, booking_id):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
-@transaction.atomic
 def api_trip_driver_no_show_refunds(request, trip_id):
-    """Refund paid passengers when the driver was not at the rank at trip start.
+    """Operator review of the same automatic T+15 driver no-show refund rule.
 
-    The decision is made from the driver's own GPS pings (see
-    ``services.driver_location``), not from a manual checkbox:
-
-    * a ping inside 350 m of the departure rank before departure -> no refunds
-    * no qualifying ping and the trip has started -> full refund for every paid
-      passenger still reserved
-
-    Body (optional):
-      ``{"force": true}``    — skip the "trip has not started yet" guard.
-      ``{"override": true}`` — ignore GPS evidence (GPS unavailable, driver
-      confirmed absent in person). Use sparingly: it refunds everyone paid.
+    The scheduled job runs without manual action. Only the assigned operator or
+    an administrator can request a re-check; a driver cannot initiate refunds.
     """
+    from .services.auto_no_show import refund_overdue_trip
     try:
-        trip = Trip.objects.select_related("route__departure", "driver").get(pk=trip_id)
+        trip = Trip.objects.get(pk=trip_id)
     except Trip.DoesNotExist:
         return Response({"detail": "Trip not found."}, status=404)
-
-    is_driver = (
-        getattr(request.user, "role", None) == User.Role.DRIVER
-        and trip.driver_id
-        and getattr(trip.driver, "user_id", None) == request.user.id
+    op = _get_operator_or_none(request)
+    authorised = (op is not None and trip.operator_id == op.pk) or (
+        request.user.role == User.Role.ADMIN or request.user.is_superuser
     )
-    is_operator = _get_operator_or_none(request) is not None
-    if not (is_driver or is_operator or request.user.is_superuser):
-        return Response({"detail": "Not allowed."}, status=403)
-
-    from .services.driver_location import driver_was_at_rank
-    from .services.payment import refund_driver_no_show, trip_departure_dt
-
-    force = bool(request.data.get("force", False))
-    override = bool(request.data.get("override", False))
-    dep = trip_departure_dt(trip)
-    now = timezone.now()
-
-    if dep and now < dep and not force:
-        return Response(
-            {"detail": "Trip start time has not been reached yet.", "refunded": []},
-            status=400,
-        )
-
-    checked_in = driver_was_at_rank(trip)
-    if checked_in and not override:
-        return Response(
-            {
-                "detail": (
-                    "Driver was at the departure rank at trip start "
-                    f"({trip.driver_at_rank_at:%H:%M}) — no refunds issued."
-                ),
-                "driver_at_rank_at": trip.driver_at_rank_at,
-                "refunded": [],
-            }
-        )
-
-    refunded = []
-    qs = trip.bookings.filter(
-        status=Booking.Status.RESERVED,
-        payment_status=Booking.PaymentStatus.PAID,
-    )
-    for booking in qs:
-        refund_driver_no_show(booking)
-        refunded.append(booking.id)
-
-    if not checked_in:
-        trip.driver_location_status = "no_show"
-        trip.save(update_fields=["driver_location_status"])
-
-    return Response(
-        {
-            "detail": (
-                f"Refunded {len(refunded)} paid passenger(s) — the driver was not "
-                "at the departure rank at trip start."
-                if refunded
-                else "No paid passengers were waiting for a refund."
-            ),
-            "driver_at_rank_at": trip.driver_at_rank_at,
-            "refunded": refunded,
-        }
-    )
-
+    if not authorised:
+        return Response({"detail": "Only the trip operator or administrator can review driver no-show refunds."}, status=403)
+    # No earlier refunds, even if a caller sends force=true.
+    # Only administrators can override contradictory GPS evidence.
+    override = request.user.role == User.Role.ADMIN and request.data.get('override') is True
+    result = refund_overdue_trip(trip.pk, override=override)
+    if result['status'] == 'too_early':
+        return Response({"detail": "The 15-minute arrival period has not ended.", **result}, status=400)
+    messages = {
+        'refunded': 'Paid passengers received a full recorded refund because rank A check-in was missing after 15 minutes.',
+        'already_processed': 'Driver no-show refunds were already processed.',
+        'checked_in': 'Driver checked in at rank A within the permitted time; no refunds due.',
+        'not_active': 'This trip is not eligible for driver no-show processing.',
+    }
+    return Response({"detail": messages.get(result['status'], result['status']), **result})

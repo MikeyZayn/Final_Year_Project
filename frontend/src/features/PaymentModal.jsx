@@ -30,6 +30,7 @@ export default function PaymentModal({
   seats = 1,
   open = false,
   onClose,
+  onViewTrips,
   onComplete,
   busy = false,
 }) {
@@ -201,7 +202,7 @@ export default function PaymentModal({
             className="pb-primary pb-wide"
             type="button"
             style={{ marginTop: 16 }}
-            onClick={onClose}
+            onClick={() => (onViewTrips ? onViewTrips() : onClose?.())}
           >
             View my trip
           </button>

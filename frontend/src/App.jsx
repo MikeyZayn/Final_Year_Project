@@ -6,7 +6,7 @@ const roles = ['passenger', 'driver', 'operator', 'administrator'];
 import api from './api';
 import { DrawerTile, PageControls } from './features/Drawer.jsx';
 import { confirmDeliveredBookings } from './services/autoBoarding.js';
-import { DriverRankMemberships, AdminDriverRankRequests, GroupBookingModal, GroupBoarding, DepartureQueue } from './features/TripFeatures.jsx';
+import { GroupBookingModal, GroupBoarding, DepartureQueue } from './features/TripFeatures.jsx';
 import DriverPage from './pages/DriverPage.jsx';
 import ThembaMap from './components/ThembaMap.jsx';
 import { TripEditor, TripGroupEditor, apiMessage } from './features/TripManagement.jsx';
@@ -166,6 +166,19 @@ function App() {
     setProfile(getProfileDefaults(role));
   }, [role]);
 
+  useEffect(() => {
+    if (role !== 'passenger' || !sessionUser) return;
+    setProfile(current => ({
+      ...current,
+      name: [sessionUser.first_name, sessionUser.last_name].filter(Boolean).join(' ') || 'Passenger',
+      phone: sessionUser.phone || '',
+      email: sessionUser.email || '',
+      emergencyContact: '',
+      homeArea: '',
+      avatarInitials: [sessionUser.first_name?.[0], sessionUser.last_name?.[0]].filter(Boolean).join('').toUpperCase() || 'P',
+    }));
+  }, [role, sessionUser]);
+
   // A restored login resumes receipt detection when the passenger reopens THEMBA.
   useEffect(() => {
     if (sessionUser) {
@@ -251,6 +264,7 @@ function App() {
             activeTrip={activeTrip}
             setActiveTrip={setActiveTrip}
             notify={notify}
+            onOpenSettings={() => setSettingsOpen(true)}
             issuedVerificationCodes={issuedVerificationCodes}
             issueVerificationCode={(tripId) => {
               const code = `${tripId}-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -811,7 +825,7 @@ function RolePicker({ role, setRole }) {
   );
 }
 
-function Dashboard({ role, onSignIn, activeTrip, setActiveTrip, notify, issuedVerificationCodes, issueVerificationCode }) {
+function Dashboard({ role, onSignIn, activeTrip, setActiveTrip, notify, onOpenSettings, issuedVerificationCodes, issueVerificationCode }) {
   const { user } = useAuth();
   const displayName =
     [user?.first_name, user?.last_name].filter(Boolean).join(' ') ||
@@ -820,15 +834,17 @@ function Dashboard({ role, onSignIn, activeTrip, setActiveTrip, notify, issuedVe
     'User';
   return (
     <section className="dashboard">
-      <div className="dashboard-heading">
-        <div>
-          <div className="eyebrow">{role} dashboard</div>
-          <h2>{displayName}</h2>
+      {role !== 'driver' && (
+        <div className="dashboard-heading">
+          <div>
+            <div className="eyebrow">{role} dashboard</div>
+            <h2>{displayName}</h2>
+          </div>
         </div>
-      </div>
+      )}
 
-      {role === 'passenger' && <Passenger onSignIn={onSignIn} activeTrip={activeTrip} setActiveTrip={setActiveTrip} notify={notify} issuedVerificationCodes={issuedVerificationCodes} />}
-      {role === 'driver' && <Driver notify={notify} />}
+      {role === 'passenger' && <Passenger onSignIn={onSignIn} activeTrip={activeTrip} setActiveTrip={setActiveTrip} notify={notify} onOpenSettings={onOpenSettings} issuedVerificationCodes={issuedVerificationCodes} />}
+      {role === 'driver' && <DriverPage notify={notify} />}
       {role === 'operator' && <Operator notify={notify} />}
       {role === 'administrator' && <Administrator notify={notify} />}
     </section>
@@ -906,7 +922,7 @@ function RouteMapPanel({ trip }) {
   );
 }
 
-function Passenger({ notify, onSignIn }) {
+function Passenger({ notify, onSignIn, onOpenSettings }) {
   const { user } = useAuth();
   // ----- shared state -----
   const [departure, setDeparture] = useState('');
@@ -1142,6 +1158,7 @@ function Passenger({ notify, onSignIn }) {
         onBook={openPayment}
         onGroup={(trip) => (user ? setGroupBookingTripId(trip?.id ?? trip) : onSignIn?.())}
         notifications={notifications}
+        onOpenSettings={onOpenSettings}
         onCancel={cancelBooking}
         onPanic={raisePanic}
         feedbackList={feedbackList}
@@ -1149,8 +1166,9 @@ function Passenger({ notify, onSignIn }) {
         announcements={announcements}
         passengerName={
           [user?.first_name, user?.last_name].filter(Boolean).join(' ') ||
-          demoUsers.passenger
+          'Passenger'
         }
+        passenger={user}
       />
 
       {groupBookingTripId && <GroupBookingModal
@@ -1166,6 +1184,10 @@ function Passenger({ notify, onSignIn }) {
         seats={1 + paymentCompanions.length}
         busy={bookingId !== null}
         onClose={closePayment}
+        onViewTrips={() => {
+          closePayment();
+          window.location.hash = '#/passenger/my-trip';
+        }}
         onComplete={payload => bookTrip(paymentTrip?.id, paymentCompanions, payload)}
       />
 
@@ -1696,228 +1718,6 @@ function RatingModal({ bookingId, onClose, onDone, notify }) {
   );
 }
 
-function Driver({ notify }) {
-  const [profile, setProfile] = useState(null);
-  const [trips, setTrips] = useState([]);
-  const [vehicle, setVehicle] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [mapTrip, setMapTrip] = useState(null);
-  const [confirmCode, setConfirmCode] = useState('');
-  const [confirmMsg, setConfirmMsg] = useState('');
-
-  async function load() {
-    setLoading(true);
-    setError('');
-    try {
-      const [pRes, tRes, vRes] = await Promise.all([
-        api.get('/transport/api/driver/profile/'),
-        api.get('/transport/api/driver/trips/'),
-        api.get('/transport/api/driver/vehicle/'),
-      ]);
-      setProfile(pRes.data);
-      setTrips(tRes.data);
-      setVehicle(vRes.data);
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Could not load driver data.');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => { load(); }, []);
-
-  async function confirmTrip() {
-    setConfirmMsg('');
-    if (!confirmCode.trim()) return;
-    try {
-      await api.confirmTrip(confirmCode.trim());
-      setConfirmMsg('Trip confirmed.');
-      setConfirmCode('');
-      load();
-    } catch (err) {
-      setConfirmMsg(err.response?.data?.detail || 'Could not confirm trip.');
-    }
-  }
-
-  async function acceptTrip(tripCode) {
-  if (!window.confirm(`Confirm you are operating trip ${tripCode}?`)) return;
-  try {
-    await api.confirmTrip(tripCode);
-    notify('Trip confirmed.');
-    load();
-  } catch (err) {
-    notify(err.response?.data?.detail || 'Could not confirm.');
-  }
-}
-
-  if (loading) {
-    return <article className="module module-wide"><p className="muted">Loading…</p></article>;
-  }
-
-  if (error) {
-    return <article className="module module-wide">
-      <p className="danger-button" style={{ display: 'block' }}>{error}</p>
-    </article>;
-  }
-
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Johannesburg' });
-  const todayTrips = trips.filter((t) => t.departure_date === today);
-  const upcoming = trips.filter((t) => t.departure_date > today);
-  const past = trips.filter((t) => t.departure_date < today);
-
-  return (
-    <div className="dashboard-grid">
-      {mapTrip && <PassengerRouteMap trip={mapTrip} notify={notify} onClose={() => setMapTrip(null)} />}
-      <DrawerTile title="My driver ranks" description="Your rank access and requests to switch ranks" icon="◎"><DriverRankMemberships notify={notify} /></DrawerTile>
-      <article className="module module-wide"><div className="module-heading"><span>Assigned route map</span></div><label>Trip<select value={mapTrip?.id || ''} onChange={e => setMapTrip(trips.find(t => t.id === Number(e.target.value)) || null)}><option value="">Choose a trip to view its road route</option>{trips.map(t => <option key={t.id} value={t.id}>{t.trip_code} · {t.route.departure.name} → {t.route.destination.name}</option>)}</select></label></article>
-
-      <article className="module module-wide">
-        <div className="module-heading">
-          <span>My profile</span>
-          <span className="module-number">{profile?.license_number}</span>
-        </div>
-        <div className="route-summary">
-          <div><span className="route-label">Name</span><strong>{profile?.user?.first_name} {profile?.user?.last_name}</strong></div>
-          <div><span className="route-label">Phone</span><strong>{profile?.user?.phone}</strong></div>
-          <div><span className="route-label">Status</span><strong>{profile?.status}</strong></div>
-          <div><span className="route-label">DOT check</span><strong>{profile?.external_verification_status}</strong></div>
-        </div>
-      </article>
-
-      <article className="module">
-        <div className="module-heading">
-          <span>Passenger rating</span>
-          <span className="module-number">
-            {profile?.rating_avg ? `${profile.rating_avg} / 5` : 'No ratings'}
-          </span>
-        </div>
-        {profile?.rating_avg ? (
-          <>
-            <p className="rating">
-              {'★'.repeat(Math.round(profile.rating_avg))}
-              <span>{'★'.repeat(5 - Math.round(profile.rating_avg))}</span>
-            </p>
-            <p className="muted">Based on {profile.rating_count} verified rating(s).</p>
-          </>
-        ) : (
-          <p className="muted">No ratings yet.</p>
-        )}
-      </article>
-
-      <article className="module">
-        <div className="module-heading">
-          <span>Complaints</span>
-          <span className="module-number">
-            {profile?.open_complaints > 0
-              ? `${profile.open_complaints} open`
-              : 'None open'}
-          </span>
-        </div>
-        <p className="muted">
-          {profile?.complaint_count || 0} total on record.
-        </p>
-      </article>
-
-      <article className="module">
-        <div className="module-heading">
-          <span>My vehicle</span>
-          <span className="module-number">{vehicle?.plate_number || 'None'}</span>
-        </div>
-        {vehicle ? (
-          <p className="muted">
-            {vehicle.make} {vehicle.model} · {vehicle.seat_capacity} seats · {vehicle.status}
-          </p>
-        ) : (
-          <p className="muted">No vehicle assigned.</p>
-        )}
-      </article>
-
-      <article className="module">
-        <div className="module-heading">
-          <span>Confirm trip by code</span>
-        </div>
-        <p className="muted">
-          If an operator gives you a trip code, enter it here to confirm the assignment.
-        </p>
-        <input
-          value={confirmCode}
-          onChange={(e) => setConfirmCode(e.target.value)}
-          placeholder="TRP-..."
-        />
-        <button className="secondary-button" onClick={confirmTrip} type="button" style={{ marginTop: 8 }}>
-          Confirm trip
-        </button>
-        {confirmMsg && <p className="muted" style={{ marginTop: 8 }}>{confirmMsg}</p>}
-      </article>
-
-      <article className="module module-wide">
-        <div className="module-heading">
-          <span>Today's trips</span>
-          <span className="module-number">{todayTrips.length}</span>
-        </div>
-        {todayTrips.length === 0 && <p className="muted">No trips scheduled for today.</p>}
-        {todayTrips.slice(0, 5).map((t) => (
-          <DriverTripRow key={t.id} trip={t} onConfirm={() => acceptTrip(t.trip_code)} />
-        ))}
-      </article>
-
-      <DrawerTile title="Trip history & upcoming trips" description="Open your assignments across all dates" icon="↔">
-        <article className="module"><h3>All today’s trips</h3>{todayTrips.map(t => <DriverTripRow key={t.id} trip={t} onConfirm={() => acceptTrip(t.trip_code)} />)}</article>
-      {upcoming.length > 0 && (
-        <article className="module module-wide">
-          <div className="module-heading">
-            <span>Upcoming trips</span>
-            <span className="module-number">{upcoming.length}</span>
-          </div>
-          {upcoming.map((t) => <DriverTripRow key={t.id} trip={t} />)}
-        </article>
-      )}
-
-      {past.length > 0 && (
-        <article className="module module-wide">
-          <div className="module-heading">
-            <span>Past trips</span>
-            <span className="module-number">{past.length}</span>
-          </div>
-          {past.map((t) => <DriverTripRow key={t.id} trip={t} />)}
-        </article>
-      )}
-      </DrawerTile>
-    </div>
-  );
-}
-
-function DriverTripRow({ trip, onConfirm }) {
-  const statusColor =
-    trip.status === 'flagged' ? 'var(--danger)' :
-    trip.status === 'boarding' || trip.status === 'in_progress' ? 'var(--success)' :
-    trip.status === 'completed' ? 'var(--muted)' :
-    'var(--accent)';
-  return (
-    <button
-      className="trip-row"
-      type="button"
-      onClick={onConfirm}
-      style={{ width: '100%', textAlign: 'left', background: 'transparent', border: 'none', borderBottom: '1px solid var(--border)', cursor: 'pointer', font: 'inherit', color: 'inherit' }}
-    >
-      <span>
-        <strong>
-          {trip.route.departure.name} → {trip.route.destination.name}
-        </strong>
-        <small>
-          {trip.trip_code} · {trip.departure_date}
-          {trip.expected_departure_time ? ` · ${trip.expected_departure_time.slice(0, 5)}` : ''}
-          {' · '}{trip.seats_taken}/{trip.seat_capacity} seats
-        </small>
-      </span>
-      <span className="status-pill" style={{ borderColor: statusColor, color: statusColor }}>
-        {trip.status}
-      </span>
-    </button>
-  );
-}
-
 function Operator({ notify }) {
   const [trips, setTrips] = useState([]);
   const [selectedTripId, setSelectedTripId] = useState(null);
@@ -1976,7 +1776,6 @@ function Operator({ notify }) {
       <DrawerTile title="All my trips" description="Open your full queue and journey history" icon="↗"><OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} /></DrawerTile>
       <DrawerTile title="Passenger alerts" description="Review and respond to active alerts" icon="!"><OperatorAlerts notify={notify} /></DrawerTile>
       <DrawerTile title="Feedback" description="Ratings, complaints and responses" icon="☆"><OperatorFeedback notify={notify} /></DrawerTile>
-      <DrawerTile title="Rank access" description="Your memberships and requests to another rank" icon="◎"><OperatorMemberships memberships={memberships} /><OperatorRequestRank notify={notify} onRequested={load} /></DrawerTile>
       <DrawerTile title="Announcements" description="Service messages for your passengers" icon="↗"><OperatorAnnouncements notify={notify} /></DrawerTile>
     </div>
   );
@@ -2056,31 +1855,36 @@ function OperatorAnnouncements({ notify }) {
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [routes, setRoutes] = useState([]);
+  const [ranks, setRanks] = useState([]);
+  const [rankId, setRankId] = useState('');
   const [routeId, setRouteId] = useState('');
 
   async function load() {
     try {
-      const [aRes, rRes] = await Promise.all([
+      const [aRes, rRes, rankRes] = await Promise.all([
         api.get('/transport/api/my-announcements/'),
         api.get('/transport/api/my-trips/'),
+        api.get('/transport/api/my-announcement-ranks/'),
       ]);
       setItems(aRes.data);
-      // build unique route list from trips
+      setRanks(rankRes.data);
+      setRankId(current => current || (rankRes.data.length === 1 ? String(rankRes.data[0].id) : ''));
       const seen = new Map();
       rRes.data.forEach((t) => {
-        if (!seen.has(t.route.id)) seen.set(t.route.id, t.route);
+        if (t.route && !seen.has(t.route.id)) seen.set(t.route.id, t.route);
       });
       setRoutes([...seen.values()]);
-    } catch { /* ignore */ }
+    } catch { notify?.('Could not load announcements or rank assignments.'); }
   }
 
   useEffect(() => { load(); }, []);
 
   async function submit() {
     if (!title.trim() || !body.trim()) { notify('Title and body required.'); return; }
+    if (!rankId) { notify('Choose your rank before publishing.'); return; }
     try {
       await api.post('/transport/api/my-announcements/', {
-        title, body, route_id: routeId ? Number(routeId) : null, active: true,
+        title, body, rank_id: Number(rankId), route_id: routeId ? Number(routeId) : null, active: true,
       });
       notify('Announcement published.');
       setTitle(''); setBody(''); setRouteId(''); setShowForm(false);
@@ -2105,7 +1909,7 @@ function OperatorAnnouncements({ notify }) {
         <span>Announcements</span>
         <span className="module-number">{items.filter(i => i.active).length} active</span>
       </div>
-      <p className="muted">Publish service updates. Passengers see these on their dashboard.</p>
+      <p className="muted">Publish an update for your rank. Drivers assigned to that rank and passengers will see it.</p>
 
       {!showForm && (
         <button className="primary-button" onClick={() => setShowForm(true)} type="button">
@@ -2133,10 +1937,17 @@ function OperatorAnnouncements({ notify }) {
             />
           </label>
           <label>
+            Publish for rank
+            <select required value={rankId} onChange={(e) => { setRankId(e.target.value); setRouteId(''); }}>
+              <option value="">Select a rank</option>
+              {ranks.map((r) => <option key={r.id} value={r.id}>{r.name}{r.area ? ` · ${r.area}` : ''}</option>)}
+            </select>
+          </label>
+          <label>
             Link to route (optional)
             <select value={routeId} onChange={(e) => setRouteId(e.target.value)}>
-              <option value="">All routes</option>
-              {routes.map((r) => (
+              <option value="">All routes at this rank</option>
+              {routes.filter(r => !rankId || String(r.departure?.id) === rankId).map((r) => (
                 <option key={r.id} value={r.id}>
                   {r.departure.name} → {r.destination.name}
                 </option>
@@ -2159,6 +1970,7 @@ function OperatorAnnouncements({ notify }) {
                 <strong>{a.title}</strong>
                 <small>
                   {new Date(a.created_at).toLocaleDateString()}
+                  {a.rank_name ? ` · ${a.rank_name}` : ''}
                   {a.route_label ? ` · ${a.route_label}` : ''}
                 </small>
               </span>
@@ -2401,136 +2213,6 @@ function TripRow({ trip, onClick }) {
   );
 }
 
-function OperatorMemberships({ memberships }) {
-  return (
-    <article className="module">
-      <div className="module-heading">
-        <span>My rank memberships</span>
-        <span className="module-number">{memberships.length}</span>
-      </div>
-      {memberships.length === 0 && (
-        <p className="muted">No memberships yet. Request a rank.</p>
-      )}
-      {memberships.map((m) => (
-        <div className="trip-row" key={m.id}>
-          <span>
-            <strong>{m.rank.name}</strong>
-            <small>{m.rank.area}</small>
-          </span>
-          <span
-            className="status-pill"
-            style={{
-              borderColor: m.status === 'active' ? 'var(--success)' : 'var(--accent)',
-              color: m.status === 'active' ? 'var(--success)' : 'var(--accent)',
-            }}
-          >
-            {m.status}
-          </span>
-        </div>
-      ))}
-    </article>
-  );
-}
-
-function OperatorRequestRank({ notify, onRequested }) {
-  const [ranks, setRanks] = useState([]);
-  const [myRankIds, setMyRankIds] = useState([]);
-  const [rankId, setRankId] = useState('');
-  const [notes, setNotes] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [showForm, setShowForm] = useState(false);
-
-  async function loadOptions() {
-    try {
-      const [rankRes, memRes] = await Promise.all([
-        api.get('/transport/api/ranks/'),
-        api.get('/transport/api/my-memberships/'),
-      ]);
-      setRanks(rankRes.data);
-      const mine = memRes.data.map((m) => m.rank.id);
-      setMyRankIds(mine);
-      const available = rankRes.data.filter((r) => !mine.includes(r.id));
-      if (available[0]) setRankId(available[0].id);
-    } catch {
-      setError('Could not load ranks.');
-    }
-  }
-
-  useEffect(() => { loadOptions(); }, []);
-
-  async function submit() {
-    setError('');
-    if (!rankId) { setError('Pick a rank.'); return; }
-    setBusy(true);
-    try {
-      await api.post('/transport/api/request-rank/', {
-        rank_id: Number(rankId),
-        notes,
-      });
-      notify('Rank request submitted for admin approval.');
-      setNotes('');
-      setShowForm(false);
-      await loadOptions();
-      onRequested?.();
-    } catch (err) {
-      setError(err.response?.data?.detail || 'Failed to submit request.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const availableRanks = ranks.filter((r) => !myRankIds.includes(r.id));
-
-  return (
-    <article className="module">
-      <div className="module-heading">
-        <span>Request a rank</span>
-        <span className="module-number">Approval required</span>
-      </div>
-      <p className="muted">
-        Apply to operate at another rank. The rank&apos;s admin reviews and approves.
-      </p>
-
-      {!showForm && (
-        <button className="secondary-button" onClick={() => setShowForm(true)} type="button">
-          Request rank
-        </button>
-      )}
-
-      {showForm && (
-        availableRanks.length === 0 ? (
-          <p className="muted">You already have a membership at every rank.</p>
-        ) : (
-          <>
-            <label>
-              Rank
-              <select value={rankId} onChange={(e) => setRankId(e.target.value)}>
-                {availableRanks.map((r) => (
-                  <option key={r.id} value={r.id}>{r.name} ({r.area})</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Reason (optional)
-              <input value={notes} onChange={(e) => setNotes(e.target.value)} />
-            </label>
-            {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
-            <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
-              <button className="secondary-button" onClick={() => setShowForm(false)} type="button">
-                Cancel
-              </button>
-              <button className="primary-button" onClick={submit} disabled={busy} type="button">
-                {busy ? 'Submitting…' : 'Submit request'}
-              </button>
-            </div>
-          </>
-        )
-      )}
-    </article>
-  );
-}
-
 function OperatorTripDetail({ tripId, onBack, notify }) {
   const [trip, setTrip] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2584,16 +2266,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     }
   }
 
-  async function release() {
-    if (!window.confirm('Depart this trip? Passengers who have not boarded will be marked no-show.')) return;
-    try {
-      const { data } = await api.post(`/transport/api/my-trips/${tripId}/release/`);
-      notify(`Trip released. ${data.bumped} unverified passenger(s) bumped.`);
-      load();
-    } catch (err) {
-      notify(err.response?.data?.detail || 'Could not release.');
-    }
-  }
   async function completeTrip() {
     if (!window.confirm('Complete this trip? Unverified passengers will be marked no-show.')) return;
     try {
@@ -2726,7 +2398,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
         <article className="module module-wide">
           <div className="module-heading"><span>Work this trip?</span></div>
           <p className="muted">
-            Engaging locks you to this trip until you release it. You cannot work another
+            Engaging opens boarding. Verified trips start automatically at departure; you cannot work another
             trip at the same time.
           </p>
           <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
@@ -2754,9 +2426,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
             <button className="secondary-button" onClick={onBack} type="button">← Back</button>
             <button className="primary-button" onClick={completeTrip} disabled={trip.status !== 'in_progress'} type="button">
               Complete trip
-            </button>
-            <button className="danger-button" onClick={release} disabled={trip.status !== 'boarding' || !trip.assets_verified_at} type="button">
-              Depart trip
             </button>
             <button className="secondary-button" onClick={refundDriverNoShow} disabled={refunding} type="button">
               {refunding ? 'Checking driver…' : 'Driver no-show refunds'}
@@ -2991,168 +2660,68 @@ function Administrator({ notify }) {
       </article>
 
       <DrawerTile title="Departure queue" description="Waiting taxis, queue expiry and new departures" icon="↗"><DepartureQueue /><AdminScheduleTrip notify={notify} /></DrawerTile>
-      <DrawerTile title="Rank applications" description="Review operator and driver rank requests" icon="＋"><AdminMemberships notify={notify} /><AdminDriverRankRequests notify={notify} /></DrawerTile>
       <DrawerTile title="Drivers & DOT checks" description="Licences, demo registry checks and verification status" icon="✓"><AdminDrivers notify={notify} /></DrawerTile>
       <DrawerTile title="Accounts" description="Search people and manage account access" icon="◎"><AdminAccounts notify={notify} /></DrawerTile>
       <DrawerTile title="Trip management" description="Journey history and trip controls" icon="↔"><AdminTrips notify={notify} /></DrawerTile>
+      <DrawerTile title="Announcements" description="Publish rank notices for your operators and drivers" icon="↗"><AdminAnnouncements notify={notify} rank={adminInfo.rank} /></DrawerTile>
       <DrawerTile title="Feedback & flags" description="Passenger feedback and reported trip issues" icon="! "><AdminFeedback notify={notify} /><AdminFlags notify={notify} /></DrawerTile>
     </div>
   );
 }
 
-function AdminApplicantModal({ membershipId, onClose, onApprove, onReject }) {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const { data } = await api.get(`/transport/api/admin/memberships/${membershipId}/`);
-        setData(data);
-      } catch (err) {
-        setError(err.response?.data?.detail || 'Could not load.');
-      }
-    })();
-  }, [membershipId]);
-
-  return (
-    <div className="settings-overlay" onClick={onClose}>
-      <div className="settings-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="settings-header">
-          <h3>Applicant details</h3>
-          <button className="text-button" onClick={onClose} type="button">Close</button>
-        </div>
-
-        {error && <p className="danger-button" style={{ display: 'block' }}>{error}</p>}
-        {!data && !error && <p className="muted">Loading…</p>}
-
-        {data && (
-          <>
-            <div className="settings-section">
-              <div className="section-title">Identity</div>
-              <div className="route-summary">
-                <div><span className="route-label">Name</span><strong>{data.operator.name}</strong></div>
-                <div><span className="route-label">Phone</span><strong>{data.operator.phone}</strong></div>
-                <div><span className="route-label">Email</span><strong>{data.operator.email || '—'}</strong></div>
-                <div><span className="route-label">Account created</span><strong>{new Date(data.operator.account_created).toLocaleDateString()}</strong></div>
-              </div>
-            </div>
-
-            <div className="settings-section">
-              <div className="section-title">Association</div>
-              <div className="route-summary">
-                <div><span className="route-label">Code</span><strong>{data.operator.association_code}</strong></div>
-                <div><span className="route-label">Name</span><strong>{data.operator.association_name}</strong></div>
-              </div>
-            </div>
-
-            <div className="settings-section">
-              <div className="section-title">Platform history</div>
-              <div className="route-summary">
-                <div><span className="route-label">Total memberships</span><strong>{data.operator.membership_count}</strong></div>
-                <div><span className="route-label">Active memberships</span><strong>{data.operator.active_memberships}</strong></div>
-                <div><span className="route-label">Routes served</span><strong>{data.operator.routes_served}</strong></div>
-                <div><span className="route-label">Trips operated</span><strong>{data.operator.trips_operated}</strong></div>
-              </div>
-            </div>
-
-            {data.notes && (
-              <div className="settings-section">
-                <div className="section-title">Application notes</div>
-                <p className="muted">{data.notes}</p>
-              </div>
-            )}
-
-            <div className="settings-section">
-              <div className="section-title">Request</div>
-              <p className="muted">
-                Requested {new Date(data.requested_at).toLocaleString()}
-                {' · '}Rank: <strong>{data.rank.name}</strong>
-                {' · '}Status: <strong>{data.status}</strong>
-              </p>
-            </div>
-
-            <div className="settings-actions">
-              <button className="secondary-button" onClick={onClose} type="button">Close</button>
-              <button className="danger-button" onClick={() => { onReject(membershipId); onClose(); }} type="button">
-                Reject
-              </button>
-              <button className="primary-button" onClick={() => { onApprove(membershipId); onClose(); }} type="button">
-                Approve
-              </button>
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AdminMemberships({ notify }) {
+function AdminAnnouncements({ notify, rank }) {
   const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [detailId, setDetailId] = useState(null);
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [working, setWorking] = useState(false);
 
   async function load() {
-    setLoading(true);
     try {
-      const { data } = await api.get('/transport/api/admin/pending-memberships/');
-      setItems(data);
-    } catch { /* ignore */ }
-    finally { setLoading(false); }
+      const { data } = await api.get('/transport/api/admin/announcements/');
+      setItems(Array.isArray(data) ? data : []);
+    } catch (error) { notify?.(error.response?.data?.detail || 'Could not load rank announcements.'); }
   }
-
   useEffect(() => { load(); }, []);
 
-  async function approve(id) {
+  async function publish() {
+    if (!title.trim() || !body.trim()) { notify?.('Enter a title and message.'); return; }
+    setWorking(true);
     try {
-      await api.post(`/transport/api/admin/memberships/${id}/approve/`);
-      notify('Operator approved.');
-      load();
-    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+      await api.post('/transport/api/admin/announcements/', { title: title.trim(), body: body.trim() });
+      setTitle(''); setBody('');
+      notify?.('Announcement published for your rank.');
+      await load();
+    } catch (error) { notify?.(error.response?.data?.detail || 'Could not publish announcement.'); }
+    finally { setWorking(false); }
   }
 
-  async function reject(id) {
-    const notes = window.prompt('Reason for rejection (optional):');
-    if (notes === null) return;
+  async function deactivate(id) {
+    if (!window.confirm('Deactivate this announcement?')) return;
     try {
-      await api.post(`/transport/api/admin/memberships/${id}/reject/`, { notes });
-      notify('Operator rejected.');
-      load();
-    } catch (err) { notify(err.response?.data?.detail || 'Failed.'); }
+      await api.delete(`/transport/api/admin/announcements/${id}/`);
+      notify?.('Announcement deactivated.');
+      await load();
+    } catch (error) { notify?.(error.response?.data?.detail || 'Could not deactivate announcement.'); }
   }
 
   return (
     <article className="module module-wide">
-      <div className="module-heading">
-        <span>Pending operator applications</span>
-        <span className="module-number">{items.length}</span>
-      </div>
-      <p className="muted">Click View details to verify an applicant before deciding.</p>
-      {loading && <p className="muted">Loading…</p>}
-      {!loading && items.length === 0 && <p className="muted">No pending applications.</p>}
-      {items.map((m) => (
-        <div className="trip-row" key={m.id}>
-          <span>
-            <strong>{m.operator_name}</strong>
-            <small>{m.rank.name} · requested {new Date(m.requested_at || Date.now()).toLocaleDateString()}</small>
-          </span>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="secondary-button" onClick={() => setDetailId(m.id)} type="button">View details</button>
-            <button className="primary-button" onClick={() => approve(m.id)} type="button">Approve</button>
-            <button className="danger-button" onClick={() => reject(m.id)} type="button">Reject</button>
-          </div>
+      <div className="module-heading"><span>Rank announcements</span><span className="module-number">{rank.name}</span></div>
+      <p className="muted">Your notice is shown to drivers assigned to {rank.name} and to passengers.</p>
+      <label>Title<input value={title} onChange={e => setTitle(e.target.value)} maxLength={150} /></label>
+      <label>Message<textarea value={body} onChange={e => setBody(e.target.value)} rows={3}
+        style={{ width: '100%', border: '1px solid var(--border)', borderRadius: 7, padding: 10, font: 'inherit' }} /></label>
+      <button type="button" className="primary-button" disabled={working} onClick={publish}>
+        {working ? 'Publishing…' : 'Publish announcement'}
+      </button>
+      {items.length > 0 && <div className="section-title" style={{ marginTop: 22 }}>Published announcements</div>}
+      {items.map(item => (
+        <div key={item.id} className="trip-row">
+          <span><strong>{item.title}</strong><small>{item.body} · {item.rank_name || rank.name}</small></span>
+          {item.active ? <button type="button" className="danger-button" onClick={() => deactivate(item.id)}>Deactivate</button>
+            : <span className="status-pill">Inactive</span>}
         </div>
       ))}
-
-      {detailId && (
-        <AdminApplicantModal
-          membershipId={detailId}
-          onClose={() => setDetailId(null)}
-          onApprove={approve}
-          onReject={reject}
-        />
-      )}
     </article>
   );
 }

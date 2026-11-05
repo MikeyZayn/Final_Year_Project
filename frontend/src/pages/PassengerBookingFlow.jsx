@@ -51,6 +51,7 @@ const PANELS = [
   { id: 'search', label: 'Search trip', path: '/passenger/search', icon: Search },
   { id: 'trip', label: 'My trip', path: '/passenger/my-trip', icon: TicketCheck },
   { id: 'history', label: 'Journey history', path: '/passenger/history', icon: History },
+  { id: 'announcements', label: 'Announcements', path: '/passenger/announcements', icon: Bell },
 ];
 
 /* -------------------------------------------------------------------------- */
@@ -173,6 +174,12 @@ export function parsePassengerHash(hash = typeof window !== 'undefined' ? window
   }
   if (segments[1] === 'history') {
     return { panel: 'history', screen: 'panel', tripId: null, from: '', to: '' };
+  }
+  if (segments[1] === 'announcements') {
+    return { panel: 'announcements', screen: 'panel', tripId: null, from: '', to: '' };
+  }
+  if (segments[1] === 'profile') {
+    return { panel: 'profile', screen: 'panel', tripId: null, from: '', to: '' };
   }
   return { panel: 'search', screen: 'panel', tripId: null, from, to };
 }
@@ -839,6 +846,112 @@ function TripDetails({
 }
 
 /* -------------------------------------------------------------------------- */
+/* Notifications                                                              */
+/* -------------------------------------------------------------------------- */
+
+/** Booking notifications are separate from service announcements. */
+function NotificationFeed({ notifications = [] }) {
+  const items = useMemo(() => notifications
+    .map((item) => ({
+      id: item.id,
+      title: item.title,
+      body: item.body,
+      urgent: item.priority === 0,
+      priority: item.priority ?? 4,
+      sortAt: item.created_at || '',
+      meta: [item.route_label, item.departure_date ? dateLabel(item.departure_date) : '', item.departure_time || '']
+        .filter(Boolean).join(' · '),
+    }))
+    .sort((a, b) => a.priority - b.priority || new Date(b.sortAt || 0) - new Date(a.sortAt || 0)),
+    [notifications]);
+
+  if (!items.length) return null;
+  return (
+    <details className="pb-feed pb-collapse">
+      <summary>
+        <Bell size={18} />
+        <span><strong>Notifications</strong><small>{items.length} booking update{items.length === 1 ? '' : 's'} · tap to open</small></span>
+        <ChevronDown size={16} />
+      </summary>
+      <ul className="pb-feed-list">
+        {items.map((item) => (
+          <li className="pb-feed-item" key={item.id}>
+            <span className={`pb-notif-dot${item.urgent ? ' urgent' : ''}`} />
+            <div><strong>{item.title}</strong><p>{item.body}</p>{item.meta && <small>{item.meta}</small>}</div>
+          </li>
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+/** Dedicated passenger announcements panel; kept separate from booking notifications. */
+function ServiceAnnouncements({ announcements = [] }) {
+  const items = [...announcements].sort((a, b) =>
+    new Date(b.created_at || 0) - new Date(a.created_at || 0)
+  );
+  return (
+    <section className="pb-panel pb-announcements-panel" aria-label="Service announcements"
+      data-testid="passenger-service-announcements">
+      <div className="pb-section-head">
+        <div>
+          <span className="pb-eyebrow pb-plain">SERVICE UPDATES</span>
+          <h3>Announcements</h3>
+          <p className="pb-announcements-subtitle">Updates from THEMBA administrators and transport operators.</p>
+        </div>
+        <span className="pb-chip">{items.length} update{items.length === 1 ? '' : 's'}</span>
+      </div>
+      {items.length === 0 ? (
+        <section className="pb-announcement-empty">No service announcements at the moment.</section>
+      ) : (
+        <div className="pb-announcements-list">
+          {items.map(item => (
+            <article className="pb-announcement-card" key={item.id}>
+              <div className="pb-announcement-heading">
+                <strong>{item.title}</strong>
+                {item.created_at && <time dateTime={item.created_at}>
+                  {new Date(item.created_at).toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' })}
+                </time>}
+              </div>
+              <p>{item.body}</p>
+              <small>{item.source_name || item.operator_name || 'THEMBA'} · {item.rank_name || 'All ranks'}</small>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PassengerProfilePanel({ passenger, signedIn, onSignIn, onOpenSettings }) {
+  const name = [passenger?.first_name, passenger?.last_name].filter(Boolean).join(' ') || 'Passenger';
+  return (
+    <section className="pb-panel pb-profile-panel" aria-label="Passenger profile">
+      <span className="pb-eyebrow pb-plain">MY ACCOUNT</span>
+      <h3>My profile</h3>
+      {!signedIn ? (
+        <div className="pb-announcement-empty">
+          <p>Sign in to see your profile.</p>
+          <button type="button" className="pb-secondary" onClick={onSignIn}>Sign in</button>
+        </div>
+      ) : (
+        <>
+          <div className="pb-profile-identity">
+            <div className="pb-avatar">{initials(name)}</div>
+            <div><strong>{name}</strong><span>Passenger account</span></div>
+          </div>
+          <dl className="pb-profile-fields">
+            <div><dt>Phone number</dt><dd>{passenger?.phone || 'Not supplied'}</dd></div>
+            <div><dt>Email</dt><dd>{passenger?.email || 'Not supplied'}</dd></div>
+          </dl>
+          {onOpenSettings && <button type="button" className="pb-secondary" onClick={onOpenSettings}>Account settings</button>}
+        </>
+      )}
+    </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Portal                                                                     */
 /* -------------------------------------------------------------------------- */
 
@@ -855,12 +968,14 @@ export default function PassengerBookingFlow({
   onBook,
   onGroup,
   notifications = [],
+  onOpenSettings = null,
   onCancel,
   onPanic,
   feedbackList = [],
   onRate,
   announcements = [],
   passengerName = 'traveller',
+  passenger = null,
 }) {
   const [panel, setPanel] = useState('search');
   const [detail, setDetail] = useState(null);
@@ -953,7 +1068,11 @@ export default function PassengerBookingFlow({
     applyHash();
     const handler = () => applyHash();
     window.addEventListener('hashchange', handler);
-    return () => window.removeEventListener('hashchange', handler);
+    window.addEventListener('popstate', handler);
+    return () => {
+      window.removeEventListener('hashchange', handler);
+      window.removeEventListener('popstate', handler);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1029,13 +1148,20 @@ export default function PassengerBookingFlow({
             );
           })}
         </nav>
-        <div className="pb-portal-profile">
+        <button
+          type="button"
+          className={`pb-portal-profile${panel === 'profile' ? ' active' : ''}`}
+          onClick={() => goPanel('profile')}
+          aria-label="Open passenger profile"
+          aria-current={panel === 'profile' ? 'page' : undefined}
+        >
           <div className="pb-avatar">{initials(passengerName)}</div>
           <div>
             <strong>{passengerName}</strong>
-            <span>Passenger</span>
+            <span>Passenger · Profile</span>
           </div>
-        </div>
+          <ChevronDown size={15} className="pb-profile-caret" />
+        </button>
       </aside>
 
       <div className="pb-portal-body">
@@ -1046,6 +1172,8 @@ export default function PassengerBookingFlow({
               {panel === 'search' && (detail ? 'Trip details' : 'Search trip')}
               {panel === 'trip' && 'My trip'}
               {panel === 'history' && 'Journey history'}
+              {panel === 'announcements' && 'Announcements'}
+              {panel === 'profile' && 'My profile'}
             </h2>
           </div>
           {panel === 'search' && !detail && (
@@ -1140,29 +1268,16 @@ export default function PassengerBookingFlow({
           />
         )}
 
-        {panel === 'search' && !detail && announcements.length > 0 && (
-          <details className="pb-policy pb-collapse">
-            <summary>
-              <Bell size={18} />
-              <span>
-                <strong>Service announcements</strong>
-                <small>{announcements.length} update{announcements.length === 1 ? '' : 's'}</small>
-              </span>
-              <ChevronDown size={16} />
-            </summary>
-            <ul>
-              {announcements.map((item) => (
-                <li key={item.id}>
-                  <strong>{item.title}</strong>
-                  <span>
-                    {item.body}
-                    {item.operator_name ? ` — ${item.operator_name}` : ''}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </details>
-        )}
+        {panel === 'announcements' && <ServiceAnnouncements announcements={announcements} />}
+
+        {panel === 'profile' && <PassengerProfilePanel
+          passenger={passenger}
+          signedIn={signedIn}
+          onSignIn={onSignIn}
+          onOpenSettings={onOpenSettings}
+        />}
+
+        {panel === 'search' && !detail && <NotificationFeed notifications={notifications} />}
       </div>
     </div>
   );

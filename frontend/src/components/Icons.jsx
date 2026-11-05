@@ -105,6 +105,15 @@ export const Clock3 = (p) => (
   </Icon>
 );
 
+export const RefreshCw = (p) => (
+  <Icon {...p}>
+    <path d="M20 11a8 8 0 0 0-13.7-5.7L4 7.5" />
+    <path d="M4 4v3.5h3.5" />
+    <path d="M4 13a8 8 0 0 0 13.7 5.7L20 16.5" />
+    <path d="M20 20v-3.5h-3.5" />
+  </Icon>
+);
+
 export const CreditCard = (p) => (
   <Icon {...p}>
     <rect x="2.5" y="5" width="19" height="14" rx="2.5" />

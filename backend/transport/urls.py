@@ -6,10 +6,6 @@ urlpatterns = [
     path("api/trips/<int:trip_id>/edit-options/", trip_management.options, name="trip_edit_options"),
     path("api/my-trips/<int:trip_id>/group/", trip_groups.save_group, name="trip_group"),
 
-    path("api/driver/memberships/", feature_views.driver_memberships, name="driver_memberships"),
-    path("api/admin/driver-memberships/", feature_views.pending_driver_memberships, name="pending_driver_memberships"),
-    path("api/admin/driver-memberships/<int:membership_id>/approve/", feature_views.decide_driver_membership, {"decision": "approve"}, name="approve_driver_membership"),
-    path("api/admin/driver-memberships/<int:membership_id>/reject/", feature_views.decide_driver_membership, {"decision": "reject"}, name="reject_driver_membership"),
     path("api/my-bookings/<int:booking_id>/confirm-boarding/", feature_views.passenger_confirm_boarding, name="passenger_confirm_boarding"),
     path("api/my-trips/<int:trip_id>/bookings/<int:booking_id>/board-group/", feature_views.board_group, name="board_group"),
     path("api/my-trips/<int:trip_id>/verify-assets/", views.api_verify_trip_assets, name="api_verify_trip_assets"),
@@ -24,7 +20,6 @@ urlpatterns = [
 
     # Operator
     path("api/my-memberships/",             views.api_my_memberships,   name="api_my_memberships"),
-    path("api/request-rank/",               views.api_request_rank,     name="api_request_rank"),
     path("api/my-trips/",                   views.api_my_trips,         name="api_my_trips"),
     path("api/my-trips/<int:trip_id>/manifest/", views.api_trip_manifest, name="api_trip_manifest"),
     path("api/my-trips/<int:trip_id>/walk-in/",  views.api_register_walk_in, name="api_register_walk_in"),
@@ -64,14 +59,10 @@ urlpatterns = [
     path("api/my-trips/<int:trip_id>/driver-no-show-refunds/", views.api_trip_driver_no_show_refunds, name="api_trip_driver_no_show_refunds"),
     # Admin (rank-scoped)
     path("api/admin/me/",                          views.api_admin_me,                       name="api_admin_me"),
-    path("api/admin/pending-memberships/",         views.api_admin_pending_memberships,      name="api_admin_pending_memberships"),
-    path("api/admin/memberships/<int:membership_id>/approve/", views.api_admin_approve_membership, name="api_admin_approve_membership"),
-    path("api/admin/memberships/<int:membership_id>/reject/",  views.api_admin_reject_membership,  name="api_admin_reject_membership"),
     path("api/admin/trip-flags/",                  views.api_admin_trip_flags,               name="api_admin_trip_flags"),
     path("api/admin/trip-flags/<int:flag_id>/acknowledge/", views.api_admin_acknowledge_flag, name="api_admin_acknowledge_flag"),
     path("api/admin/trip-flags/<int:flag_id>/resolve/",     views.api_admin_resolve_flag,     name="api_admin_resolve_flag"),
     path("api/admin/trips/<int:trip_id>/cancel/",  trip_management.admin_cancel,              name="api_admin_cancel_trip"),
-    path("api/admin/memberships/<int:membership_id>/",         views.api_admin_membership_detail,   name="api_admin_membership_detail"),
     path("api/admin/rank-trips/",                              views.api_admin_rank_trips,          name="api_admin_rank_trips"),
     path("api/admin/schedule-trip/",                           views.api_admin_schedule_trip,       name="api_admin_schedule_trip"),
     path("api/admin/available-for-rank/",                      views.api_admin_available_for_rank,  name="api_admin_available_for_rank"),
@@ -86,7 +77,10 @@ urlpatterns = [
     # Announcements
     path("api/announcements/",                            views.api_list_announcements,    name="api_list_announcements"),
     path("api/my-announcements/",                         views.api_my_announcements,      name="api_my_announcements"),
+    path("api/my-announcement-ranks/",                    views.api_my_announcement_ranks, name="api_my_announcement_ranks"),
     path("api/my-announcements/<int:announcement_id>/",   views.api_announcement_detail,   name="api_announcement_detail"),
+    path("api/admin/announcements/",                       views.api_admin_announcements,   name="api_admin_announcements"),
+    path("api/admin/announcements/<int:announcement_id>/", views.api_admin_announcement_detail, name="api_admin_announcement_detail"),
     # Panic alerts
     path("api/my-bookings/<int:booking_id>/panic/",        views.api_trigger_panic,             name="api_trigger_panic"),
     path("api/panic/<int:alert_id>/cancel/",               views.api_cancel_panic,              name="api_cancel_panic"),

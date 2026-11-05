@@ -9,7 +9,7 @@ const cartoKey = import.meta.env.VITE_CARTO_BASEMAP_KEY;
 const tiles = cartoKey ? 'https://basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?key=' + encodeURIComponent(cartoKey) : osm;
 const attribution = credit + (cartoKey ? ' &copy; <a href="https://carto.com/attribution/">CARTO</a>' : '');
 
-export default function ThembaMap({ markers = [], polylines = [], height = '380px', initialCenter = [-28.8, 31.95], initialZoom = 11, onMapClick, fitKey, className = '' }) {
+export default function ThembaMap({ markers = [], polylines = [], height = '380px', initialCenter = [-28.8, 31.95], initialZoom = 11, onMapClick, fitKey, className = '', minimal = false }) {
   const container = useRef(null), map = useRef(null), layers = useRef(null), bounds = useRef(null), rankLayers = useRef({});
   const click = useRef(onMapClick);
   const [fallback, setFallback] = useState(false);
@@ -64,7 +64,7 @@ export default function ThembaMap({ markers = [], polylines = [], height = '380p
         title: marker.label || 'Location', alt: marker.label || 'Location', keyboard: true}).addTo(layers.current);
       const label = document.createElement('span'); label.textContent = marker.label || 'Location';
       item.bindTooltip(label, {direction: 'top', offset: [0, -18]});
-      if (isRank) {
+      if (isRank && !minimal) {
         const popup = document.createElement('div');
         const title = document.createElement('strong'); title.textContent = marker.label || 'Taxi rank';
         const hours = document.createElement('p'); hours.textContent = 'Operating hours: ' + RANK_HOURS;
@@ -75,15 +75,16 @@ export default function ThembaMap({ markers = [], polylines = [], height = '380p
     }
     bounds.current = points.length ? L.latLngBounds(points) : null;
     fit();
-  }, [markers, polylines, fitKey]);
+  }, [markers, polylines, fitKey, minimal]);
   return <div className={'modern-map ' + className}>
-    <div className="map-toolbar"><span><i className="live-dot" /> Journey overview</span><button type="button" className="secondary-button" onClick={fit}>Fit route</button></div>
-    <div ref={container} className="modern-map-canvas" style={{height, width: '100%'}} aria-label="Trip map with clickable rank operating hours" />
-    <div className="map-rank-list">{markers.filter(m => ['rank', 'destination'].includes(m.kind)).map(m =>
+    {!minimal && <div className="map-toolbar"><span><i className="live-dot" /> Journey overview</span><button type="button" className="secondary-button" onClick={fit}>Fit route</button></div>}
+    <div ref={container} className="modern-map-canvas" style={{height, width: '100%'}} aria-label={minimal ? 'Live route map with driver location, departure and destination' : 'Trip map with rank markers'} />
+    {!minimal && <div className="map-rank-list">{markers.filter(m => ['rank', 'destination'].includes(m.kind)).map(m =>
       <button key={m.id} type="button" className="map-rank-card" aria-label={m.label + " operating hours"} onClick={() => rankLayers.current[m.id]?.openPopup()}>
         <span className="rank-letter">{m.kind === 'rank' ? 'A' : 'B'}</span><span><strong>{m.label}</strong><small>Tap for operating hours</small></span>
-      </button>)}</div>
-    {fallback && <p className="muted">Standard street map shown while the alternative map is unavailable.</p>}
-    <p className="map-help">Select a rank marker for its hours. Drag to explore; use + and − to zoom.</p>
+      </button>)}</div>}
+    {!minimal && fallback && <p className="muted">Standard street map shown while the alternative map is unavailable.</p>}
+    {!minimal && <p className="map-help">Select a rank marker for its hours. Drag to explore; use + and − to zoom.</p>}
   </div>;
 }
+

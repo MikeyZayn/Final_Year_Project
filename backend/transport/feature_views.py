@@ -7,77 +7,9 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import serializers
-from accounts.models import User, DriverProfile
-from .models import DriverAtRank, OperatorAtRank, Rank, Trip, Booking, VerificationCode
+from .models import Trip, Booking, VerificationCode
 from .serializers import BookingSerializer
 from .services.queue_expiry import expire_queues
-
-
-def membership_data(m):
-    u = m.driver.user
-    return {"id": m.id, "rank": {"id": m.rank_id, "name": m.rank.name, "area": m.rank.area},
-        "driver_name": u.get_full_name() or u.phone, "phone": u.phone,
-        "license_number": m.driver.license_number, "driver_status": m.driver.status,
-        "status": m.status, "notes": m.notes, "requested_at": m.requested_at,
-        "approved_at": m.approved_at}
-
-
-@api_view(["GET", "POST"])
-@permission_classes([IsAuthenticated])
-@transaction.atomic
-def driver_memberships(request):
-    profile = getattr(request.user, "driver_profile", None)
-    if not profile or request.user.role != User.Role.DRIVER:
-        return Response({"detail": "Not a driver account."}, status=403)
-    if request.method == 'GET':
-        return Response([membership_data(m) for m in DriverAtRank.objects.filter(driver=profile).select_related('rank', 'driver__user')])
-    DriverProfile.objects.select_for_update().get(pk=profile.pk)
-    field = serializers.IntegerField(min_value=1)
-    rank_id = field.run_validation(request.data.get('rank_id'))
-    rank = get_object_or_404(Rank, pk=rank_id)
-    m = DriverAtRank.objects.select_for_update().filter(driver=profile, rank=rank).first()
-    if m and m.status in [OperatorAtRank.Status.PENDING, OperatorAtRank.Status.ACTIVE]:
-        return Response({"detail": "You already have an active or pending membership at this rank."}, status=400)
-    notes = serializers.CharField(required=False, allow_blank=True, max_length=2000).run_validation(request.data.get('notes', ''))
-    if m:
-        m.status = OperatorAtRank.Status.PENDING
-        m.notes = notes
-        m.requested_at = timezone.now()
-        m.approved_at = None
-        m.approved_by = None
-        m.save()
-    else:
-        m = DriverAtRank.objects.create(driver=profile, rank=rank, notes=notes)
-    return Response(membership_data(m), status=201)
-
-
-@api_view(["GET"])
-@permission_classes([IsAuthenticated])
-def pending_driver_memberships(request):
-    admin = getattr(request.user, 'admin_profile', None)
-    if not admin or not admin.rank_id:
-        return Response({"detail": "A rank admin is required."}, status=403)
-    qs = DriverAtRank.objects.filter(rank=admin.rank, status=OperatorAtRank.Status.PENDING).select_related('rank', 'driver__user')
-    return Response([membership_data(m) for m in qs])
-
-
-@api_view(["POST"])
-@permission_classes([IsAuthenticated])
-@transaction.atomic
-def decide_driver_membership(request, membership_id, decision):
-    admin = getattr(request.user, 'admin_profile', None)
-    if not admin or not admin.rank_id:
-        return Response({"detail": "A rank admin is required."}, status=403)
-    m = get_object_or_404(DriverAtRank.objects.select_for_update(), pk=membership_id, rank=admin.rank)
-    if m.status != OperatorAtRank.Status.PENDING:
-        return Response({"detail": "This request has already been reviewed."}, status=400)
-    m.status = OperatorAtRank.Status.ACTIVE if decision == 'approve' else OperatorAtRank.Status.REJECTED
-    m.approved_by = admin
-    m.approved_at = timezone.now()
-    if decision == 'reject':
-        m.notes = serializers.CharField(allow_blank=True, max_length=2000).run_validation(request.data.get('notes', m.notes))
-    m.save()
-    return Response(membership_data(m))
 
 
 @api_view(["POST"])

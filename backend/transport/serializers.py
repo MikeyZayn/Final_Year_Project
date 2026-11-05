@@ -95,6 +95,7 @@ class TripSerializer(serializers.ModelSerializer):
             "verified_passengers", "pending_passengers", "vehicle_plate",
             "engaged_by_name", "is_engaged",
             "notes", "created_at", "assets_verified_at", "queue_expires_at",
+            "driver_at_rank_at", "driver_location_status",
         ]
     def get_driver_name(self, obj):
         if not obj.driver:
@@ -355,23 +356,52 @@ class FeedbackRespondSerializer(serializers.Serializer):
 
 class AnnouncementSerializer(serializers.ModelSerializer):
     route_label = serializers.SerializerMethodField()
+    rank_id = serializers.IntegerField(read_only=True)
+    rank_name = serializers.SerializerMethodField()
     operator_name = serializers.CharField(
         source="operator.association.association_name", read_only=True
     )
+    source_name = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = Announcement
         fields = [
             "id", "title", "body", "active", "route", "route_label",
-            "operator_name", "created_by_name",
-            "created_at", "updated_at", "expires_at",
+            "rank_id", "rank_name", "operator_name", "source_name",
+            "created_by_name", "created_at", "updated_at", "expires_at",
         ]
 
     def get_route_label(self, obj):
         if not obj.route:
             return None
         return f"{obj.route.departure.name} → {obj.route.destination.name}"
+
+    def get_rank_name(self, obj):
+        if obj.rank_id:
+            return obj.rank.name
+        if obj.route_id:
+            return obj.route.departure.name
+        # Backwards compatibility for announcements created before rank targeting.
+        if obj.operator_id:
+            names = list(obj.operator.rank_memberships.filter(status="active")
+                         .values_list("rank__name", flat=True))
+            if len(names) == 1:
+                return names[0]
+            if len(names) > 1:
+                return "Multiple ranks"
+        if obj.created_by and getattr(obj.created_by, "role", "") == "admin":
+            admin_profile = getattr(obj.created_by, "admin_profile", None)
+            if admin_profile and admin_profile.rank_id:
+                return admin_profile.rank.name
+        return None
+
+    def get_source_name(self, obj):
+        if obj.operator_id:
+            return obj.operator.association.association_name
+        if obj.created_by and getattr(obj.created_by, "role", "") == "admin":
+            return "Administrator"
+        return "THEMBA"
 
     def get_created_by_name(self, obj):
         if not obj.created_by:
@@ -382,10 +412,11 @@ class AnnouncementSerializer(serializers.ModelSerializer):
 
 class AnnouncementWriteSerializer(serializers.ModelSerializer):
     route_id = serializers.IntegerField(required=False, allow_null=True)
+    rank_id = serializers.IntegerField(required=False, allow_null=True)
 
     class Meta:
         model = Announcement
-        fields = ["title", "body", "route_id", "active", "expires_at"]
+        fields = ["title", "body", "route_id", "rank_id", "active", "expires_at"]
 
 class PanicAlertSerializer(serializers.ModelSerializer):
     trip_code = serializers.CharField(source="booking.trip.trip_code", read_only=True)

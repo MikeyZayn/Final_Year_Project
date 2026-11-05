@@ -54,11 +54,31 @@ def parse_coordinate(value, name: str):
 
 
 def record_driver_location(trip, lat: float, lng: float) -> dict:
-    """Store a driver ping on the trip and report whether it is at the rank."""
+    """Record a GPS ping while locking the trip against the refund scheduler."""
+    from datetime import timedelta
+    from django.db import transaction
+    from transport.models import Trip
+    from .payment import trip_departure_dt
+
+    with transaction.atomic():
+        fresh = Trip.objects.select_for_update().select_related('route__departure').get(pk=trip.pk)
+        if fresh.status not in (Trip.Status.SCHEDULED, Trip.Status.BOARDING, Trip.Status.IN_PROGRESS):
+            raise ValueError('Location tracking is closed for this trip.')
+        departure = trip_departure_dt(fresh)
+        if departure and timezone.now() > departure + timedelta(minutes=15) and not driver_was_at_rank(fresh):
+            raise ValueError('Rank A check-in closed 15 minutes after departure.')
+        return _record_locked(fresh, lat, lng)
+
+
+def _record_locked(trip, lat: float, lng: float) -> dict:
+    """Save a driver position after acquiring the row lock."""
     if not isinstance(lat, float):
         lat = float(lat)
     if not isinstance(lng, float):
         lng = float(lng)
+
+    if trip.driver_location_status == 'no_show':
+        raise ValueError('Driver no-show has already been processed for this trip.')
 
     point = rank_point(trip)
     distance_km = None

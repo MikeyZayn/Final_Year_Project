@@ -1,7 +1,7 @@
 /**
  * Operator UI from Final_Year_Project — same modules and flow:
  * My trips → engage → manifest → verify bookings → walk-in + verification code.
- * Rank memberships + request rank.
+ * Read-only assigned rank memberships (no rank requests).
  * Wired to integrated /api/ endpoints.
  */
 import { useEffect, useState } from 'react';
@@ -83,7 +83,6 @@ export default function OperatorPage({ notify, isAdmin }) {
       <div className="dashboard-grid">
         <OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} />
         <OperatorMemberships memberships={memberships} />
-        <OperatorRequestRank notify={notify} onRequested={load} />
         <article className="module module-wide" style={{ opacity: 0.55 }}>
           <div className="module-heading">
             <span>Complaints</span>
@@ -194,7 +193,7 @@ function OperatorMemberships({ memberships }) {
         <span className="module-number">{memberships.length}</span>
       </div>
       {memberships.length === 0 && (
-        <p className="muted">No memberships yet. Request a rank.</p>
+        <p className="muted">No rank assigned yet.</p>
       )}
       {memberships.map((m) => (
         <div className="trip-row" key={m.id}>
@@ -213,108 +212,6 @@ function OperatorMemberships({ memberships }) {
           </span>
         </div>
       ))}
-    </article>
-  );
-}
-
-function OperatorRequestRank({ notify, onRequested }) {
-  const [ranks, setRanks] = useState([]);
-  const [myRankIds, setMyRankIds] = useState([]);
-  const [rankId, setRankId] = useState('');
-  const [notes, setNotes] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [showForm, setShowForm] = useState(false);
-
-  async function loadOptions() {
-    try {
-      const [rankRes, memRes] = await Promise.all([
-        api.listRanks(),
-        api.myMemberships().catch(() => []),
-      ]);
-      setRanks(rankRes);
-      const mine = (memRes || []).map((m) => m.rank?.id).filter(Boolean);
-      setMyRankIds(mine);
-      const available = rankRes.filter((r) => !mine.includes(r.id));
-      if (available[0]) setRankId(String(available[0].id));
-    } catch {
-      setError('Could not load ranks.');
-    }
-  }
-
-  useEffect(() => {
-    loadOptions();
-  }, []);
-
-  async function submit() {
-    setError('');
-    if (!rankId) {
-      setError('Pick a rank.');
-      return;
-    }
-    setBusy(true);
-    try {
-      await api.requestRank(Number(rankId), notes);
-      notify?.('Rank request submitted for admin approval.');
-      setNotes('');
-      setShowForm(false);
-      await loadOptions();
-      onRequested?.();
-    } catch (err) {
-      setError(err.message || 'Failed to submit request.');
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const availableRanks = ranks.filter((r) => !myRankIds.includes(r.id));
-
-  return (
-    <article className="module">
-      <div className="module-heading">
-        <span>Request a rank</span>
-        <span className="module-number">Approval required</span>
-      </div>
-      <p className="muted">
-        Apply to operate at another rank. The rank&apos;s admin reviews and approves.
-      </p>
-
-      {!showForm && (
-        <button className="secondary-button" onClick={() => setShowForm(true)} type="button">
-          Request rank
-        </button>
-      )}
-
-      {showForm &&
-        (availableRanks.length === 0 ? (
-          <p className="muted">You already cover all available ranks, or none are seeded.</p>
-        ) : (
-          <>
-            <label>
-              Rank
-              <select value={rankId} onChange={(e) => setRankId(e.target.value)}>
-                {availableRanks.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name} {r.area ? `· ${r.area}` : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Notes
-              <input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Optional" />
-            </label>
-            {error && <p style={{ color: 'var(--danger)' }}>{error}</p>}
-            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-              <button className="secondary-button" type="button" onClick={() => setShowForm(false)}>
-                Cancel
-              </button>
-              <button className="primary-button" type="button" onClick={submit} disabled={busy}>
-                {busy ? 'Submitting…' : 'Submit request'}
-              </button>
-            </div>
-          </>
-        ))}
     </article>
   );
 }
@@ -354,16 +251,6 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
       await load();
     } catch (err) {
       notify?.(err.message || 'Could not engage trip.');
-    }
-  }
-
-  async function release() {
-    try {
-      await api.release(tripId);
-      notify?.('Trip released.');
-      await load();
-    } catch (err) {
-      notify?.(err.message || 'Could not release trip.');
     }
   }
 
@@ -467,8 +354,8 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
             </div>
           </div>
           <p className="muted" style={{ marginTop: 16 }}>
-            Engage this trip to open boarding. While engaged you work this trip&apos;s manifest
-            until you release it.
+            Engage this trip to open boarding. Once the operator verifies the driver and vehicle,
+            the trip starts automatically at its scheduled departure time.
           </p>
           <div style={{ display: 'flex', gap: 12, marginTop: 12 }}>
             <button className="secondary-button" onClick={onBack} type="button">
@@ -491,13 +378,10 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     <>
       <article className="module module-wide">
         <div className="module-heading">
-          <span>{trip.trip_code} · BOARDING</span>
+          <span>{trip.trip_code} · {trip.status.replaceAll("_", " ").toUpperCase()}</span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="secondary-button" onClick={onBack} type="button">
               ← Back
-            </button>
-            <button className="danger-button" onClick={release} type="button">
-              Release trip
             </button>
           </div>
         </div>

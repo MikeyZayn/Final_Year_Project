@@ -492,6 +492,11 @@ class Announcement(models.Model):
         Route, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="announcements",
     )
+    rank = models.ForeignKey(
+        Rank, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="announcements",
+        help_text="Target rank; leave blank for a central announcement for all ranks.",
+    )
     title = models.CharField(max_length=150)
     body = models.TextField()
     active = models.BooleanField(default=True)

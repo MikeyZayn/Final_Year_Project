@@ -602,3 +602,114 @@ code { font-size: 0.85em; }
 .shell:has(.pmd) .top {
   padding: 0 0.5rem;
 }
+
+/* ---- Driver dashboard (mirrors themba-driver-demo.html) ---- */
+.driver-hero {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.driver-eyebrow {
+  color: #0f7a3d;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.driver-hero h1 {
+  margin: 6px 0 2px;
+  font-size: 34px;
+}
+
+.driver-next {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.driver-next h2 {
+  margin: 0 0 2px;
+  font-size: 32px;
+}
+
+.driver-tools {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.driver-tool {
+  border: 1px solid var(--border, #d6dfd9);
+  background: var(--surface, #fff);
+  color: var(--text, #16241c);
+  border-radius: 9px;
+  padding: 10px 14px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.driver-tool:hover {
+  border-color: #0f7a3d;
+  color: #0f7a3d;
+}
+
+.driver-tool.active {
+  background: #0f7a3d;
+  border-color: #0f7a3d;
+  color: #fff;
+}
+
+.driver-history {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+
+.driver-history th {
+  text-align: left;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted, #64748b);
+  padding: 8px;
+  border-bottom: 1px solid var(--border, #e2e8e4);
+}
+
+.driver-history td {
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border, #eef3ef);
+}
+
+.driver-trip-row {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, #e2e8e4);
+  border-radius: 9px;
+  padding: 9px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.driver-trip-row.selected {
+  border-color: #0f7a3d;
+  box-shadow: 0 0 0 2px rgba(15, 122, 61, 0.12);
+}
+
+.plain-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}

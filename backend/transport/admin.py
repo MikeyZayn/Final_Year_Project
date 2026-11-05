@@ -122,9 +122,22 @@ class FeedbackAdmin(admin.ModelAdmin):
 
 @admin.register(Announcement)
 class AnnouncementAdmin(admin.ModelAdmin):
-    list_display = ("title", "operator", "route", "active", "created_at")
-    list_filter = ("active", "operator__association")
-    search_fields = ("title", "body")
+    list_display = ("title", "rank", "operator", "route", "active", "created_at")
+    list_filter = ("active", "rank", "operator__association")
+    search_fields = ("title", "body", "rank__name")
+
+    def save_model(self, request, obj, form, change):
+        if not obj.created_by_id:
+            obj.created_by = request.user
+        # Rank administrators publish to their assigned rank by default.
+        # Site-wide staff without a rank may leave rank blank for a global alert.
+        if not obj.rank_id and not obj.operator_id and not obj.route_id:
+            admin_profile = getattr(request.user, "admin_profile", None)
+            if admin_profile and admin_profile.rank_id:
+                obj.rank_id = admin_profile.rank_id
+        if not obj.rank_id and obj.route_id:
+            obj.rank_id = obj.route.departure_id
+        super().save_model(request, obj, form, change)
 
 @admin.register(PanicAlert)
 class PanicAlertAdmin(admin.ModelAdmin):

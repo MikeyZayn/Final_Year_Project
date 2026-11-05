@@ -8,9 +8,22 @@ booking that produced it.
 """
 from __future__ import annotations
 
+from datetime import datetime, time
 from decimal import Decimal
 
+from django.utils import timezone
+
 from transport.models import Booking
+
+# Lower number = more urgent. A pending cash payment needs action before the
+# seat is released, so it leads the feed; a refund is the next fact the
+# passenger must know; "ready to travel" and boarding statements follow.
+URGENCY = {
+    "cash_pending": 0,
+    "refund": 1,
+    "booking_verified": 2,
+    "boarding_confirmed": 3,
+}
 
 
 def _money(value):
@@ -21,6 +34,12 @@ def _money(value):
 
 def _time(value):
     return value.strftime("%H:%M") if value else None
+
+
+def _departure_at(trip):
+    """Departure timestamp used to order the most urgent, soonest bookings."""
+    naive = datetime.combine(trip.departure_date, trip.expected_departure_time or time.min)
+    return timezone.make_aware(naive, timezone.get_current_timezone())
 
 
 def _route_label(booking):
@@ -37,6 +56,7 @@ def _base(booking):
         "route_label": _route_label(booking),
         "departure_date": str(trip.departure_date),
         "departure_time": _time(trip.expected_departure_time),
+        "departure_at": _departure_at(trip).isoformat(),
         "departure_rank": trip.route.departure.name,
         "destination_rank": trip.route.destination.name,
         "passenger_display_status": booking.passenger_display_status(),
@@ -133,7 +153,14 @@ def booking_notifications(booking):
     return events
 
 
-def notifications_for_user(user, limit=40):
+def notifications_for_user(user, limit=40, offset=0):
+    """The passenger's feed, most urgent first.
+
+    Urgency comes from the notification kind (a cash booking that needs
+    verification outranks a receipt), and urgent items are ordered by the
+    soonest departure so the passenger always sees the three that matter now.
+    ``limit`` and ``offset`` let the client page through three at a time.
+    """
     bookings = (
         Booking.objects.filter(passenger=user)
         .select_related(
@@ -146,8 +173,19 @@ def notifications_for_user(user, limit=40):
     items = []
     for booking in bookings:
         items.extend(booking_notifications(booking))
+
+    # Recency first, then a stable sort by urgency and departure time.
     items.sort(key=lambda item: item["created_at"], reverse=True)
-    trimmed = items[:limit]
-    for item in trimmed:
+    items.sort(key=lambda item: (URGENCY.get(item["kind"], 9), item["departure_at"]))
+
+    for item in items:
+        item["priority"] = URGENCY.get(item["kind"], 9)
+
+    start = max(0, offset)
+    end = start + max(1, limit)
+    page = items[start:end]
+
+    for item in page:
         item["created_at"] = item["created_at"].isoformat()
-    return trimmed
+    return page
+
