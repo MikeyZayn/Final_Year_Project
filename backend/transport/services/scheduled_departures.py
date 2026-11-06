@@ -41,12 +41,14 @@ def start_due_trips(now=None):
                 continue
             trip.status = Trip.Status.IN_PROGRESS
             trip.actual_departure_time = now  # server transition time, not GPS proof of physical departure
-            trip.engaged_by = None
-            trip.engaged_at = None
-            trip.save(update_fields=['status', 'actual_departure_time', 'engaged_by', 'engaged_at', 'updated_at'])
+            # Keep the operator attached while this journey is in progress.
+            # The engagement is released only when the trip ends.
+            trip.save(update_fields=['status', 'actual_departure_time', 'updated_at'])
             changed.append(trip.pk)
     # Check the 15-minute GPS grace period on each scheduler run.
     # These checks run even if no dashboard is open when the command is scheduled.
     from .auto_no_show import refund_overdue_driver_no_shows
     refund_overdue_driver_no_shows(now=now)
+    from .trip_lifecycle import cancel_overdue_trips
+    cancel_overdue_trips(now=now)
     return changed

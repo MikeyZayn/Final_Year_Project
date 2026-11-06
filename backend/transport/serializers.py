@@ -83,6 +83,23 @@ class TripSerializer(serializers.ModelSerializer):
     vehicle_plate = serializers.CharField(source="vehicle.plate_number", read_only=True)
     seats_taken = serializers.IntegerField(read_only=True)
     seats_available = serializers.IntegerField(read_only=True)
+    display_status = serializers.SerializerMethodField()
+    refund_status = serializers.SerializerMethodField()
+
+    def get_display_status(self, obj):
+        if obj.status == Trip.Status.CANCELLED and obj.driver_location_status == 'no_show':
+            return ('Refunded - Driver No-Show' if self.get_refund_status(obj) == 'refunded'
+                    else 'Driver No-Show - No Paid Bookings')
+        return dict(Trip.Status.choices).get(obj.status, obj.status.replace('_', ' ').title())
+
+    def get_refund_status(self, obj):
+        if obj.status != Trip.Status.CANCELLED or obj.driver_location_status != 'no_show':
+            return None
+        if not hasattr(obj, '_refund_status_cache'):
+            obj._refund_status_cache = ('refunded' if obj.bookings.filter(
+                payment_status=Booking.PaymentStatus.REFUNDED,
+            ).exists() else 'no_payment')
+        return obj._refund_status_cache
 
     class Meta:
         model = Trip
@@ -90,7 +107,7 @@ class TripSerializer(serializers.ModelSerializer):
             "id", "trip_code", "operator_name", "driver_id", "vehicle_id", "operator_id",
             "route", "departure_date", "expected_departure_time",
             "actual_departure_time", "seat_capacity", "seats_taken",
-            "seats_available", "status", "driver_name", "driver_rating",
+            "seats_available", "status", "display_status", "refund_status", "driver_name", "driver_rating",
             "driver_rating_count", "driver_trips_count", "duration_minutes",
             "verified_passengers", "pending_passengers", "vehicle_plate",
             "engaged_by_name", "is_engaged",

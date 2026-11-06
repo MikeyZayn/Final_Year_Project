@@ -22,11 +22,11 @@ class PassengerProfileAdmin(admin.ModelAdmin):
 @admin.register(DriverProfile)
 class DriverProfileAdmin(admin.ModelAdmin):
     list_display = (
-        "user", "license_number", "id_number", "pdp_number",
+        "user", "license_number", "pdp_number",
         "association", "status", "external_verification_status",
     )
     list_filter = ("status", "external_verification_status", "association")
-    search_fields = ("user__phone", "license_number", "id_number")
+    search_fields = ("user__phone", "license_number")
     readonly_fields = ("external_verification_status", "external_verification_reason")
 @admin.register(RankCode)
 class RankCodeAdmin(admin.ModelAdmin):

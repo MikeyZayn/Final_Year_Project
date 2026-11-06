@@ -302,7 +302,7 @@ class NewFeatureTests(TripWorkflowTests):
         self.assertEqual(result, {'queue_entries': 1, 'trips': 1})
         e.refresh_from_db(); e2.refresh_from_db(); booking.refresh_from_db(); self.trip.refresh_from_db()
         self.assertFalse(e.active); self.assertEqual(e2.position, 1)
-        self.assertEqual(self.trip.status, 'expired'); self.assertEqual(booking.status, 'no_show')
+        self.assertEqual(self.trip.status, 'cancelled'); self.assertEqual(booking.status, 'cancelled')
         self.assertEqual(expire_queues(now), {'queue_entries': 0, 'trips': 0})
         future = Trip.objects.create(operator=self.op, route=self.trip.route, departure_date=timezone.localdate()+timedelta(days=4), trip_code='FUTURE')
         Trip.objects.filter(pk=future.pk).update(created_at=now-timedelta(days=2))
@@ -890,7 +890,7 @@ class AutomaticDriverNoShowRefundTests(TripWorkflowTests):
         self.assertEqual(paid.status, 'cancelled')
         self.assertEqual(unpaid.status, 'cancelled')
         self.assertEqual(companion.status, 'cancelled')
-        self.assertEqual(self.trip.status, 'flagged')
+        self.assertEqual(self.trip.status, 'cancelled')
         self.assertEqual(self.trip.driver_location_status, 'no_show')
         self.assertEqual(refund_overdue_trip(self.trip.id, now=now)['status'], 'already_processed')
         paid.refresh_from_db(); self.assertEqual(str(paid.refund_amount), '25.00')
@@ -940,5 +940,144 @@ class AutomaticDriverNoShowRefundTests(TripWorkflowTests):
             payment_status='paid', fare_amount='25.00', amount_paid='25.00')
         self.assertEqual(start_due_trips(now), [])  # Was not engaged and ready.
         self.trip.refresh_from_db()
-        self.assertEqual(self.trip.status, 'flagged')
+        self.assertEqual(self.trip.status, 'cancelled')
         self.assertEqual(self.trip.bookings.first().payment_status, 'refunded')
+
+
+class OperatorTripLifecycleTests(TestCase):
+    """Regression checks for the operator dashboard's persisted trip states."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.operator = User.objects.create_user('0825550011', 'Passw0rd!', role='operator')
+        assoc = RankCode.objects.create(code='OP-LIFECYCLE', association_name='Test operator', operating_region='KZN')
+        self.op = OperatorProfile.objects.create(user=self.operator, association=assoc)
+        self.rank = Rank.objects.create(name='Operator Start Rank')
+        self.route = Route.objects.create(
+            departure=self.rank, destination=Destination.objects.create(name='Finish'),
+            fare='50.00', typical_duration_minutes=60,
+        )
+        now = timezone.localtime(timezone.now())
+        depart = now + timedelta(minutes=10)
+        self.trip = Trip.objects.create(
+            operator=self.op, route=self.route, trip_code='OP-001',
+            departure_date=depart.date(), expected_departure_time=depart.time().replace(microsecond=0),
+        )
+        self.client.force_authenticate(self.operator)
+
+    def set_departure(self, now, minutes_ago):
+        dep = timezone.localtime(now - timedelta(minutes=minutes_ago))
+        self.trip.departure_date = dep.date()
+        self.trip.expected_departure_time = dep.time().replace(microsecond=0)
+        self.trip.save(update_fields=['departure_date', 'expected_departure_time'])
+
+    def test_automatic_start_keeps_current_operator_until_completion(self):
+        from .services.scheduled_departures import start_due_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 1)
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = now - timedelta(minutes=5)
+        self.trip.assets_verified_at = now - timedelta(minutes=5)
+        self.trip.driver_at_rank_at = now - timedelta(minutes=3)
+        self.trip.save()
+        self.assertEqual(start_due_trips(now), [self.trip.id])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.IN_PROGRESS)
+        self.assertEqual(self.trip.engaged_by_id, self.op.pk)
+        result = self.client.post(f'/transport/api/my-trips/{self.trip.pk}/complete/')
+        self.assertEqual(result.status_code, 200, result.data)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.COMPLETED)
+        self.assertIsNone(self.trip.engaged_by_id)
+
+    def test_missed_departure_cancels_after_grace_and_unassigns_operator(self):
+        from .services.trip_lifecycle import cancel_overdue_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 16)
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = now - timedelta(minutes=25)
+        self.trip.driver_at_rank_at = now - timedelta(minutes=20)
+        self.trip.save()
+        self.assertEqual(cancel_overdue_trips(now), [self.trip.id])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.CANCELLED)
+        self.assertIsNone(self.trip.engaged_by_id)
+        self.assertEqual(cancel_overdue_trips(now), [])
+
+    def test_started_but_uncompleted_trip_auto_cancels_after_duration(self):
+        from .services.trip_lifecycle import cancel_overdue_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 76)  # 60-minute route + 15-minute allowance
+        self.trip.status = Trip.Status.IN_PROGRESS
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = now - timedelta(minutes=80)
+        self.trip.save()
+        self.assertEqual(cancel_overdue_trips(now), [self.trip.id])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.CANCELLED)
+        self.assertIsNone(self.trip.engaged_by_id)
+
+    def test_no_completed_trip_is_changed_by_overdue_scanner(self):
+        from .services.trip_lifecycle import cancel_overdue_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 120)
+        self.trip.status = Trip.Status.COMPLETED
+        self.trip.save()
+        self.assertEqual(cancel_overdue_trips(now), [])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.COMPLETED)
+
+    def test_flagging_creates_review_record_without_changing_trip_status(self):
+        # The operator can report an issue without inventing a 'flagged' trip state.
+        from .models import TripFlag
+        category = TripFlag.Category.choices[0][0]
+        response = self.client.post(
+            f'/transport/api/my-trips/{self.trip.pk}/flag/',
+            {'category': category, 'notes': 'An issue for the administrator.'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.SCHEDULED)
+
+    def test_driver_no_show_refund_status_exposed_without_flagged_state(self):
+        from .services.scheduled_departures import start_due_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 16)
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = now - timedelta(minutes=30)
+        self.trip.save()
+        Booking.objects.create(
+            trip=self.trip, walk_in_name='Paid passenger',
+            payment_method=Booking.PaymentMethod.CARD,
+            payment_status=Booking.PaymentStatus.PAID,
+            fare_amount='50.00', amount_paid='50.00',
+        )
+        start_due_trips(now)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.CANCELLED)
+        self.assertIsNone(self.trip.engaged_by_id)
+        response = self.client.get('/transport/api/my-trips/')
+        self.assertEqual(response.status_code, 200, response.data)
+        entry = next(row for row in response.data if row['id'] == self.trip.id)
+        self.assertEqual(entry['status'], 'cancelled')
+        self.assertEqual(entry['refund_status'], 'refunded')
+        self.assertIn('Driver No-Show', entry['display_status'])
+
+    def test_admin_cancellation_unlocks_operator_and_preserves_cancelled_status(self):
+        from accounts.models import AdminProfile
+        admin_user = User.objects.create_user('0825550012', 'Passw0rd!', role='administrator')
+        AdminProfile.objects.create(user=admin_user, institution_name='Test rank admin', rank=self.rank)
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = timezone.now()
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.save()
+        self.client.force_authenticate(admin_user)
+        response = self.client.post(f'/transport/api/admin/trips/{self.trip.pk}/cancel/', {'reason': 'Road closed'})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.CANCELLED)
+        self.assertIsNone(self.trip.engaged_by_id)

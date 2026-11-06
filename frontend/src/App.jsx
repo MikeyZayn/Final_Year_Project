@@ -8,6 +8,7 @@ import { DrawerTile, PageControls } from './features/Drawer.jsx';
 import { confirmDeliveredBookings } from './services/autoBoarding.js';
 import { GroupBookingModal, GroupBoarding, DepartureQueue } from './features/TripFeatures.jsx';
 import DriverPage from './pages/DriverPage.jsx';
+import { selectOperatorPriorityTrip, groupOperatorTrips, operatorTripLabel } from './services/operatorTrips.js';
 import ThembaMap from './components/ThembaMap.jsx';
 import { TripEditor, TripGroupEditor, apiMessage } from './features/TripManagement.jsx';
 import PassengerBookingFlow from './pages/PassengerBookingFlow.jsx';
@@ -584,7 +585,7 @@ function Login({ role, setRole, onBack, onAuthed, notify }) {
 }
 
 function Register({ role, setRole, onBack, onAuthed }) {
-  const { register } = useAuth();
+  const { register, verifyEmail, resendEmailCode } = useAuth();
   const [form, setForm] = useState({
     first_name: '',
     last_name: '',
@@ -593,11 +594,12 @@ function Register({ role, setRole, onBack, onAuthed }) {
     password: '',
     next_of_kin_name: '',
     next_of_kin_phone: '',
-    id_number: '',
     license_number: '',
     rank_code: '',
   });
-  const [photo, setPhoto] = useState(null);
+  const [pendingPhone, setPendingPhone] = useState(null);
+  const [emailCode, setEmailCode] = useState('');
+  const [codeMessage, setCodeMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -607,8 +609,8 @@ function Register({ role, setRole, onBack, onAuthed }) {
 
   async function handleSubmit() {
     setError('');
-    if (!form.phone || !form.password) {
-      setError('Phone number and password are required.');
+    if (!form.phone || !form.password || !form.email.trim()) {
+      setError('Phone number, email and password are required.');
       return;
     }
 
@@ -626,21 +628,10 @@ function Register({ role, setRole, onBack, onAuthed }) {
           next_of_kin_phone: form.next_of_kin_phone,
         });
       } else if (role === 'driver') {
-        if (!photo) {
-          setError('Please attach a photo for driver verification.');
-          setBusy(false);
-          return;
-        }
         const fd = new FormData();
-        fd.append('first_name', form.first_name);
-        fd.append('last_name', form.last_name);
-        fd.append('phone', form.phone);
-        fd.append('email', form.email);
-        fd.append('password', form.password);
-        fd.append('id_number', form.id_number);
-        fd.append('license_number', form.license_number);
-        fd.append('rank_code', form.rank_code);
-        fd.append('photo', photo);
+        for (const key of ['first_name', 'last_name', 'phone', 'email', 'password', 'license_number', 'rank_code']) {
+          fd.append(key, form[key]);
+        }
         user = await register('/accounts/api/register/driver/', fd);
       } else if (role === 'operator') {
         user = await register('/accounts/api/register/operator/', {
@@ -654,7 +645,12 @@ function Register({ role, setRole, onBack, onAuthed }) {
         setBusy(false);
         return;
       }
-      onAuthed(user.role);
+      if (user.requires_email_verification) {
+        setPendingPhone(user.phone || form.phone);
+        setCodeMessage(user.detail || 'Check your email for the six-digit verification code.');
+      } else {
+        onAuthed(user.role);
+      }
     } catch (err) {
       const data = err.response?.data;
       const firstError =
@@ -666,13 +662,54 @@ function Register({ role, setRole, onBack, onAuthed }) {
     }
   }
 
+  async function confirmEmailCode() {
+    setError('');
+    setBusy(true);
+    try {
+      const user = await verifyEmail(pendingPhone, emailCode.trim());
+      onAuthed(user.role);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not verify the code.');
+    } finally { setBusy(false); }
+  }
+
+  async function resendCode() {
+    setError('');
+    setBusy(true);
+    try {
+      const msg = await resendEmailCode(pendingPhone);
+      setCodeMessage(msg.detail || 'Check your email for a new code.');
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Could not resend the code.');
+    } finally { setBusy(false); }
+  }
+
+  if (pendingPhone) return (
+    <section className="auth-panel">
+      <button className="back-link" type="button" onClick={onBack}>← Back</button>
+      <div className="eyebrow">Email verification</div>
+      <h2>Check your inbox.</h2>
+      <p className="muted">{codeMessage} Check your spam folder too. This code expires after 15 minutes.</p>
+      <label>Six-digit email code
+        <input inputMode="numeric" autoComplete="one-time-code" maxLength={6}
+          value={emailCode} onChange={(e) => setEmailCode(e.target.value.replace(/\D/g, ''))}
+          placeholder="123456" />
+      </label>
+      {error && <p className="danger-button">{error}</p>}
+      <button className="primary-button full" type="button" disabled={busy || !/^\d{6}$/.test(emailCode)} onClick={confirmEmailCode}>
+        {busy ? 'Checking…' : 'Verify email and continue'}
+      </button>
+      <button className="text-button" type="button" disabled={busy} onClick={resendCode}>Resend code</button>
+    </section>
+  );
+
   return (
     <section className="auth-panel">
       <button className="back-link" onClick={onBack} type="button">← Back</button>
       <div className="eyebrow">Account registration</div>
       <h2>Join THEMBA.</h2>
       <p className="muted">
-        Passenger accounts are active immediately. Driver accounts require operator approval.
+        Enter your email to receive a verification code. Driver accounts also require administrator approval.
       </p>
 
       <RolePicker role={role} setRole={setRole} />
@@ -700,11 +737,14 @@ function Register({ role, setRole, onBack, onAuthed }) {
       </label>
 
       <label>
-        Email (optional)
+        Email (required)
         <input
           value={form.email}
           onChange={(e) => set('email', e.target.value)}
           placeholder="you@example.co.za"
+          type="email"
+          required
+          autoComplete="email"
         />
       </label>
 
@@ -730,15 +770,6 @@ function Register({ role, setRole, onBack, onAuthed }) {
       {role === 'driver' && (
         <>
           <label>
-            SA ID number
-            <input
-              value={form.id_number}
-              onChange={(e) => set('id_number', e.target.value)}
-              maxLength={13}
-              placeholder="13 digits"
-            />
-          </label>
-          <label>
             Driver license number
             <input
               value={form.license_number}
@@ -751,14 +782,6 @@ function Register({ role, setRole, onBack, onAuthed }) {
               value={form.rank_code}
               onChange={(e) => set('rank_code', e.target.value)}
               placeholder="e.g. KDL001"
-            />
-          </label>
-          <label>
-            Verification photo
-            <input
-              type="file"
-              accept="image/*"
-              onChange={(e) => setPhoto(e.target.files?.[0] || null)}
             />
           </label>
         </>
@@ -1721,62 +1744,62 @@ function RatingModal({ bookingId, onClose, onDone, notify }) {
 function Operator({ notify }) {
   const [trips, setTrips] = useState([]);
   const [selectedTripId, setSelectedTripId] = useState(null);
-  const [memberships, setMemberships] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  async function load() {
-    setLoading(true);
-    setError('');
+  async function load(silent = false) {
+    if (!silent) setLoading(true);
     try {
-      const [tripsRes, memRes] = await Promise.all([
-        api.get('/transport/api/my-trips/'),
-        api.get('/transport/api/my-memberships/'),
-      ]);
-      setTrips(tripsRes.data);
-      setMemberships(memRes.data);
+      const { data } = await api.get('/transport/api/my-trips/');
+      setTrips(Array.isArray(data) ? data : []);
+      setError('');
     } catch (err) {
-      setError(err.response?.data?.detail || 'Could not load operator data.');
+      if (!silent) setError(err.response?.data?.detail || 'Could not load operator data.');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    load();
+    // Keep the current assignment/status in sync with the background scheduler.
+    const timer = setInterval(() => load(true), 15000);
+    const onFocus = () => load(true);
+    window.addEventListener('focus', onFocus);
+    return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); };
+  }, []);
 
-  if (loading) {
-    return (
-      <article className="module module-wide">
-        <p className="muted">Loading operator data…</p>
-      </article>
-    );
-  }
+  if (loading) return <article className="module module-wide"><p className="muted">Loading operator data…</p></article>;
+  if (error) return <article className="module module-wide"><p className="muted">{error}</p><button type="button" className="secondary-button" onClick={() => load()}>Retry</button></article>;
 
-  if (error) {
-    return (
-      <article className="module module-wide">
-        <p className="danger-button" style={{ display: 'block' }}>{error}</p>
-      </article>
-    );
-  }
+  if (selectedTripId) return (
+    <OperatorTripDetail
+      tripId={selectedTripId}
+      onBack={() => { setSelectedTripId(null); load(); }}
+      notify={notify}
+    />
+  );
 
-  if (selectedTripId) {
-    return (
-      <OperatorTripDetail
-        tripId={selectedTripId}
-        onBack={() => { setSelectedTripId(null); load(); }}
-        notify={notify}
-      />
-    );
-  }
-
+  const priority = selectOperatorPriorityTrip(trips);
   return (
     <div className="dashboard-grid">
-      <OperatorTripsList trips={trips.filter(t => ['scheduled','boarding','in_progress'].includes(t.status)).slice(0,5)} onSelectTrip={setSelectedTripId} />
-      <DrawerTile title="All my trips" description="Open your full queue and journey history" icon="↗"><OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} /></DrawerTile>
-      <DrawerTile title="Passenger alerts" description="Review and respond to active alerts" icon="!"><OperatorAlerts notify={notify} /></DrawerTile>
-      <DrawerTile title="Feedback" description="Ratings, complaints and responses" icon="☆"><OperatorFeedback notify={notify} /></DrawerTile>
-      <DrawerTile title="Announcements" description="Service messages for your passengers" icon="↗"><OperatorAnnouncements notify={notify} /></DrawerTile>
+      <OperatorTripsList trips={priority ? [priority] : []} title="My trips"
+        summary={priority?.status === 'in_progress' || priority?.status === 'boarding'
+          ? 'Currently operating' : 'Next assigned trip'}
+        emptyMessage="You have no active or upcoming trips assigned."
+        onSelectTrip={setSelectedTripId} />
+      <DrawerTile title="All my trips" description="All assigned trips, including completed, cancelled and refunded trips" icon="↗">
+        <OperatorTripsList trips={trips} title="All my trips" showHistory onSelectTrip={setSelectedTripId} />
+      </DrawerTile>
+      <DrawerTile title="Passenger alerts" description="Review and respond to active alerts" icon="!">
+        <OperatorAlerts notify={notify} />
+      </DrawerTile>
+      <DrawerTile title="Feedback" description="Ratings, complaints and responses" icon="☆">
+        <OperatorFeedback notify={notify} />
+      </DrawerTile>
+      <DrawerTile title="Announcements" description="Service messages for your passengers" icon="↗">
+        <OperatorAnnouncements notify={notify} />
+      </DrawerTile>
     </div>
   );
 }
@@ -2152,54 +2175,43 @@ function OperatorFeedback({ notify }) {
   );
 }
 
-function OperatorTripsList({ trips, onSelectTrip }) {
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Johannesburg' });
-  const todayTrips = trips.filter((t) => t.departure_date === today);
-  const upcoming = trips.filter((t) => t.departure_date > today);
+function OperatorTripsList({ trips, onSelectTrip, title = 'All my trips', summary, emptyMessage, showHistory = false }) {
+  const groups = showHistory
+    ? groupOperatorTrips(trips)
+    : [{ title: summary, trips }];
 
   return (
     <article className="module module-wide">
       <div className="module-heading">
-        <span>My trips</span>
+        <span>{title}</span>
         <span className="module-number">{trips.length}</span>
       </div>
-
       {trips.length === 0 && (
-        <p className="muted">
-          No trips assigned to you. Trips are scheduled by rank admins.
-        </p>
+        <p className="muted">{emptyMessage || 'No trips have been assigned to you.'}</p>
       )}
-
-      {todayTrips.length > 0 && (
-        <>
-          <div className="section-title" style={{ marginTop: 8 }}>Today</div>
-          {todayTrips.map((t) => <TripRow key={t.id} trip={t} onClick={() => onSelectTrip(t.id)} />)}
-        </>
-      )}
-
-      {upcoming.length > 0 && (
-        <>
-          <div className="section-title" style={{ marginTop: 16 }}>Upcoming</div>
-          {upcoming.map((t) => <TripRow key={t.id} trip={t} onClick={() => onSelectTrip(t.id)} />)}
-        </>
-      )}
+      {groups.filter(group => group.trips.length > 0).map(group => (
+        <div key={group.title || title}>
+          {group.title && <div className="section-title" style={{ marginTop: 12 }}>{group.title}</div>}
+          {group.trips.map(trip => (
+            <TripRow key={trip.id} trip={trip} onClick={() => onSelectTrip(trip.id)} />
+          ))}
+        </div>
+      ))}
     </article>
   );
 }
 
 function TripRow({ trip, onClick }) {
-  const statusColor =
-    trip.status === 'flagged' ? 'var(--danger)' :
+  const refunded = trip.refund_status === 'refunded';
+  const statusColor = refunded ? 'var(--success)' :
+    trip.status === 'cancelled' ? 'var(--danger)' :
     trip.status === 'boarding' || trip.status === 'in_progress' ? 'var(--success)' :
-    trip.status === 'completed' ? 'var(--muted)' :
-    'var(--accent)';
+    trip.status === 'completed' ? 'var(--muted)' : 'var(--accent)';
 
   return (
     <button className="trip-row" onClick={onClick} type="button">
       <span>
-        <strong>
-          {trip.route.departure.name} → {trip.route.destination.name}
-        </strong>
+        <strong>{trip.route?.departure?.name || 'Rank'} → {trip.route?.destination?.name || 'Destination'}</strong>
         <small>
           {trip.trip_code} · {trip.departure_date}
           {trip.expected_departure_time ? ` · ${trip.expected_departure_time.slice(0, 5)}` : ''}
@@ -2207,7 +2219,7 @@ function TripRow({ trip, onClick }) {
         </small>
       </span>
       <span className="status-pill" style={{ borderColor: statusColor, color: statusColor }}>
-        {trip.status}
+        {operatorTripLabel(trip)}
       </span>
     </button>
   );
@@ -2370,10 +2382,17 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
   const engaged = trip.is_engaged;
 
   // -------- Engage prompt --------
+  if (['completed', 'cancelled', 'expired', 'flagged'].includes(trip.status)) return (
+    <article className="module module-wide">
+      <div className="module-heading"><span>{trip.trip_code} · {operatorTripLabel(trip)}</span>
+        <button className="secondary-button" onClick={onBack} type="button">← Back to all my trips</button>
+      </div>
+      <h3>{trip.route?.departure?.name} → {trip.route?.destination?.name}</h3>
+      <p className="muted">This trip is finished. It is no longer your current operating assignment.</p>
+      {trip.refund_status === 'refunded' && <p>Driver no-show: passenger refunds have been recorded.</p>}
+    </article>
+  );
   if (!engaged && trip.status !== 'in_progress') {
-    if (['completed', 'cancelled', 'expired'].includes(trip.status)) return (
-      <article className="module module-wide"><p>{trip.trip_code} · {trip.status}</p><button className="secondary-button" onClick={onBack}>← Back</button></article>
-    );
     return (
       <>
         <article className="module module-wide">
@@ -2421,7 +2440,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     <>
       <article className="module module-wide">
         <div className="module-heading">
-          <span>{trip.trip_code} · {trip.status.toUpperCase()}</span>
+          <span>{trip.trip_code} · {operatorTripLabel(trip)}</span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="secondary-button" onClick={onBack} type="button">← Back</button>
             <button className="primary-button" onClick={completeTrip} disabled={trip.status !== 'in_progress'} type="button">
@@ -2663,9 +2682,70 @@ function Administrator({ notify }) {
       <DrawerTile title="Drivers & DOT checks" description="Licences, demo registry checks and verification status" icon="✓"><AdminDrivers notify={notify} /></DrawerTile>
       <DrawerTile title="Accounts" description="Search people and manage account access" icon="◎"><AdminAccounts notify={notify} /></DrawerTile>
       <DrawerTile title="Trip management" description="Journey history and trip controls" icon="↔"><AdminTrips notify={notify} /></DrawerTile>
+      <DrawerTile title="Trip progression demo" description="Show sample trip stages to clients without changing live data" icon="▷"><AdminTripProgressDemo /></DrawerTile>
       <DrawerTile title="Announcements" description="Publish rank notices for your operators and drivers" icon="↗"><AdminAnnouncements notify={notify} rank={adminInfo.rank} /></DrawerTile>
       <DrawerTile title="Feedback & flags" description="Passenger feedback and reported trip issues" icon="! "><AdminFeedback notify={notify} /><AdminFlags notify={notify} /></DrawerTile>
     </div>
+  );
+}
+
+// Developer-only client presentation. This is NOT linked to real trip records.
+function AdminTripProgressDemo() {
+  const steps = [
+    { title: 'Scheduled', detail: 'Trip is planned with a driver and vehicle.' },
+    { title: 'Boarding', detail: 'Operator checks the vehicle and boards passengers.' },
+    { title: 'In progress', detail: 'The trip has reached its scheduled departure and is underway.' },
+    { title: 'Completed', detail: 'Trip arrived and verified passengers can give feedback.' },
+  ];
+  const [phase, setPhase] = useState(0);
+  const [ending, setEnding] = useState('normal');
+  const labels = ending === 'normal' ? steps : [
+    ...steps.slice(0, 2),
+    { title: ending === 'driver_no_show' ? 'Refunded — Driver No-Show' : 'Cancelled',
+      detail: ending === 'driver_no_show'
+        ? 'Driver failed to check in at Rank A. The system records full refunds for paid bookings.'
+        : 'The trip was cancelled and cannot be operated.' },
+  ];
+  const current = Math.min(phase, labels.length - 1);
+  return (
+    <article className="module module-wide">
+      <div className="module-heading">
+        <span>Developer trip demonstration</span>
+        <span className="module-number">DEMO ONLY</span>
+      </div>
+      <p className="muted">Show clients how a journey progresses. This demonstration uses sample data and never updates real trips, passengers, or refunds.</p>
+      <div className="form-grid" style={{ alignItems: 'end' }}>
+        <label>Sample route
+          <input value="Ongoye Main Rank → Richards Bay" readOnly />
+        </label>
+        <label>Demonstrate journey
+          <select value={ending} onChange={(e) => {setEnding(e.target.value); setPhase(0);}}>
+            <option value="normal">Normal journey</option>
+            <option value="cancelled">Cancellation</option>
+            <option value="driver_no_show">Driver no-show refund</option>
+          </select>
+        </label>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }} aria-label="Trip progression">
+        {labels.map((step, index) => (
+          <button key={step.title} type="button" onClick={() => setPhase(index)}
+            className={index === current ? 'primary-button' : 'secondary-button'}
+            aria-current={index === current ? 'step' : undefined}>
+            {index + 1}. {step.title}
+          </button>
+        ))}
+      </div>
+      <div style={{ border: '1px solid var(--border)', borderRadius: 12, padding: 18, marginTop: 14 }}>
+        <strong style={{ fontSize: 20 }}>{labels[current].title}</strong>
+        <p className="muted">{labels[current].detail}</p>
+        <p className="muted">Step {current + 1} of {labels.length} · Illustration only</p>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button className="secondary-button" type="button" onClick={() => setPhase(0)}>Restart demo</button>
+        <button className="primary-button" type="button" disabled={current >= labels.length - 1}
+          onClick={() => setPhase(x => Math.min(x + 1, labels.length - 1))}>Next stage →</button>
+      </div>
+    </article>
   );
 }
 
@@ -3134,7 +3214,7 @@ function AdminTrips({ notify }) {
           <span>
             <strong>{t.trip_code} · {t.route.departure.name} → {t.route.destination.name}</strong>
             <small>
-              {t.operator_name} · {t.departure_date} · {t.seats_taken}/{t.seat_capacity} seats · {t.status}
+              {t.operator_name} · {t.departure_date} · {t.seats_taken}/{t.seat_capacity} seats · {operatorTripLabel(t)}
             </small>
           </span>
           {!['cancelled', 'completed', 'expired'].includes(t.status) && (
@@ -3174,11 +3254,9 @@ function AdminAccounts({ notify }) {
   async function generateReset(u) {
     try {
       const { data } = await api.post(`/transport/api/admin/users/${u.id}/reset-code/`);
-      window.alert(
-        `Reset code for ${data.user_name} (${data.user_phone}):\n\n${data.code}\n\nValid for 24 hours. Give it to them in person.`
-      );
+      notify(data.detail || 'A password reset code was emailed to this user.');
     } catch (err) {
-      notify(err.response?.data?.detail || 'Failed.');
+      notify(err.response?.data?.detail || 'Could not send email reset code.');
     }
   }
 
@@ -3226,7 +3304,7 @@ function AdminAccounts({ notify }) {
               {u.account_status}
             </span>
             <button className="secondary-button" onClick={() => generateReset(u)} type="button">
-              Reset code
+              Email reset code
             </button>
           </div>
         </div>
@@ -3241,7 +3319,6 @@ function PasswordResetModal({ onClose, notify }) {
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [issuedCode, setIssuedCode] = useState('');
   const [infoMessage, setInfoMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -3251,14 +3328,8 @@ function PasswordResetModal({ onClose, notify }) {
     setBusy(true);
     try {
       const data = await api.requestPasswordReset(phone);
-      if (data.method === 'admin_assisted') {
-        setInfoMessage(data.detail);
-        setStep('admin_assisted');
-      } else {
-        setIssuedCode(data.code);
-        setInfoMessage(data.detail);
-        setStep('confirm');
-      }
+      setInfoMessage(data.detail);
+      setStep('confirm');
     } catch (err) {
       setError(err.response?.data?.detail || 'Request failed.');
     } finally {
@@ -3295,9 +3366,8 @@ function PasswordResetModal({ onClose, notify }) {
         {step === 'request' && (
           <>
             <p className="muted">
-              Enter your phone number. Passengers and drivers will get a code
-              shown on screen. Operators and admins are given a code by their
-              rank administrator.
+              Enter your registered phone number. The system emails a six-digit reset code
+              to the address linked to your account. The code expires after 15 minutes.
             </p>
             <label>
               Phone number
@@ -3317,27 +3387,9 @@ function PasswordResetModal({ onClose, notify }) {
           </>
         )}
 
-        {step === 'admin_assisted' && (
-          <>
-            <p className="muted">{infoMessage}</p>
-            <div className="settings-actions">
-              <button className="secondary-button" onClick={onClose} type="button">Close</button>
-            </div>
-          </>
-        )}
-
         {step === 'confirm' && (
           <>
             <p className="muted">{infoMessage}</p>
-            <div style={{
-              padding: 12, borderRadius: 8, marginTop: 12,
-              background: 'var(--chip)', border: '1px dashed var(--accent)',
-            }}>
-              <small className="muted">Your code</small>
-              <div style={{ fontSize: 28, fontFamily: 'DM Mono, monospace', letterSpacing: 4 }}>
-                {issuedCode}
-              </div>
-            </div>
             <label>
               Enter code
               <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="123456" maxLength={6} />
@@ -3417,7 +3469,7 @@ function AdminDrivers({ notify }) {
 
       <p className="muted">
         Verifying against the simulated Department of Transport registry confirms
-        the driver's license number, ID number, and PDP status.
+        the driver's licence number and PDP status. No facial photo or SA ID is collected during registration.
       </p>
 
       {loading && <p className="muted">Loading…</p>}
@@ -3429,7 +3481,7 @@ function AdminDrivers({ notify }) {
             <span>
               <strong>{d.name}</strong>
               <small style={{ display: 'block', marginTop: 4, opacity: 0.7 }}>
-                {d.phone} · License {d.license_number} · ID {d.id_number || '—'}
+                {d.phone} · Licence {d.license_number}
                 {d.association_name ? ` · ${d.association_name}` : ''}
               </small>
             </span>

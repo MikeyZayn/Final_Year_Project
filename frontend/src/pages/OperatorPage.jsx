@@ -6,6 +6,7 @@
  */
 import { useEffect, useState } from 'react';
 import { api } from '../api';
+import { selectOperatorPriorityTrip, groupOperatorTrips, operatorTripLabel } from '../services/operatorTrips.js';
 import '../styles/operatorFyp.css';
 
 export default function OperatorPage({ notify, isAdmin }) {
@@ -81,7 +82,12 @@ export default function OperatorPage({ notify, isAdmin }) {
   return (
     <div className="app light fyp-operator">
       <div className="dashboard-grid">
-        <OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} />
+        <OperatorTripsList trips={selectOperatorPriorityTrip(trips) ? [selectOperatorPriorityTrip(trips)] : []}
+          onSelectTrip={setSelectedTripId} title="My trips" />
+        <details className="module module-wide">
+          <summary style={{ cursor: 'pointer', fontWeight: 700 }}>All my trips ({trips.length})</summary>
+          <OperatorTripsList trips={trips} onSelectTrip={setSelectedTripId} showHistory title="All my trips" />
+        </details>
         <OperatorMemberships memberships={memberships} />
         <article className="module module-wide" style={{ opacity: 0.55 }}>
           <div className="module-heading">
@@ -97,89 +103,41 @@ export default function OperatorPage({ notify, isAdmin }) {
   );
 }
 
-function OperatorTripsList({ trips, onSelectTrip }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const todayTrips = trips.filter((t) => t.departure_date === today);
-  const upcoming = trips.filter((t) => t.departure_date > today);
-  const past = trips.filter((t) => t.departure_date < today);
-
+function OperatorTripsList({ trips, onSelectTrip, showHistory = false, title = 'My trips' }) {
+  const groups = showHistory ? groupOperatorTrips(trips) : [
+    {title: trips[0]?.is_engaged ? 'Currently operating' : 'Next assigned trip', trips},
+  ];
   return (
     <article className="module module-wide">
-      <div className="module-heading">
-        <span>My trips</span>
-        <span className="module-number">{trips.length}</span>
-      </div>
-
-      {trips.length === 0 && (
-        <p className="muted">No trips assigned to you. Trips are scheduled by rank admins.</p>
-      )}
-
-      {todayTrips.length > 0 && (
-        <>
-          <div className="section-title" style={{ marginTop: 8 }}>
-            Today
-          </div>
-          {todayTrips.map((t) => (
-            <TripRow key={t.id} trip={t} onClick={() => onSelectTrip(t.id)} />
-          ))}
-        </>
-      )}
-
-      {upcoming.length > 0 && (
-        <>
-          <div className="section-title" style={{ marginTop: 16 }}>
-            Upcoming
-          </div>
-          {upcoming.map((t) => (
-            <TripRow key={t.id} trip={t} onClick={() => onSelectTrip(t.id)} />
-          ))}
-        </>
-      )}
-
-      {past.length > 0 && (
-        <>
-          <div className="section-title" style={{ marginTop: 16 }}>
-            Earlier
-          </div>
-          {past.slice(0, 5).map((t) => (
-            <TripRow key={t.id} trip={t} onClick={() => onSelectTrip(t.id)} />
-          ))}
-        </>
-      )}
+      <div className="module-heading"><span>{title}</span><span className="module-number">{trips.length}</span></div>
+      {trips.length === 0 && <p className="muted">No active or upcoming trip assigned.</p>}
+      {groups.filter(g => g.trips.length).map(group => (
+        <section key={group.title}>
+          <div className="section-title" style={{ marginTop: 10 }}>{group.title}</div>
+          {group.trips.map(t => <TripRow key={t.id} trip={t} onClick={() => onSelectTrip(t.id)} />)}
+        </section>
+      ))}
     </article>
   );
 }
 
 function TripRow({ trip, onClick }) {
-  const statusColor =
-    trip.status === 'flagged'
-      ? 'var(--danger)'
-      : trip.status === 'boarding' || trip.status === 'in_progress'
-        ? 'var(--success)'
-        : trip.status === 'completed'
-          ? 'var(--muted)'
-          : 'var(--accent)';
-
+  const refunded = trip.refund_status === 'refunded';
+  const statusColor = refunded ? 'var(--success)' :
+    trip.status === 'cancelled' ? 'var(--danger)' :
+    trip.status === 'boarding' || trip.status === 'in_progress' ? 'var(--success)' :
+    trip.status === 'completed' ? 'var(--muted)' : 'var(--accent)';
   const from = trip.route?.departure?.name || '—';
   const to = trip.route?.destination?.name || '—';
-
   return (
     <button className="trip-row" onClick={onClick} type="button">
-      <span>
-        <strong>
-          {from} → {to}
-        </strong>
-        <small>
-          {trip.trip_code} · {trip.departure_date}
-          {trip.expected_departure_time
-            ? ` · ${String(trip.expected_departure_time).slice(0, 5)}`
-            : ''}
-          {' · '}
-          {trip.seats_taken}/{trip.seat_capacity} seats
-        </small>
-      </span>
+      <span><strong>{from} → {to}</strong><small>
+        {trip.trip_code} · {trip.departure_date}
+        {trip.expected_departure_time ? ` · ${String(trip.expected_departure_time).slice(0, 5)}` : ''}
+        {' · '}{trip.seats_taken}/{trip.seat_capacity} seats
+      </small></span>
       <span className="status-pill" style={{ borderColor: statusColor, color: statusColor }}>
-        {trip.status}
+        {operatorTripLabel(trip)}
       </span>
     </button>
   );
@@ -312,6 +270,15 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
 
   const engaged = Boolean(trip.is_engaged || trip.engaged_at || trip.status === 'boarding' || trip.status === 'in_progress');
 
+  if (['completed', 'cancelled'].includes(trip.status)) return (
+    <article className="module module-wide">
+      <div className="module-heading"><span>{trip.trip_code} · {operatorTripLabel(trip)}</span>
+        <button className="secondary-button" onClick={onBack} type="button">← Back</button>
+      </div>
+      <p className="muted">This is a finished trip. It no longer holds your operating assignment.</p>
+    </article>
+  );
+
   if (!engaged) {
     return (
       <>
@@ -378,7 +345,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     <>
       <article className="module module-wide">
         <div className="module-heading">
-          <span>{trip.trip_code} · {trip.status.replaceAll("_", " ").toUpperCase()}</span>
+          <span>{trip.trip_code} · {operatorTripLabel(trip)}</span>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="secondary-button" onClick={onBack} type="button">
               ← Back

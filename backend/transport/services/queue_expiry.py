@@ -80,7 +80,7 @@ def _expire_due_queues(now):
         ).exists():
             continue
 
-        trip.status = Trip.Status.EXPIRED
+        trip.status = Trip.Status.CANCELLED
         trip.engaged_by = None
         trip.engaged_at = None
         trip.save(update_fields=[
@@ -92,7 +92,7 @@ def _expire_due_queues(now):
 
         trip.bookings.filter(
             status=Booking.Status.RESERVED
-        ).update(status=Booking.Status.NO_SHOW)
+        ).update(status=Booking.Status.CANCELLED)
 
         trip_count += 1
 

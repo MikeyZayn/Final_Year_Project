@@ -5,7 +5,7 @@ import { Bell, ChevronDown, History, TicketCheck } from '../components/Icons.jsx
 import '../styles/driver.css';
 
 const ACTIVE_STATUSES = ['boarding', 'in_progress'];
-const FINISHED_STATUSES = ['completed', 'cancelled', 'expired', 'flagged'];
+const FINISHED_STATUSES = ['completed', 'cancelled'];
 
 const STATUS_LABELS = {
   scheduled: 'Scheduled',
@@ -13,8 +13,6 @@ const STATUS_LABELS = {
   in_progress: 'In progress',
   completed: 'Completed',
   cancelled: 'Cancelled',
-  expired: 'Expired',
-  flagged: 'Flagged',
 };
 
 const ACTIVATION_WINDOW_MS = 15 * 60 * 1000;

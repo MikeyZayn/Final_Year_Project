@@ -55,8 +55,8 @@ def refund_overdue_trip(trip_id, now=None, *, override=False):
             booking.save(update_fields=['status'])
 
         trip.driver_location_status = 'no_show'
-        # A flagged trip cannot keep accepting boarding or appear as a live trip.
-        trip.status = Trip.Status.FLAGGED
+        # Driver no-show is a final cancellation with a separate refund reason.
+        trip.status = Trip.Status.CANCELLED
         trip.engaged_by = None
         trip.engaged_at = None
         trip.save(update_fields=['driver_location_status', 'status', 'engaged_by', 'engaged_at', 'updated_at'])

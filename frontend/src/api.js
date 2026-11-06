@@ -6,7 +6,7 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const publicAccountRequest =
-    /\/accounts\/api\/(login|register[^/]*|password-reset)(\/|$)/
+    /\/accounts\/api\/(login|register[^/]*|email|password-reset)(\/|$)/
       .test(config.url || "");
 
   const token = sessionStorage.getItem("token");

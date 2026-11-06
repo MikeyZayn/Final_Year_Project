@@ -142,8 +142,6 @@ class Trip(models.Model):
         IN_PROGRESS = "in_progress", "In progress"
         COMPLETED = "completed", "Completed"
         CANCELLED = "cancelled", "Cancelled"
-        FLAGGED = "flagged", "Flagged — needs admin review"
-        EXPIRED = "expired", "Expired in queue"
 
     operator = models.ForeignKey(
         OperatorProfile, on_delete=models.CASCADE, related_name="trips"

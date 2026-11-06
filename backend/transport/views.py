@@ -1,3 +1,4 @@
+from django.contrib.auth.hashers import make_password
 from django.db import models, transaction
 from django.utils import timezone
 from django.utils.crypto import get_random_string
@@ -6,7 +7,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
 from accounts.models import DriverProfile
-from accounts.dot_adapter import verify_driver
+from accounts.dot_adapter import verify_driver, verify_driver_license
 
 from accounts.models import OperatorProfile, User, PasswordResetCode
 import random
@@ -337,8 +338,7 @@ def api_flag_trip(request, trip_id):
     flag = TripFlag.objects.create(
         trip=trip, category=category, notes=notes, flagged_by=request.user,
     )
-    trip.status = Trip.Status.FLAGGED
-    trip.save()
+    # A flag is an audit/review record, not a trip lifecycle status.
     return Response(TripFlagSerializer(flag).data, status=201)
 
 
@@ -439,7 +439,7 @@ def api_reassign_trip(request, trip_id):
     except Trip.DoesNotExist:
         return Response({"detail": "Trip not found or not yours."}, status=404)
 
-    if trip.status in [Trip.Status.COMPLETED, Trip.Status.CANCELLED, Trip.Status.EXPIRED]:
+    if trip.status in [Trip.Status.COMPLETED, Trip.Status.CANCELLED]:
         return Response(
             {"detail": "Cannot reassign assets on a completed or cancelled trip."},
             status=400,
@@ -538,10 +538,12 @@ def api_engage_trip(request, trip_id):
         return Response({"detail": "Not an operator account."}, status=403)
 
     # one engagement at a time
-    existing = Trip.objects.filter(engaged_by=op).exclude(pk=trip_id).first()
+    existing = Trip.objects.filter(
+        operator=op, status__in=[Trip.Status.BOARDING, Trip.Status.IN_PROGRESS]
+    ).exclude(pk=trip_id).order_by('departure_date', 'expected_departure_time').first()
     if existing:
         return Response(
-            {"detail": f"You are already engaged to trip {existing.trip_code}. Release it first."},
+            {"detail": f"You are already operating trip {existing.trip_code}. Complete it before engaging another trip."},
             status=400,
         )
 
@@ -552,6 +554,12 @@ def api_engage_trip(request, trip_id):
 
     if trip.status not in [Trip.Status.SCHEDULED, Trip.Status.BOARDING]:
         return Response({"detail": "Only scheduled or boarding trips can be engaged."}, status=400)
+
+    from .services.payment import trip_departure_dt
+    from datetime import timedelta
+    departure = trip_departure_dt(trip)
+    if departure and timezone.now() >= departure + timedelta(minutes=15):
+        return Response({"detail": "This trip missed its departure window and cannot be engaged."}, status=400)
 
     trip.engaged_by = op
     trip.engaged_at = timezone.now()
@@ -584,8 +592,8 @@ def api_release_trip(request, trip_id):
         status=Booking.Status.NO_SHOW
     )
 
-    trip.engaged_by = None
-    trip.engaged_at = None
+    # Legacy release/departure endpoint: starting travel must not release the
+    # operator's active assignment. Only terminal transitions release them.
     if trip.status == Trip.Status.BOARDING:
         trip.status = Trip.Status.IN_PROGRESS
     trip.save()
@@ -1011,7 +1019,7 @@ def api_cancel_booking(request, booking_id):
 
     Trip.objects.select_for_update().get(pk=booking.trip_id)
     booking.refresh_from_db()
-    if booking.status in [Booking.Status.NO_SHOW] or booking.trip.status in [Trip.Status.EXPIRED, Trip.Status.COMPLETED, Trip.Status.CANCELLED]:
+    if booking.status in [Booking.Status.NO_SHOW] or booking.trip.status in [Trip.Status.COMPLETED, Trip.Status.CANCELLED]:
         return Response({"detail": "This booking is no longer open for cancellation."}, status=400)
 
     if booking.status == Booking.Status.CANCELLED:
@@ -1075,7 +1083,6 @@ def api_driver_profile(request):
             "email": u.email,
         },
         "license_number": profile.license_number,
-        "id_number": profile.id_number,
         "pdp_number": profile.pdp_number,
         "status": profile.status,
         "external_verification_status": profile.external_verification_status,
@@ -1725,8 +1732,15 @@ def api_admin_cancel_trip(request, trip_id):
     except Trip.DoesNotExist:
         return Response({"detail": "Trip not found."}, status=404)
 
+    if trip.status == Trip.Status.COMPLETED:
+        return Response({"detail": "A completed trip cannot be cancelled."}, status=400)
+    if trip.status == Trip.Status.CANCELLED:
+        return Response(TripSerializer(trip).data)
+
     trip.status = Trip.Status.CANCELLED
-    trip.save()
+    trip.engaged_by = None
+    trip.engaged_at = None
+    trip.save(update_fields=["status", "engaged_by", "engaged_at", "updated_at"])
 
     trip.bookings.filter(
         status__in=[Booking.Status.RESERVED, Booking.Status.BOARDED]
@@ -1952,6 +1966,9 @@ def api_admin_edit_trip(request, trip_id):
         if request.data["status"] not in valid:
             return Response({"detail": "Invalid status."}, status=400)
         trip.status = request.data["status"]
+        if trip.status in (Trip.Status.COMPLETED, Trip.Status.CANCELLED):
+            trip.engaged_by = None
+            trip.engaged_at = None
     if "notes" in request.data:
         trip.notes = request.data["notes"]
 
@@ -2222,7 +2239,6 @@ def api_admin_driver_detail(request, driver_id):
         "phone": u.phone,
         "email": u.email,
         "license_number": d.license_number,
-        "id_number": d.id_number,
         "pdp_number": d.pdp_number,
         "association_name": d.association.association_name if d.association else None,
         "association_code": d.association.code if d.association else None,
@@ -2291,24 +2307,35 @@ def api_admin_generate_reset_code(request, user_id):
         except Exception:
             pass
 
-    PasswordResetCode.objects.filter(user=target, used_at__isnull=True).update(
-        used_at=timezone.now()
-    )
-
-    code = f"{random.randint(0, 999999):06d}"
-    PasswordResetCode.objects.create(
-        user=target,
-        code=code,
-        purpose=PasswordResetCode.Purpose.ADMIN_ISSUED,
-        created_by=request.user,
-        expires_at=timezone.now() + timedelta(hours=24),
-    )
-
+    # Admin-assisted recovery uses the same real email delivery channel.
+    # Never reveal OTPs in an administrator's browser response.
+    if not target.email:
+        return Response({"detail": "This account has no email address. Add a valid email before sending a reset code."}, status=400)
+    from accounts.email_otp import generate_code, deliver_code, ensure_email_ready
+    from django.core.exceptions import ImproperlyConfigured
+    from django.core.mail import BadHeaderError
+    from smtplib import SMTPException
+    try:
+        ensure_email_ready()
+        with transaction.atomic():
+            PasswordResetCode.objects.filter(user=target, used_at__isnull=True).update(
+                used_at=timezone.now()
+            )
+            code = generate_code()
+            PasswordResetCode.objects.create(
+                user=target,
+                code=make_password(code),
+                purpose=PasswordResetCode.Purpose.ADMIN_ISSUED,
+                created_by=request.user,
+                expires_at=timezone.now() + timedelta(minutes=15),
+            )
+            deliver_code(target.email, code, "reset")
+    except (ImproperlyConfigured, SMTPException, OSError, BadHeaderError, RuntimeError):
+        return Response({"detail": "Could not deliver the email reset code. Check SMTP settings."}, status=503)
     return Response({
-        "code": code,
         "user_phone": target.phone,
         "user_name": f"{target.first_name} {target.last_name}".strip() or target.phone,
-        "detail": "Code valid for 24 hours. Give this to the user in person.",
+        "detail": "A password reset code has been sent to the account email. It expires in 15 minutes.",
     })
 
 @api_view(["GET"])
@@ -2329,8 +2356,7 @@ def api_admin_drivers(request):
             "name": f"{d.user.first_name} {d.user.last_name}".strip() or d.user.phone,
             "phone": d.user.phone,
             "license_number": d.license_number,
-            "id_number": d.id_number,
-            "pdp_number": d.pdp_number,
+                "pdp_number": d.pdp_number,
             "status": d.status,
             "external_verification_status": d.external_verification_status,
             "external_verification_reason": d.external_verification_reason,
@@ -2352,13 +2378,10 @@ def api_admin_verify_driver(request, driver_id):
     except DriverProfile.DoesNotExist:
         return Response({"detail": "Driver not found."}, status=404)
 
-    if not d.id_number or not d.license_number:
-        return Response(
-            {"detail": "Driver is missing ID or license number. Cannot verify."},
-            status=400,
-        )
+    if not d.license_number:
+        return Response({"detail": "Driver is missing a licence number."}, status=400)
 
-    result = verify_driver(d.id_number, d.license_number)
+    result = verify_driver_license(d.license_number)
 
     if result["verified"]:
         d.external_verification_status = "verified"
@@ -2449,7 +2472,6 @@ def api_verify_cash_payment(request, trip_id, booking_id):
         Trip.Status.IN_PROGRESS,
         Trip.Status.COMPLETED,
         Trip.Status.CANCELLED,
-        Trip.Status.EXPIRED,
     ):
         return Response(
             {"detail": "This trip is no longer accepting cash verification."},

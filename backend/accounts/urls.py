@@ -13,6 +13,8 @@ urlpatterns = [
     path("api/register/passenger/", views.api_register_passenger),
     path("api/register/driver/", views.api_register_driver),
     path("api/register/operator/", views.api_register_operator),
+    path("api/email/verify/", views.api_email_verify),
+    path("api/email/resend/", views.api_email_resend),
     path("api/login/", views.api_login),
     path("api/logout/", views.api_logout),
     path("api/me/", views.api_me),   
