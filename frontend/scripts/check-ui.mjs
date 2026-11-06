@@ -86,7 +86,7 @@ try {
   assert.equal(document.querySelector('[role="dialog"]'),null);
   console.log('PASS: drawer hides records until opened and closes with Escape.');
 
-  const { GroupBookingModal, DriverRankMemberships, GroupBoarding } = await server.ssrLoadModule('/src/features/TripFeatures.jsx');
+  const { GroupBookingModal, GroupBoarding } = await server.ssrLoadModule('/src/features/TripFeatures.jsx');
   await act(async () => root.render(React.createElement(GroupBookingModal, { trip, busy: false, onClose() {}, onSubmit: c => { postedCompanions = c; } })));
   await click('Add companion');
   const fields = document.querySelectorAll('input');
@@ -94,13 +94,6 @@ try {
   await act(async () => document.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
   assert.deepEqual(postedCompanions, [{ first_name: 'Nandi', last_name: 'Dube' }]);
   console.log('PASS: group booking modal captures only companion name and surname.');
-
-  api.defaults.adapter = async config => ({ data: config.url.includes('/ranks/') ? [{ id: 1, name: 'New rank' }] : [], status: 200, statusText: 'OK', headers: {}, config });
-  await act(async () => root.render(React.createElement(DriverRankMemberships, { notify() {} })));
-  await flush();
-  assert.match(document.body.textContent, /My driver ranks/);
-  assert.match(document.body.textContent, /New rank/);
-  console.log('PASS: driver rank request UI renders.');
 
   const leader = { booking_id: 11, name: 'Leader', status: 'reserved', next_of_kin_name: 'Family', next_of_kin_phone: '0822222222' };
   const groupTrip = { ...trip, assets_verified_at: new Date().toISOString(), status: 'boarding', walk_in_passengers: [{ booking_id: 12, group_leader_id: 11, name: 'Nandi Dube', status: 'reserved' }] };

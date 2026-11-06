@@ -1,5 +1,9 @@
 from django.shortcuts import redirect, render
 from django.contrib.auth import authenticate, login, logout
+from django.db import transaction
+from django.core.exceptions import ImproperlyConfigured
+from django.core.mail import BadHeaderError
+from smtplib import SMTPException
 from django.contrib.auth.decorators import login_required
 
 from rest_framework.decorators import api_view, permission_classes, parser_classes
@@ -9,10 +13,17 @@ from rest_framework.authtoken.models import Token
 from rest_framework.parsers import MultiPartParser, FormParser
 from django.utils import timezone
 from datetime import timedelta
-import random
+import secrets
 from rest_framework import status
 
-from .models import PasswordResetCode, User
+from .models import PasswordResetCode, User, EmailVerificationCode
+from .email_otp import (
+    generate_code, ensure_email_ready, deliver_code, send_registration_code,
+    verify_registration_code, reset_code_matches, COOLDOWN_SECONDS,
+)
+from django.contrib.auth.hashers import make_password
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as PasswordValidationError
 
 from .forms import (
     AdminSignUpForm,
@@ -29,53 +40,24 @@ from .serializers import (
     OperatorRegisterSerializer,
     PasswordResetRequestSerializer,
     PasswordResetConfirmSerializer,
+    EmailVerificationSerializer,
+    EmailVerificationResendSerializer,
 )
 
 
-# ---------- Server-rendered views (kept as fallback) ----------
+# The JSON API handles registration and email confirmation. These old HTML
+# registration pages cannot bypass the new mandatory email verification flow.
+def _legacy_registration(request):
+    from django.http import HttpResponse
+    return HttpResponse(
+        "Use the THEMBA web app's Create an account screen to register and verify your email.",
+        content_type="text/plain; charset=utf-8", status=410,
+    )
 
-def register_passenger(request):
-    if request.method == "POST":
-        form = PassengerSignUpForm(request.POST)
-        if form.is_valid():
-            form.save()
-            return redirect("login")
-    else:
-        form = PassengerSignUpForm()
-    return render(request, "accounts/register_passenger.html", {"form": form})
-
-
-def register_driver(request):
-    if request.method == "POST":
-        form = DriverSignUpForm(request.POST, request.FILES)
-        if form.is_valid():
-            form.save()
-            return redirect("login")
-    else:
-        form = DriverSignUpForm()
-    return render(request, "accounts/register_driver.html", {"form": form})
-
-
-def register_admin(request):
-    if request.method == "POST":
-        form = AdminSignUpForm(request.POST)
-        if form.is_valid():
-            form.save()
-            return redirect("login")
-    else:
-        form = AdminSignUpForm()
-    return render(request, "accounts/register_admin.html", {"form": form})
-
-
-def register_operator(request):
-    if request.method == "POST":
-        form = OperatorSignUpForm(request.POST)
-        if form.is_valid():
-            form.save()
-            return redirect("login")
-    else:
-        form = OperatorSignUpForm()
-    return render(request, "accounts/register_operator.html", {"form": form})
+register_passenger = _legacy_registration
+register_driver = _legacy_registration
+register_operator = _legacy_registration
+register_admin = _legacy_registration
 
 
 def home(request):
@@ -117,13 +99,32 @@ def _auth_response(user):
     return Response({"token": token.key, "user": UserSerializer(user).data})
 
 
+def _register_with_email(serializer):
+    """Create an inactive account and send an email OTP, atomically.
+
+    If SMTP is not configured or delivery fails, leave no unusable account.
+    """
+    try:
+        ensure_email_ready()
+        with transaction.atomic():
+            user = serializer.save()
+            send_registration_code(user)
+    except (ImproperlyConfigured, SMTPException, OSError, BadHeaderError, RuntimeError) as exc:
+        # Do not leak SMTP passwords or provider internals to the client.
+        return Response({"detail": "Email delivery is unavailable. Check SMTP setup and try again."}, status=503)
+    return Response({
+        "requires_email_verification": True,
+        "phone": user.phone,
+        "detail": "We sent a six-digit verification code to your email. It expires in 15 minutes.",
+    }, status=202)
+
+
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def api_register_passenger(request):
     s = PassengerRegisterSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    user = s.save()
-    return _auth_response(user)
+    return _register_with_email(s)
 
 
 @api_view(["POST"])
@@ -132,8 +133,7 @@ def api_register_passenger(request):
 def api_register_driver(request):
     s = DriverRegisterSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    user = s.save()
-    return _auth_response(user)
+    return _register_with_email(s)
 
 
 @api_view(["POST"])
@@ -141,8 +141,50 @@ def api_register_driver(request):
 def api_register_operator(request):
     s = OperatorRegisterSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    user = s.save()
+    return _register_with_email(s)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def api_email_verify(request):
+    s = EmailVerificationSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+    try:
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(phone=s.validated_data["phone"])
+            if user.is_active:
+                return Response({"detail": "Email already verified. Please sign in."}, status=400)
+            if not verify_registration_code(user, s.validated_data["code"]):
+                return Response({"detail": "Incorrect or expired code. Request another if needed."}, status=400)
+            user.is_active = True
+            user.save(update_fields=["is_active"])
+    except User.DoesNotExist:
+        return Response({"detail": "Incorrect or expired code."}, status=400)
     return _auth_response(user)
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+def api_email_resend(request):
+    s = EmailVerificationResendSerializer(data=request.data)
+    s.is_valid(raise_exception=True)
+    try:
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(phone=s.validated_data["phone"], is_active=False)
+            last = user.email_verification_codes.order_by("-created_at").first()
+            now = timezone.now()
+            if last and (now - last.last_sent_at).total_seconds() < COOLDOWN_SECONDS:
+                return Response({"detail": "Please wait one minute before requesting another code."}, status=429)
+            if user.email_verification_codes.filter(created_at__gte=now-timedelta(days=1)).count() >= 5:
+                return Response({"detail": "Too many requests. Try again tomorrow."}, status=429)
+            ensure_email_ready()
+            user.email_verification_codes.filter(used_at__isnull=True).update(used_at=now)
+            send_registration_code(user)
+    except User.DoesNotExist:
+        pass  # Do not reveal whether the phone belongs to an account.
+    except (ImproperlyConfigured, SMTPException, OSError, BadHeaderError, RuntimeError):
+        return Response({"detail": "Email delivery is unavailable. Try again later."}, status=503)
+    return Response({"detail": "If your registration is pending, a new code has been emailed."})
 
 
 @api_view(["POST"])
@@ -166,104 +208,58 @@ def api_logout(request):
 def api_me(request):
     return Response(UserSerializer(request.user).data)
 
-def _generate_reset_code():
-    return f"{random.randint(0, 999999):06d}"
-
-
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def api_password_reset_request(request):
-    """Request a password reset code.
-    Passengers and drivers get the code returned directly (simulated SMS).
-    Operators and admins are told to contact their rank admin."""
+    """Email a reset OTP to the registered address; never return the OTP."""
     s = PasswordResetRequestSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    phone = s.validated_data["phone"]
-
+    generic = {"method": "email", "detail": "If an active account exists, a password reset code has been sent to its registered email."}
     try:
-        user = User.objects.get(phone=phone)
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(phone=s.validated_data["phone"], is_active=True)
+            if not user.email:
+                return Response(generic)
+            last = PasswordResetCode.objects.filter(user=user, purpose=PasswordResetCode.Purpose.SELF_SERVICE).order_by("-created_at").first()
+            now = timezone.now()
+            if last and (now - last.created_at).total_seconds() < COOLDOWN_SECONDS:
+                return Response(generic)
+            ensure_email_ready()
+            PasswordResetCode.objects.filter(user=user, used_at__isnull=True, purpose=PasswordResetCode.Purpose.SELF_SERVICE).update(used_at=now)
+            code = generate_code()
+            PasswordResetCode.objects.create(
+                user=user, code=make_password(code), purpose=PasswordResetCode.Purpose.SELF_SERVICE,
+                expires_at=now+timedelta(minutes=15),
+            )
+            deliver_code(user.email, code, "reset")
     except User.DoesNotExist:
-        return Response(
-            {"detail": "No account found with that phone number."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-
-    if user.account_status != User.AccountStatus.ACTIVE:
-        return Response(
-            {"detail": "This account is not active. Contact an administrator."},
-            status=status.HTTP_403_FORBIDDEN,
-        )
-
-    # Operators and admins use admin-assisted reset
-    if user.role in (User.Role.OPERATOR, User.Role.ADMIN):
-        return Response({
-            "method": "admin_assisted",
-            "detail": (
-                "Password reset for this role is handled by a rank administrator. "
-                "Please contact your rank admin in person."
-            ),
-        })
-
-    # Passengers and drivers get a self-service code
-    PasswordResetCode.objects.filter(user=user, used_at__isnull=True).update(
-        used_at=timezone.now()
-    )
-    code = _generate_reset_code()
-    PasswordResetCode.objects.create(
-        user=user,
-        code=code,
-        purpose=PasswordResetCode.Purpose.SELF_SERVICE,
-        expires_at=timezone.now() + timedelta(minutes=15),
-    )
-
-    return Response({
-        "method": "self_service",
-        "code": code,
-        "detail": (
-            "A 6-digit code has been generated. In production this would be sent "
-            "by SMS; for the prototype it is shown here and expires in 15 minutes."
-        ),
-    })
+        pass
+    except (ImproperlyConfigured, SMTPException, OSError, BadHeaderError, RuntimeError):
+        return Response({"detail": "Email service unavailable. Please try again later."}, status=503)
+    return Response(generic)
 
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
 def api_password_reset_confirm(request):
-    """Verify a code and set a new password."""
     s = PasswordResetConfirmSerializer(data=request.data)
     s.is_valid(raise_exception=True)
-    phone = s.validated_data["phone"]
-    code = s.validated_data["code"]
-    new_password = s.validated_data["new_password"]
-
     try:
-        user = User.objects.get(phone=phone)
+        validate_password(s.validated_data["new_password"])
+    except PasswordValidationError as exc:
+        return Response({"detail": exc.messages}, status=400)
+    try:
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(phone=s.validated_data["phone"], is_active=True)
+            reset = PasswordResetCode.objects.filter(
+                user=user, used_at__isnull=True
+            ).order_by("-created_at").first()
+            if not reset or not reset_code_matches(reset, s.validated_data["code"]):
+                return Response({"detail": "Invalid, expired or already-used code."}, status=400)
+            user.set_password(s.validated_data["new_password"])
+            user.save(update_fields=["password"])
+            # Existing login tokens are invalidated after a password change.
+            Token.objects.filter(user=user).delete()
     except User.DoesNotExist:
-        return Response(
-            {"detail": "No account found with that phone number."},
-            status=status.HTTP_404_NOT_FOUND,
-        )
-
-    try:
-        reset = PasswordResetCode.objects.get(
-            user=user, code=code, used_at__isnull=True,
-        )
-    except PasswordResetCode.DoesNotExist:
-        return Response(
-            {"detail": "Invalid or already-used code."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    if not reset.is_valid():
-        return Response(
-            {"detail": "This code has expired. Request a new one."},
-            status=status.HTTP_400_BAD_REQUEST,
-        )
-
-    user.set_password(new_password)
-    user.save()
-
-    reset.used_at = timezone.now()
-    reset.save()
-
+        return Response({"detail": "Invalid, expired or already-used code."}, status=400)
     return Response({"detail": "Password updated. You can now sign in."})

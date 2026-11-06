@@ -93,3 +93,40 @@ def verify_driver(id_number: str, license_number: str) -> dict:
             return {"verified": False, "reason": "pdp_expired", "record": rec}
 
     return {"verified": True, "reason": "ok", "record": rec}
+
+def verify_driver_license(license_number: str) -> dict:
+    """Prototype-only licence check, not an identity or facial verification.
+
+    Fail closed if more than one registry record shares this licence number.
+    """
+    if not license_number or not license_number.strip():
+        return {"verified": False, "reason": "missing_credentials", "record": None}
+    try:
+        con = _connect()
+    except (DOTUnavailable, sqlite3.Error, OSError):
+        return {"verified": False, "reason": "dot_unavailable", "record": None}
+    try:
+        rows = con.execute(
+            "SELECT * FROM licensed_drivers WHERE license_number = ?",
+            (license_number.strip(),),
+        ).fetchall()
+    except sqlite3.Error:
+        return {"verified": False, "reason": "dot_unavailable", "record": None}
+    finally:
+        con.close()
+    if not rows:
+        return {"verified": False, "reason": "not_found", "record": None}
+    if len(rows) != 1:
+        return {"verified": False, "reason": "ambiguous_license", "record": None}
+    rec = dict(rows[0])
+    if rec.get("license_status") != "valid":
+        return {"verified": False, "reason": f"license_{rec.get('license_status')}", "record": None}
+    try:
+        if date.fromisoformat(rec["license_expiry_date"]) < date.today():
+            return {"verified": False, "reason": "license_expired", "record": None}
+        if rec.get("pdp_valid_until") and date.fromisoformat(rec["pdp_valid_until"]) < date.today():
+            return {"verified": False, "reason": "pdp_expired", "record": None}
+    except (ValueError, TypeError, KeyError):
+        return {"verified": False, "reason": "dot_unavailable", "record": None}
+    # Never expose the registry's hidden SA ID to clients, logs or driver records.
+    return {"verified": True, "reason": "license_valid_demo", "record": {"pdp_number": rec.get("pdp_number") or ""}}

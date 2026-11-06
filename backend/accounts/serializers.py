@@ -1,7 +1,7 @@
 from django.contrib.auth import authenticate
 from rest_framework import serializers
 from django.db import transaction
-from .dot_adapter import verify_driver
+from django.contrib.auth.password_validation import validate_password
 from .models import (
     AdminProfile,
     DriverProfile,
@@ -26,17 +26,32 @@ class LoginSerializer(serializers.Serializer):
     def validate(self, attrs):
         user = authenticate(username=attrs["phone"], password=attrs["password"])
         if not user:
+            maybe = User.objects.filter(phone=attrs["phone"], is_active=False).first()
+            if maybe and maybe.check_password(attrs["password"]):
+                raise serializers.ValidationError("Confirm the verification code sent to your email before signing in.")
             raise serializers.ValidationError("Invalid phone number or password.")
         attrs["user"] = user
         return attrs
 
 
-class PassengerRegisterSerializer(serializers.Serializer):
+class RegistrationEmailMixin:
+    def validate_email(self, value):
+        value = value.strip().lower()
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("Email already registered.")
+        return value
+
+    def validate_password(self, value):
+        validate_password(value)
+        return value
+
+
+class PassengerRegisterSerializer(RegistrationEmailMixin, serializers.Serializer):
     first_name = serializers.CharField(max_length=150)
     last_name = serializers.CharField(max_length=150)
     phone = serializers.CharField(max_length=15)
     password = serializers.CharField(write_only=True)
-    email = serializers.EmailField(required=False, allow_blank=True)
+    email = serializers.EmailField(required=True, allow_blank=False)
     next_of_kin_name = serializers.CharField(max_length=150)
     next_of_kin_phone = serializers.CharField(max_length=15)
     second_next_of_kin_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
@@ -58,21 +73,20 @@ class PassengerRegisterSerializer(serializers.Serializer):
         password = data.pop("password")
         user = User(**data, role=User.Role.PASSENGER)
         user.username = user.phone
+        user.is_active = False  # Activated only after email OTP confirmation
         user.set_password(password)
         user.save()
         PassengerProfile.objects.create(user=user, **profile_data)
         return user
 
-class DriverRegisterSerializer(serializers.Serializer):
+class DriverRegisterSerializer(RegistrationEmailMixin, serializers.Serializer):
     first_name = serializers.CharField(max_length=150)
     last_name = serializers.CharField(max_length=150)
     phone = serializers.CharField(max_length=15)
     password = serializers.CharField(write_only=True)
-    email = serializers.EmailField(required=False, allow_blank=True)
-    id_number = serializers.CharField(max_length=13)
+    email = serializers.EmailField(required=True, allow_blank=False)
     license_number = serializers.CharField(max_length=30)
     rank_code = serializers.CharField(max_length=20)
-    photo = serializers.ImageField()
 
     def validate_phone(self, value):
         if User.objects.filter(phone=value).exists():
@@ -90,39 +104,22 @@ class DriverRegisterSerializer(serializers.Serializer):
     def create(self, data):
         password = data.pop("password")
         data.pop("rank_code")   # discard the raw string; use self._rank instead
-        id_number = data.pop("id_number")
         license_number = data.pop("license_number")
-        photo = data.pop("photo")
 
-        # Call the DOT adapter
-        result = verify_driver(id_number=id_number, license_number=license_number)
-
-        # Map adapter result to model choices
-        reason = result["reason"]
-        if result["verified"]:
-            ext_status = DriverProfile.ExternalVerification.VERIFIED
-        elif reason in ("license_suspended", "license_revoked"):
-            ext_status = DriverProfile.ExternalVerification.SUSPENDED
-        elif reason == "dot_unavailable":
-            ext_status = DriverProfile.ExternalVerification.UNAVAILABLE
-        else:
-            ext_status = DriverProfile.ExternalVerification.FAILED
+        # Registration does not require an SA ID or any photo/face capture.
+        # Licence checks are performed by the admin against the mock registry later.
+        reason = "pending_license_review"
+        ext_status = DriverProfile.ExternalVerification.UNVERIFIED
 
         user = User(**data, role=User.Role.DRIVER)
         user.username = user.phone
+        user.is_active = False  # Activated only after email OTP confirmation
         user.set_password(password)
         user.save()
-
-        pdp_number = ""
-        if result.get("record"):
-            pdp_number = result["record"].get("pdp_number") or ""
 
         DriverProfile.objects.create(
             user=user,
             license_number=license_number,
-            id_number=id_number,
-            pdp_number=pdp_number,
-            photo=photo,
             association=self._rank,
             status=DriverProfile.VerificationStatus.PENDING,
             external_verification_status=ext_status,
@@ -130,10 +127,10 @@ class DriverRegisterSerializer(serializers.Serializer):
         )
         return user
 
-class OperatorRegisterSerializer(serializers.Serializer):
+class OperatorRegisterSerializer(RegistrationEmailMixin, serializers.Serializer):
     phone = serializers.CharField(max_length=15)
     password = serializers.CharField(write_only=True)
-    email = serializers.EmailField(required=False, allow_blank=True)
+    email = serializers.EmailField(required=True, allow_blank=False)
     rank_code = serializers.CharField(max_length=20)
 
     def validate_phone(self, value):
@@ -155,6 +152,7 @@ class OperatorRegisterSerializer(serializers.Serializer):
         phone = data["phone"]
         user = User(phone=phone, email=data.get("email", ""), role=User.Role.OPERATOR)
         user.username = phone
+        user.is_active = False  # Activated only after email OTP confirmation
         user.set_password(password)
         user.save()
         OperatorProfile.objects.create(user=user, association=self._rank)
@@ -168,3 +166,11 @@ class PasswordResetConfirmSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=15)
     code = serializers.CharField(max_length=8)
     new_password = serializers.CharField(write_only=True, min_length=8)
+
+class EmailVerificationSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=15)
+    code = serializers.RegexField(r"^\d{6}$")
+
+
+class EmailVerificationResendSerializer(serializers.Serializer):
+    phone = serializers.CharField(max_length=15)

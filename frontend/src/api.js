@@ -6,7 +6,7 @@ const api = axios.create({
 
 api.interceptors.request.use((config) => {
   const publicAccountRequest =
-    /\/accounts\/api\/(login|register[^/]*|password-reset)(\/|$)/
+    /\/accounts\/api\/(login|register[^/]*|email|password-reset)(\/|$)/
       .test(config.url || "");
 
   const token = sessionStorage.getItem("token");
@@ -31,6 +31,7 @@ api.driverTrips = async () => {
   const { data } = await api.get("/transport/api/driver/trips/");
   return data;
 };
+
 
 api.driverProfile = async () => {
   const { data } = await api.get("/transport/api/driver/profile/");
@@ -65,6 +66,43 @@ api.directions = async (origin, destination) => {
 //   import { api } from './api'  (teammate's code)
 export { api };
 export default api;
+
+// ----- Passenger booking + payment -----
+
+// One departure with driver, operator, rating and check-in state.
+api.tripDetail = async (tripId) => {
+  const { data } = await api.get(`/transport/api/trips/${tripId}/`);
+  return data;
+};
+
+// Booking is only valid with a payment method (card or cash).
+api.bookTrip = async (payload) => {
+  const { data } = await api.post("/transport/api/my-bookings/", payload);
+  return data;
+};
+
+// Payment confirmed / cash pending / refund / boarding receipts.
+api.myNotifications = async () => {
+  const { data } = await api.get("/transport/api/my-notifications/");
+  return data;
+};
+
+// Operator verifies a cash passenger at the rank.
+api.verifyCashPayment = async (tripId, bookingId) => {
+  const { data } = await api.post(
+    `/transport/api/my-trips/${tripId}/bookings/${bookingId}/verify-cash/`
+  );
+  return data;
+};
+
+// Refund every paid passenger when the driver was not at the rank at departure.
+api.driverNoShowRefunds = async (tripId, payload = {}) => {
+  const { data } = await api.post(
+    `/transport/api/my-trips/${tripId}/driver-no-show-refunds/`,
+    payload
+  );
+  return data;
+};
 
 api.requestPasswordReset = async (phone) => {
   const { data } = await api.post("/accounts/api/password-reset/request/", { phone });

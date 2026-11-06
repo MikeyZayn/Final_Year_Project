@@ -58,9 +58,20 @@ export function AuthProvider({ children }) {
   const register = async (path, payload) => {
     const { data } = await api.post(path, payload);
 
-    sessionStorage.setItem("token", data.token);
+    // Registration now starts email verification; it does not create a session.
+    return data;
+  };
+
+  const verifyEmail = async (phone, code) => {
+    const { data } = await api.post('/accounts/api/email/verify/', { phone, code });
+    sessionStorage.setItem('token', data.token);
     setUser(data.user);
     return data.user;
+  };
+
+  const resendEmailCode = async (phone) => {
+    const { data } = await api.post('/accounts/api/email/resend/', { phone });
+    return data;
   };
 
   const logout = async () => {
@@ -70,7 +81,7 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, login, register, logout }}
+      value={{ user, loading, login, register, verifyEmail, resendEmailCode, logout }}
     >
       {children}
     </AuthContext.Provider>

@@ -1,5 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser, UserManager as DjangoUserManager
+from django.utils import timezone
 
 class UserManager(DjangoUserManager):
     def create_user(self, phone=None, password=None, **extra_fields):
@@ -78,7 +79,7 @@ class DriverProfile(models.Model):
     license_number = models.CharField(max_length=30)  # TODO: encrypt (license_number_enc) at deployment
     id_number = models.CharField(max_length=13, blank=True)
     pdp_number = models.CharField(max_length=30, blank=True)
-    photo = models.ImageField(upload_to="driver_photos/")
+    photo = models.ImageField(upload_to="driver_photos/", null=True, blank=True)
     association = models.ForeignKey(
         "RankCode", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="driver_applications",
@@ -140,7 +141,7 @@ class PasswordResetCode(models.Model):
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="reset_codes"
     )
-    code = models.CharField(max_length=8)
+    code = models.CharField(max_length=128)
     purpose = models.CharField(max_length=20, choices=Purpose.choices)
     created_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,
@@ -149,6 +150,7 @@ class PasswordResetCode(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     used_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
 
     class Meta:
         ordering = ["-created_at"]
@@ -158,4 +160,17 @@ class PasswordResetCode(models.Model):
         return self.used_at is None and self.expires_at > timezone.now()
 
     def __str__(self):
-        return f"{self.code} for {self.user.phone} ({self.purpose})"
+        return f"Reset code for {self.user.phone} ({self.purpose})"
+
+class EmailVerificationCode(models.Model):
+    """Hashed, expiring registration code. Never send code in API responses."""
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="email_verification_codes")
+    code_hash = models.CharField(max_length=128)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    last_sent_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]

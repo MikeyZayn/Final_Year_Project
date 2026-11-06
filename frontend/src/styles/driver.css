@@ -1,0 +1,100 @@
+/* Driver portal — same restrained sidebar and collapsed-list pattern as the passenger portal. */
+.driver-portal{display:grid;grid-template-columns:232px minmax(0,1fr);align-items:start;gap:22px;color:#17271e}
+.driver-side{position:sticky;top:18px;display:flex;flex-direction:column;gap:18px;min-height:540px;padding:18px;border:1px solid #dfe7e2;border-radius:18px;background:#fff}
+.driver-side-title{font-size:11px;font-weight:800;letter-spacing:.12em;color:#688074}
+.driver-nav{display:flex;flex-direction:column;gap:5px}
+.driver-nav-button{display:flex;align-items:center;gap:11px;width:100%;padding:12px;border:0;border-radius:11px;background:transparent;color:#21362a;font:inherit;font-weight:600;text-align:left;cursor:pointer}
+.driver-nav-button:hover{background:#f1f8f3}
+.driver-nav-button.active{background:#e7f3ea;color:#12613b}
+.driver-side-profile{display:flex;align-items:center;gap:10px;width:100%;margin-top:auto;padding:15px 2px 2px;border:0;border-top:1px solid #e1e9e3;background:transparent;color:#17271e;font:inherit;text-align:left;cursor:pointer}
+.driver-side-profile:hover,.driver-side-profile.active{color:#12613b}
+.driver-avatar{display:grid;place-items:center;flex-shrink:0;width:43px;height:43px;border-radius:50%;background:#e2f2e7;color:#17613e;font-size:13px;font-weight:800}
+.driver-side-profile-text{display:flex;flex:1;flex-direction:column;min-width:0}
+.driver-side-profile-text strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+.driver-side-profile-text small{color:#708277;font-size:12px}
+.driver-side-caret{transform:rotate(-90deg);color:#708277}
+.driver-main{display:flex;flex-direction:column;gap:18px;min-width:0}
+.driver-head h1{margin:3px 0 4px;font-size:clamp(29px,3vw,38px);color:#192b20}
+.driver-head .muted{margin:0}
+.driver-eyebrow{color:#137547;font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase}
+.driver-card{padding:24px;border:1px solid #dce6df;border-radius:17px;background:#fff;box-shadow:0 8px 24px rgba(19,55,35,.045)}
+.driver-card h2{margin:2px 0 8px;color:#17271e;font-size:23px}
+.driver-card .muted{color:#65796e}
+.driver-manifest-heading,.driver-map-heading{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:18px}
+.driver-manifest-count{padding:7px 11px;background:#eff6f0;border-radius:999px;color:#2e6547;font-size:12px;font-weight:700}
+.driver-manifest-trip{display:grid;grid-template-columns:100px minmax(0,1fr) auto;align-items:center;gap:18px;padding:17px 16px;border:1px solid #e1e8e3;border-radius:13px;background:#fff}
+.driver-manifest-trip.is-featured{padding:22px;border-color:#d9e5dc;background:#fbfdfb}
+.driver-trip-time{display:flex;flex-direction:column;gap:5px}
+.driver-trip-time strong{font-size:27px;letter-spacing:-.035em;line-height:1.1}
+.driver-trip-time small{font-size:12px;color:#738279}
+.driver-trip-info{display:flex;flex-direction:column;min-width:0;gap:6px}
+.driver-trip-info strong{font-size:15px;line-height:1.4}
+.driver-trip-info span{font-size:12px;overflow-wrap:anywhere}
+.driver-trip-actions{display:flex;flex-direction:column;align-items:flex-end;justify-content:center;gap:10px}
+.driver-status-pill{display:inline-flex;align-items:center;justify-content:center;white-space:nowrap;border-radius:999px;padding:5px 10px;background:#f0f2f0;color:#52645b;font-size:11px;font-weight:700}
+.driver-status-pill.status-in_progress{background:#e0f5e7;color:#12613b}
+.driver-status-pill.status-boarding{background:#fff3df;color:#87530d}
+.driver-location-action,.driver-back-action{border:1px solid #137649;border-radius:9px;background:#137649;color:#fff;font:inherit;font-size:12px;font-weight:700;padding:11px 14px;cursor:pointer;white-space:nowrap}
+.driver-location-action:hover,.driver-back-action:hover{background:#0d5e38}
+.driver-location-action:disabled{opacity:.48;cursor:not-allowed}
+.driver-location-note{margin:13px 0 0;padding:11px 14px;border:1px solid #c9ded2;border-radius:10px;background:#eff8f1;color:#17492f;font-size:13px}
+.driver-all-trips{margin-top:18px;border:1px solid #e0e8e2;border-radius:14px;background:#fff;overflow:hidden}
+.driver-all-trips summary{display:flex;align-items:center;gap:12px;padding:16px 19px;cursor:pointer;list-style:none;color:#1b3125}
+.driver-all-trips summary::-webkit-details-marker{display:none}
+.driver-all-trips summary>span{display:flex;flex:1;flex-direction:column;gap:3px}
+.driver-all-trips summary strong{font-size:14px}
+.driver-all-trips summary small{font-size:12px;color:#6c8074}
+.driver-all-trips[open] summary{border-bottom:1px solid #e0e8e2}
+.driver-expand-chevron{transition:transform .18s ease;color:#6e8175}
+.driver-all-trips[open] .driver-expand-chevron{transform:rotate(180deg)}
+.driver-manifest-list{display:grid;gap:9px;padding:14px;background:#fafcfb}
+.driver-manifest-list .driver-manifest-trip{grid-template-columns:90px minmax(0,1fr) auto}
+.driver-manifest-list .driver-trip-time strong{font-size:22px}
+.driver-privacy-note{margin:15px 0 0;color:#72857a;font-size:12px;line-height:1.5}
+.driver-map-heading h2{margin:2px 0}
+.driver-map-heading p{margin:0}
+.driver-back-action{border-color:#d7e5db;background:#f0f6f1;color:#16603b}
+.driver-back-action:hover{background:#e1f0e5}
+.driver-map-status{display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:12px 14px;margin:0 0 16px;border:1px solid #e1e9e2;border-radius:11px;background:#f8fbf8;font-size:12px}
+.driver-map-status strong{font-size:13px}
+.driver-map-status span:last-child{color:#65796e}
+.driver-live-indicator{display:inline-block;width:9px;height:9px;border-radius:50%;background:#9ca3af}
+.driver-live-indicator.is-live{background:#10a45e;box-shadow:0 0 0 4px #d9f7e5}
+.driver-map-details{display:flex;flex-wrap:wrap;gap:10px 22px;padding:13px 0;border-bottom:1px solid #e6ebe8;color:#3d5145;font-size:13px}
+.driver-stop-action{margin-top:16px;padding:10px 15px;border:0;border-radius:10px;background:#b42318;color:white;font:inherit;font-weight:650;cursor:pointer}
+.driver-history-scroll{overflow-x:auto;max-width:100%}
+.driver-history{width:100%;border-collapse:collapse;margin-top:8px}
+.driver-history th{padding:11px 9px;border-bottom:1px solid #dfe7e2;text-align:left;font-size:12px;color:#65796e}
+.driver-history td{padding:12px 9px;border-bottom:1px solid #edf1ee;font-size:13px}
+.driver-profile-panel p{font-size:14px;line-height:1.6}
+.driver-nav-button:focus-visible,.driver-side-profile:focus-visible,.driver-all-trips summary:focus-visible,.driver-location-action:focus-visible,.driver-back-action:focus-visible,.driver-stop-action:focus-visible{outline:3px solid #25a96d;outline-offset:3px}
+@media(max-width:1050px){.driver-portal{grid-template-columns:204px minmax(0,1fr);gap:14px}.driver-manifest-trip,.driver-manifest-list .driver-manifest-trip{grid-template-columns:82px minmax(0,1fr)}.driver-trip-actions{grid-column:1/-1;flex-direction:row;justify-content:space-between;align-items:center}}
+@media(max-width:760px){.driver-portal{grid-template-columns:1fr}.driver-side{position:static;min-height:0;gap:10px}.driver-nav{flex-direction:row;flex-wrap:wrap}.driver-nav-button{width:auto}.driver-side-profile{margin-top:6px}.driver-card{padding:16px}.driver-manifest-trip{padding:14px}.driver-map-panel .modern-map-canvas{min-height:300px}}
+@media(max-width:430px){.driver-manifest-trip,.driver-manifest-list .driver-manifest-trip{grid-template-columns:1fr;gap:8px}.driver-trip-time{flex-direction:row;align-items:baseline;gap:12px}.driver-trip-actions{grid-column:auto}.driver-trip-info strong{font-size:14px}.driver-map-status{align-items:flex-start}}
+
+/* Announcements are a separate driver sidebar page and are grouped by rank. */
+.driver-announcements-heading{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:22px}
+.driver-refresh-announcements{background:#eff6f1;border:1px solid #cfe5d7;color:#14643e;border-radius:9px;padding:10px 14px;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+.driver-refresh-announcements:hover{background:#e2f1e7}
+.driver-refresh-announcements:disabled{cursor:wait;opacity:.6}
+.driver-announcements-group+.driver-announcements-group{margin-top:26px}
+.driver-announcements-group h3{font-size:13px;letter-spacing:.02em;color:#2a684a;margin:0 0 10px}
+.driver-announcements-list{display:grid;gap:12px}
+.driver-announcement{padding:17px;border:1px solid #dce9e0;border-radius:12px;background:#fbfdfb}
+.driver-announcement-meta{display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;color:#687d70;font-size:12px}
+.driver-announcement-author{font-weight:750;color:#197345}
+.driver-announcement h4{font-size:16px;margin:10px 0 7px;color:#1b3325}
+.driver-announcement p{margin:0;color:#41584a;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}
+.driver-announcement small{display:block;margin-top:10px;color:#63806f}
+.driver-announcements-error{padding:12px;border:1px solid #eac9c5;color:#8f251b;border-radius:10px;background:#fff6f4}
+.driver-refresh-announcements:focus-visible{outline:3px solid #25a96d;outline-offset:3px}
+
+/* The route screen is map-first: only navigation/privacy controls are shown. */
+.driver-map-minimal{padding:12px;position:relative;overflow:hidden}
+.driver-map-minimal .modern-map{border-radius:13px;overflow:hidden}
+.driver-map-minimal .modern-map-canvas{min-height:440px}
+.driver-map-controls{position:absolute;z-index:550;top:25px;left:25px;right:25px;display:flex;justify-content:space-between;gap:10px;pointer-events:none}
+.driver-map-controls button{pointer-events:auto;box-shadow:0 3px 12px rgba(0,0,0,.12)}
+.driver-map-controls .driver-stop-action{margin:0;padding:10px 14px}
+.driver-map-error{padding:8px 10px;font-size:12px;color:#874c16}
+@media(max-width:760px){.driver-map-controls{top:20px;left:20px;right:20px}.driver-map-minimal .modern-map-canvas{min-height:400px}}

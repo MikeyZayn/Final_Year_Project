@@ -2,7 +2,23 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 from accounts.models import User, RankCode, OperatorProfile, DriverProfile
-from .models import Rank, Destination, Route, Vehicle, Trip, Booking, VerificationCode, Feedback
+from datetime import timedelta
+
+from .models import (
+    Rank, Destination, Route, Vehicle, Trip, Booking, VerificationCode,
+    Feedback, Announcement, OperatorAtRank, DriverAtRank,
+)
+
+
+# A valid demo card. The backend and the PaymentModal enforce the same rules
+# (16 digits, MM/YY expiry, 3-4 digit CVV), so tests use the same shape.
+CARD_PAYMENT = {
+    'payment_method': 'card',
+    'card_holder_name': 'Test Passenger',
+    'card_number': '4111111111111111',
+    'card_expiry': '12/30',
+    'card_cvv': '123',
+}
 
 
 class TripWorkflowTests(TestCase):
@@ -39,7 +55,7 @@ class TripWorkflowTests(TestCase):
     def test_complete_verified_feedback_workflow_and_single_use(self):
         self.ready()
         self.client.force_authenticate(self.passenger)
-        r = self.client.post('/transport/api/my-bookings/', {'trip_id': self.trip.pk}, format='json')
+        r = self.client.post('/transport/api/my-bookings/', {'trip_id': self.trip.pk, **CARD_PAYMENT}, format='json')
         self.assertEqual(r.status_code, 201)
         booking_id = r.data['id']
         self.client.force_authenticate(self.operator)
@@ -112,7 +128,7 @@ class TripWorkflowTests(TestCase):
         }
         admin = User.objects.create_user('0700000001', 'Passw0rd!', role='admin')
         AdminProfile.objects.create(user=admin, institution_name='Test', rank=self.trip.route.departure)
-        endpoints[admin] = ['admin/me', 'admin/pending-memberships', 'admin/rank-trips', 'admin/queue', 'admin/users', 'admin/drivers']
+        endpoints[admin] = ['admin/me', 'admin/rank-trips', 'admin/queue', 'admin/users', 'admin/drivers']
         for user, paths in endpoints.items():
             self.client.force_authenticate(user)
             for path in paths:
@@ -132,7 +148,7 @@ class NewFeatureTests(TripWorkflowTests):
 
     def group_book(self, companions=None):
         self.client.force_authenticate(self.passenger)
-        return self.client.post('/transport/api/my-bookings/', {'trip_id': self.trip.pk, 'companions': companions or [{'first_name': 'Nandi', 'last_name': 'Dube'}]}, format='json')
+        return self.client.post('/transport/api/my-bookings/', {'trip_id': self.trip.pk, 'companions': companions or [{'first_name': 'Nandi', 'last_name': 'Dube'}], **CARD_PAYMENT}, format='json')
 
     def test_group_capacity_and_nok_snapshot(self):
         response = self.group_book()
@@ -209,41 +225,67 @@ class NewFeatureTests(TripWorkflowTests):
         own = self.client.get('/transport/api/my-bookings/').data
         self.assertEqual(len(own), 1); self.assertEqual(own[0]['id'], other.id)
 
-    def test_driver_rank_request_approval_and_scope(self):
-        from accounts.models import AdminProfile
-        new_rank = Rank.objects.create(name='Another rank')
-        driver = self.trip.driver
-        self.client.force_authenticate(driver.user)
-        url = '/transport/api/driver/memberships/'
-        response = self.client.post(url, {'rank_id': new_rank.pk}, format='json')
-        self.assertEqual(response.status_code, 201, response.data)
-        mid = response.data['id']
-        self.assertEqual(self.client.post(url, {'rank_id': new_rank.pk}).status_code, 400)
-        self.client.force_authenticate(self.admin)
-        approve = f'/transport/api/admin/driver-memberships/{mid}/approve/'
-        self.assertEqual(self.client.post(approve).status_code, 404)
-        AdminProfile.objects.filter(user=self.admin).update(rank=new_rank)
-        self.admin.refresh_from_db()
-        self.assertEqual(self.client.get('/transport/api/admin/driver-memberships/').data[0]['id'], mid)
-        self.assertEqual(self.client.post(approve).status_code, 200)
-        assets = self.client.get('/transport/api/admin/available-for-rank/').data
-        self.assertIn(driver.pk, [d['id'] for d in assets['drivers']])
-        self.client.force_authenticate(driver.user)
-        active = self.client.get(url).data
-        self.assertEqual(sum(m['status']=='active' for m in active), 2)
-        self.client.force_authenticate(self.passenger)
-        self.assertEqual(self.client.post(url, {'rank_id': new_rank.pk}).status_code, 403)
-        self.assertEqual(self.client.post(approve).status_code, 403)
+    def test_rank_request_endpoints_removed(self):
+        self.client.force_authenticate(self.trip.driver.user)
+        self.assertEqual(self.client.post('/transport/api/driver/memberships/', {'rank_id': 1}).status_code, 404)
+        self.assertEqual(self.client.get('/transport/api/admin/driver-memberships/').status_code, 404)
+        self.client.force_authenticate(self.operator)
+        self.assertEqual(self.client.post('/transport/api/request-rank/', {'rank_id': 1}).status_code, 404)
+        self.assertEqual(self.client.get('/transport/api/admin/pending-memberships/').status_code, 404)
 
-    def test_driver_rejected_request_can_be_resubmitted(self):
-        from .models import DriverAtRank
-        driver = self.trip.driver
-        m = DriverAtRank.objects.create(driver=driver, rank=Rank.objects.create(name='Retry'), status='rejected')
-        self.client.force_authenticate(driver.user)
-        response = self.client.post('/transport/api/driver/memberships/', {'rank_id': m.rank_id})
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data['id'], m.id)
-        self.assertEqual(response.data['status'], 'pending')
+    def test_automatic_start_at_scheduled_time_preserves_unboarded_bookings(self):
+        from .services.scheduled_departures import start_due_trips
+        now = timezone.now()
+        due = timezone.localtime(now) - timedelta(minutes=1)
+        self.trip.departure_date = due.date()
+        self.trip.expected_departure_time = due.time().replace(microsecond=0)
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.assets_verified_at = now
+        self.trip.save()
+        booking = Booking.objects.create(trip=self.trip, passenger=self.passenger, status=Booking.Status.RESERVED)
+        self.assertEqual(start_due_trips(now), [self.trip.pk])
+        self.assertEqual(start_due_trips(now), [])
+        self.trip.refresh_from_db(); booking.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.IN_PROGRESS)
+        self.assertIsNotNone(self.trip.actual_departure_time)
+        self.assertEqual(booking.status, Booking.Status.RESERVED)
+
+    def test_unverified_trip_does_not_auto_start(self):
+        from .services.scheduled_departures import start_due_trips
+        now = timezone.now()
+        due = timezone.localtime(now) - timedelta(minutes=1)
+        self.trip.departure_date = due.date()
+        self.trip.expected_departure_time = due.time().replace(microsecond=0)
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.assets_verified_at = None
+        self.trip.save()
+        self.assertEqual(start_due_trips(now), [])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.BOARDING)
+
+    def test_driver_location_requires_assigned_vehicle_and_prompt_window(self):
+        now_local = timezone.localtime(timezone.now())
+        later = now_local + timedelta(minutes=30)
+        self.trip.departure_date = later.date()
+        self.trip.expected_departure_time = later.time().replace(microsecond=0)
+        self.trip.status = Trip.Status.SCHEDULED
+        self.trip.save()
+        self.client.force_authenticate(self.trip.driver.user)
+        endpoint = f'/transport/api/driver/vehicle/{self.trip.vehicle_id}/location/'
+        payload = {'trip_id': self.trip.pk, 'lat': -28.8, 'lng': 31.9}
+        self.assertEqual(self.client.post(endpoint, payload, format='json').status_code, 400)
+        other = Vehicle.objects.create(plate_number='WRONG-VEHICLE')
+        other_endpoint = f'/transport/api/driver/vehicle/{other.id}/location/'
+        self.assertEqual(self.client.post(other_endpoint, payload, format='json').status_code, 403)
+        soon = now_local + timedelta(minutes=5)
+        self.trip.departure_date = soon.date()
+        self.trip.expected_departure_time = soon.time().replace(microsecond=0)
+        self.trip.save()
+        self.assertEqual(self.client.post(endpoint, payload, format='json').status_code, 200)
+
+    def test_driver_complaints_endpoint_removed(self):
+        self.client.force_authenticate(self.trip.driver.user)
+        self.assertEqual(self.client.get("/transport/api/driver/feedback/").status_code, 404)
 
     def test_queue_expiry_boundary_and_future_trip_protection(self):
         from .models import QueueEntry
@@ -260,7 +302,7 @@ class NewFeatureTests(TripWorkflowTests):
         self.assertEqual(result, {'queue_entries': 1, 'trips': 1})
         e.refresh_from_db(); e2.refresh_from_db(); booking.refresh_from_db(); self.trip.refresh_from_db()
         self.assertFalse(e.active); self.assertEqual(e2.position, 1)
-        self.assertEqual(self.trip.status, 'expired'); self.assertEqual(booking.status, 'no_show')
+        self.assertEqual(self.trip.status, 'cancelled'); self.assertEqual(booking.status, 'cancelled')
         self.assertEqual(expire_queues(now), {'queue_entries': 0, 'trips': 0})
         future = Trip.objects.create(operator=self.op, route=self.trip.route, departure_date=timezone.localdate()+timedelta(days=4), trip_code='FUTURE')
         Trip.objects.filter(pk=future.pk).update(created_at=now-timedelta(days=2))
@@ -331,3 +373,711 @@ class RoutingTests(TestCase):
                 r = self.client.post('/transport/api/routing/directions/', body, format='json')
                 self.assertEqual(r.status_code, 400, r.data)
             get.assert_not_called()
+
+
+class PaymentAndTrackingTests(TripWorkflowTests):
+    """Payment gating, cash verification, notifications and the GPS no-show rule."""
+
+    def setUp(self):
+        super().setUp()
+        from accounts.models import PassengerProfile
+
+        PassengerProfile.objects.create(
+            user=self.passenger,
+            next_of_kin_name='Family Contact',
+            next_of_kin_phone='0822222222',
+        )
+        # Real coordinates for the departure rank so GPS distance is meaningful.
+        departure = self.trip.route.departure
+        departure.latitude = -28.742
+        departure.longitude = 31.893
+        departure.save()
+        self.driver_user = self.trip.driver.user
+
+    # ---- helpers ----
+    def book(self, **overrides):
+        payload = {'trip_id': self.trip.pk, **CARD_PAYMENT}
+        payload.update(overrides)
+        return self.client.post('/transport/api/my-bookings/', payload, format='json')
+
+    def set_departure_in(self, minutes):
+        from datetime import timedelta
+        target = timezone.localtime() + timedelta(minutes=minutes)
+        self.trip.departure_date = target.date()
+        self.trip.expected_departure_time = target.time().replace(microsecond=0)
+        self.trip.save()
+
+    # ---- payment gating ----
+    def test_booking_requires_a_payment_method(self):
+        self.client.force_authenticate(self.passenger)
+        response = self.client.post(
+            '/transport/api/my-bookings/', {'trip_id': self.trip.pk}, format='json'
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('payment_method', response.data)
+        self.assertEqual(Booking.objects.count(), 0)
+
+    def test_card_details_are_validated_like_the_frontend(self):
+        self.client.force_authenticate(self.passenger)
+        for bad in (
+            {'card_number': '411111111111'},
+            {'card_expiry': '2030-12'},
+            {'card_cvv': '1'},
+            {'card_holder_name': '   '},
+        ):
+            response = self.book(**bad)
+            self.assertEqual(response.status_code, 400, bad)
+        self.assertEqual(Booking.objects.count(), 0)
+
+    def test_card_payment_verifies_the_passenger_and_creates_a_notification(self):
+        self.client.force_authenticate(self.passenger)
+        response = self.book()
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data['payment_status'], 'paid')
+        self.assertEqual(response.data['passenger_display_status'], 'verified')
+        self.assertEqual(response.data['card_last_four'], '1111')
+        self.assertIn('verified passenger', response.data['notification'])
+
+        feed = self.client.get('/transport/api/my-notifications/').data
+        kinds = [item['kind'] for item in feed]
+        self.assertIn('booking_verified', kinds)
+        verified = next(item for item in feed if item['kind'] == 'booking_verified')
+        self.assertTrue(verified['proof'])
+        self.assertEqual(verified['trip_code'], 'TEST')
+
+    def test_cash_booking_stays_pending_until_the_operator_verifies_it(self):
+        self.client.force_authenticate(self.passenger)
+        response = self.book(payment_method='cash')
+        self.assertEqual(response.status_code, 201, response.data)
+        booking_id = response.data['id']
+        self.assertEqual(response.data['payment_status'], 'pending')
+        self.assertEqual(response.data['passenger_display_status'], 'pending')
+
+        feed = self.client.get('/transport/api/my-notifications/').data
+        self.assertIn('cash_pending', [item['kind'] for item in feed])
+
+        url = f'/transport/api/my-trips/{self.trip.pk}/bookings/{booking_id}/verify-cash/'
+
+        # A different operator must not be able to touch this trip.
+        other_user = User.objects.create_user('0820000009', 'Passw0rd!', role='operator')
+        association = RankCode.objects.create(
+            code='OTHER', association_name='Other', operating_region='KZN'
+        )
+        OperatorProfile.objects.create(user=other_user, association=association)
+        self.client.force_authenticate(other_user)
+        self.assertEqual(self.client.post(url).status_code, 404)
+
+        self.client.force_authenticate(self.operator)
+        response = self.client.post(url)
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['passenger_display_status'], 'verified')
+        booking = Booking.objects.get(pk=booking_id)
+        self.assertEqual(booking.payment_status, Booking.PaymentStatus.PAID)
+        self.assertIsNotNone(booking.payment_verified_at)
+
+    # ---- cancellation policy ----
+    def test_cancel_within_one_hour_charges_a_30_percent_fee(self):
+        self.set_departure_in(30)
+        self.client.force_authenticate(self.passenger)
+        booking_id = self.book().data['id']
+        response = self.client.post(f'/transport/api/my-bookings/{booking_id}/cancel/')
+        self.assertEqual(response.status_code, 200, response.data)
+        refund = response.data['refund']
+        self.assertEqual(float(refund['cancellation_fee']), 7.5)
+        self.assertEqual(float(refund['refund_amount']), 17.5)
+        self.assertEqual(response.data['payment_status'], 'partial_refund')
+
+    def test_cancel_more_than_one_hour_before_departure_is_a_full_refund(self):
+        self.set_departure_in(120)
+        self.client.force_authenticate(self.passenger)
+        booking_id = self.book().data['id']
+        response = self.client.post(f'/transport/api/my-bookings/{booking_id}/cancel/')
+        self.assertEqual(response.status_code, 200, response.data)
+        refund = response.data['refund']
+        self.assertEqual(float(refund['cancellation_fee']), 0.0)
+        self.assertEqual(float(refund['refund_amount']), 25.0)
+        self.assertEqual(response.data['payment_status'], 'refunded')
+
+    # ---- driver GPS / no-show ----
+    def test_driver_ping_at_the_rank_blocks_no_show_refunds(self):
+        self.client.force_authenticate(self.passenger)
+        booking_id = self.book().data['id']
+
+        self.client.force_authenticate(self.driver_user)
+        response = self.client.post(
+            f'/transport/api/driver/vehicle/{self.trip.vehicle_id}/location/',
+            {'lat': -28.7429, 'lng': 31.8930, 'trip_id': self.trip.pk},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data['at_rank'])
+        self.assertEqual(response.data['route_status'], 'at_rank')
+        self.assertLess(response.data['distance_from_rank_m'], 350)
+
+        self.trip.refresh_from_db()
+        self.assertIsNotNone(self.trip.driver_at_rank_at)
+
+        self.set_departure_in(-16)
+        # The GPS arrival happened before the scheduled cutoff in this test.
+        self.trip.driver_at_rank_at = timezone.now() - timedelta(minutes=20)
+        self.trip.save(update_fields=['driver_at_rank_at'])
+        self.client.force_authenticate(self.operator)
+        response = self.client.post(
+            f'/transport/api/my-trips/{self.trip.pk}/driver-no-show-refunds/',
+            {},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['refunded'], [])
+        booking = Booking.objects.get(pk=booking_id)
+        self.assertEqual(booking.payment_status, Booking.PaymentStatus.PAID)
+
+    def test_driver_never_at_the_rank_refunds_paid_passengers(self):
+        self.client.force_authenticate(self.passenger)
+        booking_id = self.book().data['id']
+
+        self.set_departure_in(-16)
+        self.client.force_authenticate(self.operator)
+        response = self.client.post(
+            f'/transport/api/my-trips/{self.trip.pk}/driver-no-show-refunds/',
+            {},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['refunded'], [booking_id])
+        booking = Booking.objects.get(pk=booking_id)
+        self.assertEqual(booking.payment_status, Booking.PaymentStatus.REFUNDED)
+        self.assertEqual(booking.refund_amount, booking.fare_amount)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.driver_location_status, 'no_show')
+
+    def test_location_ping_rejects_other_drivers_and_bad_coordinates(self):
+        other = User.objects.create_user('0830000002', 'Passw0rd!', role='driver')
+        DriverProfile.objects.create(user=other, license_number='OTHER', status='verified')
+        url = f'/transport/api/driver/vehicle/{self.trip.vehicle_id}/location/'
+
+        self.client.force_authenticate(other)
+        response = self.client.post(
+            url, {'lat': -28.742, 'lng': 31.893, 'trip_id': self.trip.pk}, format='json'
+        )
+        self.assertEqual(response.status_code, 403)
+
+        self.client.force_authenticate(self.driver_user)
+        for bad in ({'lat': 'NaN', 'lng': 31.893}, {'lat': -28.742, 'lng': 500}):
+            response = self.client.post(
+                url, {**bad, 'trip_id': self.trip.pk}, format='json'
+            )
+            self.assertEqual(response.status_code, 400, bad)
+
+    # ---- trip details ----
+    def test_trip_detail_endpoint_exposes_route_driver_and_rating(self):
+        response = self.client.get(f'/transport/api/trips/{self.trip.pk}/')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['trip_code'], 'TEST')
+        self.assertEqual(response.data['route']['departure']['name'], 'Rank')
+        self.assertIn('driver_rating', response.data)
+        self.assertIn('duration_minutes', response.data)
+        self.assertIn('driver_checked_in', response.data)
+        self.assertEqual(self.client.get('/transport/api/trips/999999/').status_code, 404)
+
+
+class AnnouncementRankScopeAndNotificationPriorityTests(TripWorkflowTests):
+    """Announcements are rank-scoped for staff; notifications lead with the most urgent."""
+
+    def setUp(self):
+        super().setUp()
+        self.other_association = RankCode.objects.create(
+            code='OTHER', association_name='Other Association', operating_region='KZN'
+        )
+        other_user = User.objects.create_user('0820000002', 'Passw0rd!', role='operator')
+        self.other_operator = OperatorProfile.objects.create(
+            user=other_user, association=self.other_association
+        )
+        self.own_rank = self.trip.route.departure
+        OperatorAtRank.objects.create(
+            operator=self.op, rank=self.own_rank, status=OperatorAtRank.Status.ACTIVE
+        )
+        self.other_rank = Rank.objects.create(name='Other Rank')
+        OperatorAtRank.objects.create(
+            operator=self.other_operator,
+            rank=self.other_rank,
+            status=OperatorAtRank.Status.ACTIVE,
+        )
+        self.ann_own = Announcement.objects.create(
+            operator=self.op, title='Own rank update', body='Own rank', created_by=self.operator
+        )
+        self.ann_other = Announcement.objects.create(
+            operator=self.other_operator, title='Other rank update', body='Other rank', created_by=other_user
+        )
+        self.ann_central = Announcement.objects.create(
+            title='Central update', body='All ranks', created_by=self.operator
+        )
+
+    def _ids(self):
+        return {item['id'] for item in self.client.get('/transport/api/announcements/').data}
+
+    def test_operator_sees_own_rank_and_central_announcements_only(self):
+        self.client.force_authenticate(self.operator)
+        ids = self._ids()
+        self.assertIn(self.ann_own.id, ids)
+        self.assertIn(self.ann_central.id, ids)
+        self.assertNotIn(self.ann_other.id, ids)
+
+    def test_driver_sees_announcements_for_their_own_association_only(self):
+        driver_user = User.objects.create_user('0830000009', 'Passw0rd!', role='driver')
+        driver = DriverProfile.objects.create(
+            user=driver_user,
+            license_number='DRV009',
+            status='verified',
+            association=self.op.association,
+        )
+        DriverAtRank.objects.create(
+            driver=driver, rank=self.own_rank, status=OperatorAtRank.Status.ACTIVE
+        )
+        self.client.force_authenticate(driver_user)
+        ids = self._ids()
+        self.assertIn(self.ann_own.id, ids)
+        self.assertIn(self.ann_central.id, ids)
+        self.assertNotIn(self.ann_other.id, ids)
+
+    def test_passenger_and_guest_see_every_active_announcement(self):
+        for viewer in (self.passenger, None):
+            self.client.force_authenticate(viewer)
+            ids = self._ids()
+            self.assertEqual(ids, {self.ann_own.id, self.ann_other.id, self.ann_central.id})
+
+    def test_expired_announcements_are_hidden(self):
+        expired = Announcement.objects.create(
+            title='Expired', body='Old', created_by=self.operator,
+            expires_at=timezone.now() - timedelta(hours=1),
+        )
+        self.client.force_authenticate(None)
+        self.assertNotIn(expired.id, self._ids())
+
+    def test_cash_pending_notification_sorts_before_verified_receipt(self):
+        self.ready()
+        self.client.force_authenticate(self.passenger)
+        card = self.client.post(
+            '/transport/api/my-bookings/', {'trip_id': self.trip.pk, **CARD_PAYMENT}, format='json'
+        )
+        self.assertEqual(card.status_code, 201, card.data)
+
+        cash_trip = Trip.objects.create(
+            operator=self.op,
+            route=self.trip.route,
+            vehicle=Vehicle.objects.create(plate_number='CASH1'),
+            departure_date=timezone.localdate() + timedelta(days=1),
+            trip_code='CASH1',
+            seat_capacity=2,
+        )
+        cash = self.client.post(
+            '/transport/api/my-bookings/',
+            {'trip_id': cash_trip.pk, 'payment_method': 'cash'},
+            format='json',
+        )
+        self.assertEqual(cash.status_code, 201, cash.data)
+
+        feed = self.client.get('/transport/api/my-notifications/').data
+        self.assertEqual(feed[0]['kind'], 'cash_pending')
+        self.assertEqual(feed[0]['booking_id'], cash.data['id'])
+
+        first = self.client.get('/transport/api/my-notifications/', {'limit': 1, 'offset': 0}).data
+        second = self.client.get('/transport/api/my-notifications/', {'limit': 1, 'offset': 1}).data
+        self.assertEqual(len(first), 1)
+        self.assertEqual(len(second), 1)
+        self.assertNotEqual(first[0]['id'], second[0]['id'])
+        self.assertEqual(
+            self.client.get('/transport/api/my-notifications/', {'limit': 'many'}).status_code, 400
+        )
+
+class DriverRankAnnouncementsTests(TripWorkflowTests):
+    """Driver announcements must be rank-scoped; passenger feed remains public."""
+
+    def setUp(self):
+        super().setUp()
+        self.ungoye = self.trip.route.departure
+        self.ungoye.name = 'Ungoye Main Rank'
+        self.ungoye.save(update_fields=['name'])
+        self.durban = Rank.objects.create(name='Durban Main Rank')
+        OperatorAtRank.objects.create(
+            operator=self.op, rank=self.ungoye, status=OperatorAtRank.Status.ACTIVE,
+        )
+        self.durban_operator_user = User.objects.create_user(
+            '0829999999', 'Passw0rd!', role='operator'
+        )
+        durban_association = RankCode.objects.create(
+            code='DBN', association_name='Durban Transport', operating_region='KZN'
+        )
+        self.durban_operator = OperatorProfile.objects.create(
+            user=self.durban_operator_user, association=durban_association
+        )
+        OperatorAtRank.objects.create(
+            operator=self.durban_operator, rank=self.durban, status=OperatorAtRank.Status.ACTIVE,
+        )
+        self.ungoye_driver_user = User.objects.create_user(
+            '0831111111', 'Passw0rd!', role='driver'
+        )
+        self.ungoye_driver = DriverProfile.objects.create(
+            user=self.ungoye_driver_user, license_number='DRIVINGUNG', status='verified',
+        )
+        DriverAtRank.objects.create(
+            driver=self.ungoye_driver, rank=self.ungoye,
+            status=OperatorAtRank.Status.ACTIVE,
+        )
+        self.durban_driver_user = User.objects.create_user(
+            '0832222222', 'Passw0rd!', role='driver'
+        )
+        self.durban_driver = DriverProfile.objects.create(
+            user=self.durban_driver_user, license_number='DRIVINGDBN', status='verified',
+        )
+        DriverAtRank.objects.create(
+            driver=self.durban_driver, rank=self.durban,
+            status=OperatorAtRank.Status.ACTIVE,
+        )
+
+    def _announce_ids(self, user):
+        self.client.force_authenticate(user)
+        response = self.client.get('/transport/api/announcements/')
+        self.assertEqual(response.status_code, 200)
+        return {item['id'] for item in response.data}
+
+    def test_operator_can_publish_only_to_their_active_rank(self):
+        self.client.force_authenticate(self.operator)
+        selected = self.client.get('/transport/api/my-announcement-ranks/')
+        self.assertEqual(selected.status_code, 200)
+        self.assertEqual([item['id'] for item in selected.data], [self.ungoye.id])
+        created = self.client.post('/transport/api/my-announcements/', {
+            'title': 'Ungoye schedule change', 'body': 'Departure changes',
+            'rank_id': self.ungoye.id,
+        }, format='json')
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data['rank_name'], 'Ungoye Main Rank')
+        self.assertEqual(created.data['source_name'], self.op.association.association_name)
+        self.assertIn(created.data['id'], self._announce_ids(self.ungoye_driver_user))
+        self.assertNotIn(created.data['id'], self._announce_ids(self.durban_driver_user))
+
+        self.client.force_authenticate(self.operator)
+        wrong = self.client.post('/transport/api/my-announcements/', {
+            'title': 'Should not publish', 'body': 'Other rank',
+            'rank_id': self.durban.id,
+        }, format='json')
+        self.assertEqual(wrong.status_code, 400)
+
+    def test_route_cannot_change_the_publishing_rank(self):
+        other_route = Route.objects.create(
+            departure=self.durban, destination=Destination.objects.create(name='Port'),
+            fare='50.00',
+        )
+        self.client.force_authenticate(self.operator)
+        response = self.client.post('/transport/api/my-announcements/', {
+            'title': 'Wrong route', 'body': 'A rank mismatch',
+            'rank_id': self.ungoye.id, 'route_id': other_route.id,
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_rank_admin_and_global_announcements(self):
+        from accounts.models import AdminProfile
+        rank_admin_user = User.objects.create_user('0843333333', 'Passw0rd!', role='admin')
+        AdminProfile.objects.create(user=rank_admin_user, institution_name='Rank office', rank=self.ungoye)
+        old_style_admin = Announcement.objects.create(
+            title='Rank admin update', body='At Ungoye', created_by=rank_admin_user,
+        )
+        explicit_admin = Announcement.objects.create(
+            title='Rank targeted', body='At Durban', created_by=rank_admin_user,
+            rank=self.durban,
+        )
+        central = Announcement.objects.create(
+            title='System-wide announcement', body='All drivers',
+        )
+        ungoye_ids = self._announce_ids(self.ungoye_driver_user)
+        self.assertIn(old_style_admin.id, ungoye_ids)
+        self.assertNotIn(explicit_admin.id, ungoye_ids)
+        self.assertIn(central.id, ungoye_ids)
+        durban_ids = self._announce_ids(self.durban_driver_user)
+        self.assertNotIn(old_style_admin.id, durban_ids)
+        self.assertIn(explicit_admin.id, durban_ids)
+        self.assertIn(central.id, durban_ids)
+
+        passenger_ids = self._announce_ids(self.passenger)
+        self.assertIn(old_style_admin.id, passenger_ids)
+        self.assertIn(explicit_admin.id, passenger_ids)
+        self.assertIn(central.id, passenger_ids)
+
+    def test_inactive_unapproved_driver_not_allowed_rank_notices(self):
+        pending = User.objects.create_user('0834444444', 'Passw0rd!', role='driver')
+        profile = DriverProfile.objects.create(user=pending, license_number='DRV-PEND')
+        DriverAtRank.objects.create(
+            driver=profile, rank=self.ungoye, status=OperatorAtRank.Status.PENDING,
+        )
+        notice = Announcement.objects.create(rank=self.ungoye, title='Targeted', body='Only Ungoye')
+        self.assertNotIn(notice.id, self._announce_ids(pending))
+
+    def test_old_operator_notice_uses_approved_rank(self):
+        legacy = Announcement.objects.create(
+            operator=self.op, title='Old version announcement', body='Before rank field',
+            created_by=self.operator,
+        )
+        self.assertIn(legacy.id, self._announce_ids(self.ungoye_driver_user))
+        self.assertNotIn(legacy.id, self._announce_ids(self.durban_driver_user))
+
+    def test_expired_and_deactivated_announcements_are_hidden(self):
+        old = Announcement.objects.create(
+            rank=self.ungoye, title='Expired', body='Not shown',
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        inactive = Announcement.objects.create(
+            rank=self.ungoye, title='Inactive', body='Not shown', active=False,
+        )
+        ids = self._announce_ids(self.ungoye_driver_user)
+        self.assertNotIn(old.id, ids)
+        self.assertNotIn(inactive.id, ids)
+
+    def test_rank_admin_publishes_for_own_rank_only(self):
+        from accounts.models import AdminProfile
+        admin_user = User.objects.create_user('0899999991', 'Passw0rd!', role='admin')
+        AdminProfile.objects.create(user=admin_user, institution_name='Ungoye office', rank=self.ungoye)
+        self.client.force_authenticate(admin_user)
+        created = self.client.post('/transport/api/admin/announcements/', {
+            'title': 'Ungoye boarding notice', 'body': 'Please check the boarding area',
+            'rank_id': self.durban.id,  # malicious cross-rank request is ignored
+        }, format='json')
+        self.assertEqual(created.status_code, 201, created.data)
+        self.assertEqual(created.data['rank_id'], self.ungoye.id)
+        self.assertIn(created.data['id'], self._announce_ids(self.ungoye_driver_user))
+        self.assertNotIn(created.data['id'], self._announce_ids(self.durban_driver_user))
+
+
+
+class AutomaticDriverNoShowRefundTests(TripWorkflowTests):
+    """New driver GPS grace-period policy: T+15, whole fare, once per trip."""
+
+    def setUp(self):
+        super().setUp()
+        origin = self.trip.route.departure
+        origin.latitude = '-28.742000'
+        origin.longitude = '31.893000'
+        origin.save(update_fields=['latitude', 'longitude'])
+        self.driver_user = self.trip.driver.user
+
+    def set_time(self, now, minutes_from_now):
+        departure = timezone.localtime(now + timedelta(minutes=minutes_from_now))
+        self.trip.departure_date = departure.date()
+        self.trip.expected_departure_time = departure.time().replace(microsecond=0)
+        self.trip.save(update_fields=['departure_date', 'expected_departure_time'])
+
+    def test_full_refund_at_t_plus_15_and_idempotent(self):
+        from .services.auto_no_show import refund_overdue_trip
+        now = timezone.now().replace(microsecond=0)
+        self.set_time(now, -16)
+        paid = Booking.objects.create(
+            trip=self.trip, passenger=self.passenger,
+            payment_method=Booking.PaymentMethod.CARD,
+            payment_status=Booking.PaymentStatus.PAID,
+            fare_amount='25.00', amount_paid='25.00',
+        )
+        companion = Booking.objects.create(trip=self.trip, group_leader=paid,
+                                            companion_first_name='One')
+        unpaid = Booking.objects.create(trip=self.trip, walk_in_name='Cash',
+            payment_method=Booking.PaymentMethod.CASH,
+            payment_status=Booking.PaymentStatus.PENDING)
+        result = refund_overdue_trip(self.trip.id, now=now)
+        self.assertEqual(result['status'], 'refunded')
+        self.assertEqual(result['refunded'], [paid.id])
+        paid.refresh_from_db(); unpaid.refresh_from_db(); companion.refresh_from_db(); self.trip.refresh_from_db()
+        self.assertEqual(str(paid.refund_amount), '25.00')
+        self.assertEqual(str(paid.cancellation_fee), '0.00')
+        self.assertEqual(paid.payment_status, 'refunded')
+        self.assertEqual(paid.status, 'cancelled')
+        self.assertEqual(unpaid.status, 'cancelled')
+        self.assertEqual(companion.status, 'cancelled')
+        self.assertEqual(self.trip.status, 'cancelled')
+        self.assertEqual(self.trip.driver_location_status, 'no_show')
+        self.assertEqual(refund_overdue_trip(self.trip.id, now=now)['status'], 'already_processed')
+        paid.refresh_from_db(); self.assertEqual(str(paid.refund_amount), '25.00')
+
+    def test_no_refund_before_grace_expires(self):
+        from .services.auto_no_show import refund_overdue_trip
+        now = timezone.now().replace(microsecond=0)
+        self.set_time(now, -14)
+        booking = Booking.objects.create(trip=self.trip, passenger=self.passenger,
+            payment_status='paid', fare_amount='25.00', amount_paid='25.00')
+        self.assertEqual(refund_overdue_trip(self.trip.id, now=now)['status'], 'too_early')
+        booking.refresh_from_db(); self.assertEqual(booking.payment_status, 'paid')
+
+    def test_valid_rank_check_in_prevents_refund(self):
+        from .services.auto_no_show import refund_overdue_trip
+        from .services.driver_location import record_driver_location
+        now = timezone.now().replace(microsecond=0)
+        self.set_time(now, 10)
+        record_driver_location(self.trip, -28.742, 31.893)
+        self.set_time(now, -16)
+        booking = Booking.objects.create(trip=self.trip, passenger=self.passenger,
+            payment_status='paid', fare_amount='25.00', amount_paid='25.00')
+        self.assertEqual(refund_overdue_trip(self.trip.id, now=now)['status'], 'checked_in')
+        booking.refresh_from_db(); self.assertEqual(booking.payment_status, 'paid')
+
+    def test_operator_cannot_refund_early_with_force_argument(self):
+        now = timezone.now().replace(microsecond=0)
+        self.set_time(now, 10)
+        self.client.force_authenticate(self.operator)
+        url = f'/transport/api/my-trips/{self.trip.pk}/driver-no-show-refunds/'
+        r = self.client.post(url, {'force': True}, format='json')
+        self.assertEqual(r.status_code, 400, r.data)
+
+    def test_driver_cannot_trigger_refunds(self):
+        now = timezone.now().replace(microsecond=0)
+        self.set_time(now, -16)
+        self.client.force_authenticate(self.driver_user)
+        url = f'/transport/api/my-trips/{self.trip.pk}/driver-no-show-refunds/'
+        r = self.client.post(url, {'force': True}, format='json')
+        self.assertEqual(r.status_code, 403, r.data)
+
+    def test_scheduled_job_processes_trip_without_open_dashboard(self):
+        from .services.scheduled_departures import start_due_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_time(now, -16)
+        Booking.objects.create(trip=self.trip, passenger=self.passenger,
+            payment_status='paid', fare_amount='25.00', amount_paid='25.00')
+        self.assertEqual(start_due_trips(now), [])  # Was not engaged and ready.
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, 'cancelled')
+        self.assertEqual(self.trip.bookings.first().payment_status, 'refunded')
+
+
+class OperatorTripLifecycleTests(TestCase):
+    """Regression checks for the operator dashboard's persisted trip states."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.operator = User.objects.create_user('0825550011', 'Passw0rd!', role='operator')
+        assoc = RankCode.objects.create(code='OP-LIFECYCLE', association_name='Test operator', operating_region='KZN')
+        self.op = OperatorProfile.objects.create(user=self.operator, association=assoc)
+        self.rank = Rank.objects.create(name='Operator Start Rank')
+        self.route = Route.objects.create(
+            departure=self.rank, destination=Destination.objects.create(name='Finish'),
+            fare='50.00', typical_duration_minutes=60,
+        )
+        now = timezone.localtime(timezone.now())
+        depart = now + timedelta(minutes=10)
+        self.trip = Trip.objects.create(
+            operator=self.op, route=self.route, trip_code='OP-001',
+            departure_date=depart.date(), expected_departure_time=depart.time().replace(microsecond=0),
+        )
+        self.client.force_authenticate(self.operator)
+
+    def set_departure(self, now, minutes_ago):
+        dep = timezone.localtime(now - timedelta(minutes=minutes_ago))
+        self.trip.departure_date = dep.date()
+        self.trip.expected_departure_time = dep.time().replace(microsecond=0)
+        self.trip.save(update_fields=['departure_date', 'expected_departure_time'])
+
+    def test_automatic_start_keeps_current_operator_until_completion(self):
+        from .services.scheduled_departures import start_due_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 1)
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = now - timedelta(minutes=5)
+        self.trip.assets_verified_at = now - timedelta(minutes=5)
+        self.trip.driver_at_rank_at = now - timedelta(minutes=3)
+        self.trip.save()
+        self.assertEqual(start_due_trips(now), [self.trip.id])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.IN_PROGRESS)
+        self.assertEqual(self.trip.engaged_by_id, self.op.pk)
+        result = self.client.post(f'/transport/api/my-trips/{self.trip.pk}/complete/')
+        self.assertEqual(result.status_code, 200, result.data)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.COMPLETED)
+        self.assertIsNone(self.trip.engaged_by_id)
+
+    def test_missed_departure_cancels_after_grace_and_unassigns_operator(self):
+        from .services.trip_lifecycle import cancel_overdue_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 16)
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = now - timedelta(minutes=25)
+        self.trip.driver_at_rank_at = now - timedelta(minutes=20)
+        self.trip.save()
+        self.assertEqual(cancel_overdue_trips(now), [self.trip.id])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.CANCELLED)
+        self.assertIsNone(self.trip.engaged_by_id)
+        self.assertEqual(cancel_overdue_trips(now), [])
+
+    def test_started_but_uncompleted_trip_auto_cancels_after_duration(self):
+        from .services.trip_lifecycle import cancel_overdue_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 76)  # 60-minute route + 15-minute allowance
+        self.trip.status = Trip.Status.IN_PROGRESS
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = now - timedelta(minutes=80)
+        self.trip.save()
+        self.assertEqual(cancel_overdue_trips(now), [self.trip.id])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.CANCELLED)
+        self.assertIsNone(self.trip.engaged_by_id)
+
+    def test_no_completed_trip_is_changed_by_overdue_scanner(self):
+        from .services.trip_lifecycle import cancel_overdue_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 120)
+        self.trip.status = Trip.Status.COMPLETED
+        self.trip.save()
+        self.assertEqual(cancel_overdue_trips(now), [])
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.COMPLETED)
+
+    def test_flagging_creates_review_record_without_changing_trip_status(self):
+        # The operator can report an issue without inventing a 'flagged' trip state.
+        from .models import TripFlag
+        category = TripFlag.Category.choices[0][0]
+        response = self.client.post(
+            f'/transport/api/my-trips/{self.trip.pk}/flag/',
+            {'category': category, 'notes': 'An issue for the administrator.'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.SCHEDULED)
+
+    def test_driver_no_show_refund_status_exposed_without_flagged_state(self):
+        from .services.scheduled_departures import start_due_trips
+        now = timezone.now().replace(microsecond=0)
+        self.set_departure(now, 16)
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = now - timedelta(minutes=30)
+        self.trip.save()
+        Booking.objects.create(
+            trip=self.trip, walk_in_name='Paid passenger',
+            payment_method=Booking.PaymentMethod.CARD,
+            payment_status=Booking.PaymentStatus.PAID,
+            fare_amount='50.00', amount_paid='50.00',
+        )
+        start_due_trips(now)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.CANCELLED)
+        self.assertIsNone(self.trip.engaged_by_id)
+        response = self.client.get('/transport/api/my-trips/')
+        self.assertEqual(response.status_code, 200, response.data)
+        entry = next(row for row in response.data if row['id'] == self.trip.id)
+        self.assertEqual(entry['status'], 'cancelled')
+        self.assertEqual(entry['refund_status'], 'refunded')
+        self.assertIn('Driver No-Show', entry['display_status'])
+
+    def test_admin_cancellation_unlocks_operator_and_preserves_cancelled_status(self):
+        from accounts.models import AdminProfile
+        admin_user = User.objects.create_user('0825550012', 'Passw0rd!', role='administrator')
+        AdminProfile.objects.create(user=admin_user, institution_name='Test rank admin', rank=self.rank)
+        self.trip.engaged_by = self.op
+        self.trip.engaged_at = timezone.now()
+        self.trip.status = Trip.Status.BOARDING
+        self.trip.save()
+        self.client.force_authenticate(admin_user)
+        response = self.client.post(f'/transport/api/admin/trips/{self.trip.pk}/cancel/', {'reason': 'Road closed'})
+        self.assertEqual(response.status_code, 200, response.data)
+        self.trip.refresh_from_db()
+        self.assertEqual(self.trip.status, Trip.Status.CANCELLED)
+        self.assertIsNone(self.trip.engaged_by_id)

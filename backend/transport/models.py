@@ -142,8 +142,6 @@ class Trip(models.Model):
         IN_PROGRESS = "in_progress", "In progress"
         COMPLETED = "completed", "Completed"
         CANCELLED = "cancelled", "Cancelled"
-        FLAGGED = "flagged", "Flagged — needs admin review"
-        EXPIRED = "expired", "Expired in queue"
 
     operator = models.ForeignKey(
         OperatorProfile, on_delete=models.CASCADE, related_name="trips"
@@ -177,6 +175,20 @@ class Trip(models.Model):
         null=True, blank=True, related_name="verified_trip_assets",
     )
 
+    # ---- Live driver location (proof the driver reached the departure rank) ----
+    # The driver app posts GPS pings. The first ping inside RANK_RADIUS_KM of the
+    # departure rank sets driver_at_rank_at — that timestamp is what the
+    # "driver not at the rank at trip start -> refund" rule checks.
+    driver_last_lat = models.DecimalField(
+        max_digits=9, decimal_places=6, null=True, blank=True
+    )
+    driver_last_lng = models.DecimalField(
+        max_digits=9, decimal_places=6, null=True, blank=True
+    )
+    driver_last_seen_at = models.DateTimeField(null=True, blank=True)
+    driver_at_rank_at = models.DateTimeField(null=True, blank=True)
+    driver_location_status = models.CharField(max_length=20, blank=True, default="")
+
     class Meta:
         ordering = ["departure_date", "expected_departure_time", "id"]
 
@@ -199,14 +211,14 @@ class Trip(models.Model):
     def seats_available(self):
         return max(self.seat_capacity - self.seats_taken, 0)
 
+    @property
+    def driver_checked_in(self):
+        """True once a GPS ping placed the driver at the departure rank."""
+        return self.driver_at_rank_at is not None
+
     def __str__(self):
         return f"{self.trip_code} {self.route} @ {self.departure_date}"
 
-    engaged_by = models.ForeignKey(
-        OperatorProfile, on_delete=models.SET_NULL, null=True, blank=True,
-        related_name="engaged_trips",
-    )
-    engaged_at = models.DateTimeField(null=True, blank=True)
 
 class Booking(models.Model):
     """A passenger on a trip. Registered user (passenger FK) or walk-in."""
@@ -245,6 +257,40 @@ class Booking(models.Model):
     group_next_of_kin_name = models.CharField(max_length=150, blank=True)
     group_next_of_kin_phone = models.CharField(max_length=15, blank=True)
 
+    # ---- Payment (demo card / cash at rank) ----
+    class PaymentMethod(models.TextChoices):
+        CARD = "card", "Pay with card"
+        CASH = "cash", "Pay with cash"
+
+    class PaymentStatus(models.TextChoices):
+        PENDING = "pending", "Pending cash verification"
+        PAID = "paid", "Paid / verified"
+        REFUNDED = "refunded", "Fully refunded"
+        PARTIAL_REFUND = "partial_refund", "Partial refund (cancellation fee)"
+        FORFEITED = "forfeited", "No refund (late / no-show)"
+
+    payment_method = models.CharField(
+        max_length=10, choices=PaymentMethod.choices, blank=True, default=""
+    )
+    payment_status = models.CharField(
+        max_length=20, choices=PaymentStatus.choices, blank=True, default=""
+    )
+    fare_amount = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    amount_paid = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    cancellation_fee = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    refund_amount = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    refund_reason = models.CharField(max_length=255, blank=True)
+    card_last_four = models.CharField(max_length=4, blank=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    payment_verified_at = models.DateTimeField(null=True, blank=True)
+    payment_verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="payment_verifications",
+    )
+    # Demo only — never store full card numbers in production.
+    card_holder_name = models.CharField(max_length=150, blank=True)
+
     class Meta:
         ordering = ["-booked_at"]
 
@@ -255,11 +301,26 @@ class Booking(models.Model):
             return f"{self.passenger.first_name} {self.passenger.last_name}".strip() or self.passenger.phone
         return self.walk_in_name or "Walk-in"
 
+    def is_payment_verified(self):
+        return self.payment_status == self.PaymentStatus.PAID
+
+    def passenger_display_status(self):
+        if self.status == self.Status.CANCELLED:
+            return "cancelled"
+        if self.payment_status == self.PaymentStatus.PENDING:
+            return "pending"
+        if self.payment_status == self.PaymentStatus.PAID:
+            return "verified"
+        if self.payment_status in (
+            self.PaymentStatus.REFUNDED,
+            self.PaymentStatus.PARTIAL_REFUND,
+        ):
+            return "refunded"
+        return self.status
+
     def __str__(self):
         return f"{self.display_name()} → {self.trip.trip_code} ({self.status})"
 
-    walk_in_next_of_kin_name = models.CharField(max_length=150, blank=True)
-    walk_in_next_of_kin_phone = models.CharField(max_length=15, blank=True)
 
 class VerificationCode(models.Model):
     booking = models.OneToOneField(Booking, on_delete=models.CASCADE, related_name="verification_code")
@@ -275,6 +336,7 @@ class VerificationCode(models.Model):
 
     def __str__(self):
         return f"{self.code} ({'used' if self.verified_at else 'unused'})"
+
 
 class TripFlag(models.Model):
     """An operator flags a trip for admin attention."""
@@ -313,6 +375,7 @@ class TripFlag(models.Model):
 
     def __str__(self):
         return f"{self.trip.trip_code} — {self.get_category_display()} ({self.status})"
+
 
 class TripAssetChange(models.Model):
     """Audit log of any driver or vehicle reassignment on a trip."""
@@ -356,6 +419,7 @@ class TripAssetChange(models.Model):
 
     def __str__(self):
         return f"{self.trip.trip_code} — {self.get_reason_display()}"
+
 
 class Feedback(models.Model):
     """A passenger's rating and optional complaint for a completed trip.
@@ -413,6 +477,7 @@ class Feedback(models.Model):
         kind = "complaint" if self.has_complaint else "rating"
         return f"{kind} {self.rating}★ for {self.trip.trip_code} ({self.status})"
 
+
 class Announcement(models.Model):
     """A service update published by an operator or admin.
     Optionally tied to a specific route."""
@@ -424,6 +489,11 @@ class Announcement(models.Model):
     route = models.ForeignKey(
         Route, on_delete=models.SET_NULL, null=True, blank=True,
         related_name="announcements",
+    )
+    rank = models.ForeignKey(
+        Rank, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="announcements",
+        help_text="Target rank; leave blank for a central announcement for all ranks.",
     )
     title = models.CharField(max_length=150)
     body = models.TextField()
@@ -442,6 +512,7 @@ class Announcement(models.Model):
 
     def __str__(self):
         return f"{self.title} — {self.operator or 'admin'}"
+
 
 class PanicAlert(models.Model):
     """Emergency alert raised by a passenger on an active trip."""
@@ -479,6 +550,7 @@ class PanicAlert(models.Model):
     def __str__(self):
         return f"Panic from {self.passenger} on {self.booking.trip.trip_code} ({self.status})"
 
+
 class QueueEntry(models.Model):
     """Ordered vehicle queue at a rank. Set by admin, drawn down by operators."""
 
@@ -509,6 +581,7 @@ class QueueEntry(models.Model):
 
     def __str__(self):
         return f"#{self.position} {self.vehicle.plate_number} @ {self.rank.name}"
+
 
 class TripChange(models.Model):
     """Append-only API history with names and values preserved at edit time."""

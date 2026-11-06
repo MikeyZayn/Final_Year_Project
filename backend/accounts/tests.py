@@ -64,14 +64,14 @@ class DOTAdapterTests(TestCase):
     def test_admin_verification_updates_operational_status(self):
         admin = User.objects.create_user(phone='0829999999', password='test', is_superuser=True)
         driver = User.objects.create_user(phone='0839999999', password='test', role='driver')
-        profile = DriverProfile.objects.create(user=driver, license_number='NDL 001', id_number=SEED[0][0])
+        profile = DriverProfile.objects.create(user=driver, license_number='NDL 001')
         client = APIClient(); client.force_authenticate(admin)
-        with patch('transport.views.verify_driver', return_value={'verified':True, 'reason':'ok', 'record':None}):
+        with patch('transport.views.verify_driver_license', return_value={'verified':True, 'reason':'ok', 'record':None}):
             self.assertEqual(client.post(f'/transport/api/admin/drivers/{profile.pk}/verify/').status_code, 200)
         profile.refresh_from_db(); self.assertEqual(profile.status, 'verified')
-        with patch('transport.views.verify_driver', return_value={'verified':False, 'reason':'license_suspended', 'record':None}):
+        with patch('transport.views.verify_driver_license', return_value={'verified':False, 'reason':'license_suspended', 'record':None}):
             client.post(f'/transport/api/admin/drivers/{profile.pk}/verify/')
         profile.refresh_from_db(); self.assertEqual(profile.status, 'rejected'); self.assertEqual(profile.external_verification_status, 'suspended')
-        with patch('transport.views.verify_driver', return_value={'verified':False, 'reason':'dot_unavailable', 'record':None}):
+        with patch('transport.views.verify_driver_license', return_value={'verified':False, 'reason':'dot_unavailable', 'record':None}):
             client.post(f'/transport/api/admin/drivers/{profile.pk}/verify/')
         profile.refresh_from_db(); self.assertEqual(profile.status, 'rejected')
