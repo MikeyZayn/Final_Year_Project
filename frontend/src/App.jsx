@@ -2682,68 +2682,141 @@ function Administrator({ notify }) {
       <DrawerTile title="Drivers & DOT checks" description="Licences, demo registry checks and verification status" icon="✓"><AdminDrivers notify={notify} /></DrawerTile>
       <DrawerTile title="Accounts" description="Search people and manage account access" icon="◎"><AdminAccounts notify={notify} /></DrawerTile>
       <DrawerTile title="Trip management" description="Journey history and trip controls" icon="↔"><AdminTrips notify={notify} /></DrawerTile>
-      <DrawerTile title="Trip progression demo" description="Show sample trip stages to clients without changing live data" icon="▷"><AdminTripProgressDemo /></DrawerTile>
+      <DrawerTile title="Trip progression demo" description="Show sample trip stages to clients without changing live data" icon="▷"><AdminTripProgressDemo notify={notify} /></DrawerTile>
       <DrawerTile title="Announcements" description="Publish rank notices for your operators and drivers" icon="↗"><AdminAnnouncements notify={notify} rank={adminInfo.rank} /></DrawerTile>
       <DrawerTile title="Feedback & flags" description="Passenger feedback and reported trip issues" icon="! "><AdminFeedback notify={notify} /><AdminFlags notify={notify} /></DrawerTile>
     </div>
   );
 }
 
-// Developer-only client presentation. This is NOT linked to real trip records.
-function AdminTripProgressDemo() {
-  const steps = [
-    { title: 'Scheduled', detail: 'Trip is planned with a driver and vehicle.' },
-    { title: 'Boarding', detail: 'Operator checks the vehicle and boards passengers.' },
-    { title: 'In progress', detail: 'The trip has reached its scheduled departure and is underway.' },
-    { title: 'Completed', detail: 'Trip arrived and verified passengers can give feedback.' },
-  ];
-  const [phase, setPhase] = useState(0);
-  const [ending, setEnding] = useState('normal');
-  const labels = ending === 'normal' ? steps : [
-    ...steps.slice(0, 2),
-    { title: ending === 'driver_no_show' ? 'Refunded — Driver No-Show' : 'Cancelled',
-      detail: ending === 'driver_no_show'
-        ? 'Driver failed to check in at Rank A. The system records full refunds for paid bookings.'
-        : 'The trip was cancelled and cannot be operated.' },
-  ];
-  const current = Math.min(phase, labels.length - 1);
+// Admin-only presentation control modelled on the reference Dev / Simulate tool.
+// It changes saved DEMO- trip states, not passenger bookings or operational trips.
+function AdminTripProgressDemo({ notify }) {
+  const [trips, setTrips] = useState([]);
+  const [tripId, setTripId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  async function refresh(preferredId = '') {
+    setLoading(true);
+    try {
+      const { data } = await api.get('/transport/api/admin/trips/');
+      const items = Array.isArray(data) ? data : [];
+      setTrips(items);
+      setTripId((old) => {
+        const choice = String(preferredId || old);
+        if (items.some((t) => String(t.id) === choice && t.trip_code.startsWith('DEMO-') && (t.notes || '').startsWith('Developer demonstration only'))) return choice;
+        return String(items.find((t) => t.trip_code.startsWith('DEMO-') && (t.notes || '').startsWith('Developer demonstration only'))?.id || '');
+      });
+      setError('');
+    } catch (err) {
+      setError(apiMessage(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { refresh(); }, []);
+
+  const isDemo = (trip) => trip.trip_code.startsWith('DEMO-') &&
+    (trip.notes || '').startsWith('Developer demonstration only') &&
+    !trip.driver_id && !trip.vehicle_id;
+  const demos = trips.filter(isDemo);
+  const realTrips = trips.filter((t) => !isDemo(t));
+  const selected = demos.find((t) => String(t.id) === tripId);
+  const pretty = (status) => ({
+    scheduled: 'Scheduled', boarding: 'Boarding', in_progress: 'In progress',
+    completed: 'Completed', cancelled: 'Cancelled',
+  })[status] || status;
+
+  async function createDemo(sourceId) {
+    setBusy(true);
+    setError('');
+    try {
+      const { data } = await api.post('/transport/api/admin/trips/demo/', { source_trip_id: sourceId });
+      notify?.(`Demo copy ${data.trip_code} created.`);
+      await refresh(data.id);
+    } catch (err) {
+      const message = apiMessage(err);
+      setError(message);
+      notify?.(message);
+    } finally { setBusy(false); }
+  }
+
+  async function simulate(step) {
+    if (!selected || busy) return;
+    if (step === 'cancel' && !window.confirm('Force cancel this DEMO trip? No real bookings will change.')) return;
+    setBusy(true);
+    setError('');
+    try {
+      const { data } = await api.post('/transport/api/admin/trips/simulate/', {
+        trip_id: selected.id, step,
+      });
+      notify?.(`Demo trip ${data.trip_code} → ${pretty(data.status)}`);
+      await refresh(data.id);
+    } catch (err) {
+      const message = apiMessage(err);
+      setError(message);
+      notify?.(message);
+    } finally { setBusy(false); }
+  }
+
+  const nextDisabled = !selected || selected.status === 'completed' || selected.status === 'cancelled' || busy;
   return (
     <article className="module module-wide">
       <div className="module-heading">
-        <span>Developer trip demonstration</span>
+        <span>DEV · Trip simulation</span>
         <span className="module-number">DEMO ONLY</span>
       </div>
-      <p className="muted">Show clients how a journey progresses. This demonstration uses sample data and never updates real trips, passengers, or refunds.</p>
+      <p className="muted">
+        Like the reference system: select a trip and use Next status, Reset scheduled,
+        or Force cancel. This version saves the demo trip progression and its audit history
+        without changing live trips, passengers, or refunds.
+      </p>
+      {error && <p role="alert" style={{ color: 'var(--danger, #b91c1c)' }}>{error}</p>}
+      {loading && <p className="muted">Loading rank trips…</p>}
       <div className="form-grid" style={{ alignItems: 'end' }}>
-        <label>Sample route
-          <input value="Ongoye Main Rank → Richards Bay" readOnly />
-        </label>
-        <label>Demonstrate journey
-          <select value={ending} onChange={(e) => {setEnding(e.target.value); setPhase(0);}}>
-            <option value="normal">Normal journey</option>
-            <option value="cancelled">Cancellation</option>
-            <option value="driver_no_show">Driver no-show refund</option>
+        <label>
+          Demo trip ID
+          <select aria-label="Select demo trip" value={tripId} onChange={(e) => setTripId(e.target.value)}>
+            <option value="">Select a demonstration trip</option>
+            {demos.map((t) => <option value={t.id} key={t.id}>{t.id} · {t.trip_code}</option>)}
           </select>
         </label>
+        <div>
+          <strong>{selected ? `${selected.route.departure.name} → ${selected.route.destination.name}` : 'No demo trip selected'}</strong>
+          <p className="muted">Status: {selected ? pretty(selected.status) : '—'}</p>
+        </div>
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }} aria-label="Trip progression">
-        {labels.map((step, index) => (
-          <button key={step.title} type="button" onClick={() => setPhase(index)}
-            className={index === current ? 'primary-button' : 'secondary-button'}
-            aria-current={index === current ? 'step' : undefined}>
-            {index + 1}. {step.title}
-          </button>
-        ))}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
+        <button className="primary-button" type="button" disabled={nextDisabled} onClick={() => simulate('next')}>Next status</button>
+        <button className="secondary-button" type="button" disabled={!selected || busy} onClick={() => simulate('reset')}>Reset scheduled</button>
+        <button className="danger-button" type="button" disabled={!selected || busy} onClick={() => simulate('cancel')}>Force cancel</button>
+        <button className="secondary-button" type="button" disabled={busy} onClick={() => refresh()}>Refresh trips</button>
       </div>
-      <div style={{ border: '1px solid var(--border)', borderRadius: 12, padding: 18, marginTop: 14 }}>
-        <strong style={{ fontSize: 20 }}>{labels[current].title}</strong>
-        <p className="muted">{labels[current].detail}</p>
-        <p className="muted">Step {current + 1} of {labels.length} · Illustration only</p>
-      </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <button className="secondary-button" type="button" onClick={() => setPhase(0)}>Restart demo</button>
-        <button className="primary-button" type="button" disabled={current >= labels.length - 1}
-          onClick={() => setPhase(x => Math.min(x + 1, labels.length - 1))}>Next stage →</button>
+      <p className="muted" style={{ marginTop: 16 }}>Select an existing demo trip or create an isolated copy of one of your rank's trips:</p>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
+          <thead><tr><th style={{ padding: 8 }}>ID</th><th>Trip code</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody>
+            {[...demos, ...realTrips].slice(0, 20).map((t) => (
+              <tr key={t.id} style={{ borderTop: '1px solid var(--border)' }}>
+                <td style={{ padding: 8 }}>{t.id}</td>
+                <td>{t.trip_code}</td>
+                <td>{pretty(t.status)}</td>
+                <td>
+                  {isDemo(t) ? (
+                    <button className="secondary-button" type="button" disabled={busy} onClick={() => setTripId(String(t.id))}>Select demo</button>
+                  ) : (
+                    <button className="secondary-button" type="button" disabled={busy} onClick={() => createDemo(t.id)}>Create demo copy</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+            {!loading && trips.length === 0 && <tr><td colSpan={4} style={{ padding: 12 }}>No trips found at your rank. Create a trip first.</td></tr>}
+          </tbody>
+        </table>
       </div>
     </article>
   );

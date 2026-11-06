@@ -360,6 +360,119 @@ def api_admin_routes(request):
     return Response(RouteSerializer(route).data, status=201)
 
 
+
+# ---------- Administrator trip progression demonstration ----------
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def api_admin_create_demo_trip(request):
+    """Create an isolated demo trip at this admin's rank.
+
+    A real trip can be used as a template, but its status, bookings and
+    operational history are never modified. No passenger bookings are copied.
+    """
+    from datetime import time as dt_time
+    from .serializers import TripSerializer
+
+    admin = _get_admin_or_none(request)
+    if admin is None or not admin.rank_id:
+        return Response({"detail": "Rank administrator access required."}, status=403)
+    try:
+        source_id = int(request.data.get("source_trip_id"))
+    except (TypeError, ValueError):
+        return Response({"detail": "Choose a valid source trip."}, status=400)
+    source = Trip.objects.filter(
+        pk=source_id, route__departure_id=admin.rank_id,
+    ).first()
+    if source is None:
+        return Response({"detail": "Trip not found at your rank."}, status=404)
+
+    # A week ahead avoids the automated departure/no-show scheduler
+    # interfering with a presentation before anyone starts the demo.
+    from datetime import timedelta
+    target_day = timezone.localdate() + timedelta(days=7)
+    code = "DEMO-" + get_random_string(12).upper()
+    while Trip.objects.filter(trip_code=code).exists():
+        code = "DEMO-" + get_random_string(12).upper()
+    demo = Trip.objects.create(
+        route=source.route, operator=source.operator,
+        departure_date=target_day,
+        expected_departure_time=source.expected_departure_time or dt_time(12, 0),
+        seat_capacity=source.seat_capacity, status=Trip.Status.SCHEDULED,
+        trip_code=code,
+        # No live driver/vehicle assignment: the copy must never appear as
+        # a real job on a driver's roster or conflict with live operations.
+        driver=None, vehicle=None,
+        notes=f"Developer demonstration only — copied from trip {source.trip_code} (id={source.pk}).",
+    )
+    return Response(TripSerializer(demo).data, status=201)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def api_admin_simulate_trip(request):
+    """Advance/reset/cancel a demo trip, as in the reference admin console.
+
+    Intentionally requires a DEMO- record: allowing arbitrary live trip IDs
+    here would overwrite real operations, boarding and refund outcomes.
+    """
+    from .trip_management import snapshot, record
+    from .serializers import TripSerializer
+
+    admin = _get_admin_or_none(request)
+    if admin is None or not admin.rank_id:
+        return Response({"detail": "Rank administrator access required."}, status=403)
+    try:
+        pk = int(request.data.get("trip_id"))
+    except (TypeError, ValueError):
+        return Response({"detail": "Choose a valid demonstration trip."}, status=400)
+    step = request.data.get("step", "next")
+    if step not in ("next", "reset", "cancel"):
+        return Response({"detail": "Step must be next, reset or cancel."}, status=400)
+
+    trip = Trip.objects.select_for_update().filter(
+        pk=pk, route__departure_id=admin.rank_id,
+    ).first()
+    if trip is None:
+        return Response({"detail": "Trip not found at your rank."}, status=404)
+    if not (trip.trip_code.startswith("DEMO-")
+            and trip.notes.startswith("Developer demonstration only")
+            and trip.driver_id is None and trip.vehicle_id is None):
+        return Response({"detail": "Only isolated developer demo copies can be simulated. Create a demo copy first."}, status=403)
+    # A reset/cancellation must not rewrite any recorded payments, refunds or
+    # completed boarding. We do not make demo booking fixtures by default.
+    if trip.bookings.exists():
+        return Response({"detail": "This demo trip has bookings. Simulation is disabled to protect passenger records."}, status=409)
+
+    stages = [Trip.Status.SCHEDULED, Trip.Status.BOARDING,
+              Trip.Status.IN_PROGRESS, Trip.Status.COMPLETED]
+    before = snapshot(trip)
+    if step == "reset":
+        trip.status = Trip.Status.SCHEDULED
+        trip.actual_departure_time = None
+        trip.engaged_by = None
+        trip.engaged_at = None
+    elif step == "cancel":
+        trip.status = Trip.Status.CANCELLED
+        trip.engaged_by = None
+        trip.engaged_at = None
+    else:
+        if trip.status not in stages:
+            return Response({"detail": "A cancelled demo must be reset before advancing."}, status=400)
+        if trip.status != Trip.Status.COMPLETED:
+            trip.status = stages[stages.index(trip.status) + 1]
+        if trip.status == Trip.Status.IN_PROGRESS and trip.actual_departure_time is None:
+            trip.actual_departure_time = timezone.now()
+        if trip.status == Trip.Status.COMPLETED:
+            trip.engaged_by = None
+            trip.engaged_at = None
+    trip.save()
+    record(trip, request.user, f"Developer demonstration: {step} (no real bookings)", before)
+    return Response(TripSerializer(trip).data)
+
+
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
 def api_admin_trips(request):

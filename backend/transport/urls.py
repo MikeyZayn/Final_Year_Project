@@ -25,6 +25,10 @@ urlpatterns = [
     path("api/my-trips/<int:trip_id>/walk-in/",  views.api_register_walk_in, name="api_register_walk_in"),
     path("api/my-trips/<int:trip_id>/flag/",     views.api_flag_trip,    name="api_flag_trip"),
 
+    # Admin — developer demonstrations (safe copies of rank trips)
+    path("api/admin/trips/demo/", views.api_admin_create_demo_trip, name="api_admin_create_demo_trip"),
+    path("api/admin/trips/simulate/", views.api_admin_simulate_trip, name="api_admin_simulate_trip"),
+
     # Admin
     path("api/admin/routes/",   views.api_admin_routes,       name="api_admin_routes"),
     path("api/admin/trips/",    views.api_admin_trips,        name="api_admin_trips"),
