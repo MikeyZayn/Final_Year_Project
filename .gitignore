@@ -15,3 +15,6 @@ backend/media/
 /package-lock.json
 /themba/
 /themba_reference/
+frontend/.vite/
+frontend/.vite-local-build/
+backend/investor-demo.sqlite3

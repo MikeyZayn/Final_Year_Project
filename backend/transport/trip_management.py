@@ -39,7 +39,10 @@ class EditRequest(serializers.Serializer):
     reason = serializers.CharField(max_length=2000)
     driver_reason = serializers.CharField(max_length=1000, required=False)
     vehicle_reason = serializers.CharField(max_length=1000, required=False)
-    route_id = serializers.PrimaryKeyRelatedField(queryset=Route.objects.filter(active=True), source="route", required=False)
+    route_id = serializers.PrimaryKeyRelatedField(
+        queryset=Route.objects.filter(active=True, service_category=Route.ServiceCategory.STRUCTURED),
+        source="route", required=False,
+    )
     operator_id = serializers.PrimaryKeyRelatedField(queryset=OperatorProfile.objects.all(), source="operator", required=False)
     driver_id = serializers.PrimaryKeyRelatedField(queryset=DriverProfile.objects.all(), source="driver", required=False, allow_null=True)
     vehicle_id = serializers.PrimaryKeyRelatedField(queryset=Vehicle.objects.all(), source="vehicle", required=False, allow_null=True)
@@ -109,6 +112,12 @@ def apply_edit(request, t, operator=False):
     if changed - {"notes"}: validate_assignment(t)
     if changed & {"driver", "vehicle", "route", "operator"}:
         t.assets_verified_at, t.assets_verified_by = None, None
+    if changed & {"driver", "vehicle", "route", "departure_date", "expected_departure_time"}:
+        t.driver_at_rank_at = None
+        t.driver_last_seen_at = None
+        t.driver_last_lat = None
+        t.driver_last_lng = None
+        t.driver_location_status = ""
     t.save()
     reason += ("\nDriver: " + dr if dr else "") + ("\nVehicle: " + vr if vr else "")
     record(t, request.user, reason, before)
@@ -166,7 +175,12 @@ def admin_cancel(request, trip_id):
         reject("Only unstarted trips with no boarded passengers can be cancelled.")
     before = snapshot(t)
     t.status = "cancelled"
+    t.engaged_by = None
+    t.engaged_at = None
     t.save()
-    t.bookings.filter(status="reserved").update(status="cancelled")
+    from .services.payment import refund_unserved_booking
+    for booking in t.bookings.select_for_update().filter(status="reserved"):
+        booking.status = "cancelled"
+        refund_unserved_booking(booking, ("Administrator cancelled the trip. " + reason)[:255])
     record(t, request.user, reason, before)
     return Response(TripSerializer(t).data)

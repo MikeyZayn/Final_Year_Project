@@ -95,7 +95,7 @@ def _record_locked(trip, lat: float, lng: float) -> dict:
 
     if at_rank:
         # Keep the first arrival time — that is the proof we need later.
-        if trip.driver_at_rank_at is None:
+        if not driver_was_at_rank(trip):
             trip.driver_at_rank_at = now
         trip.driver_location_status = "at_rank"
     else:
@@ -125,11 +125,7 @@ def _record_locked(trip, lat: float, lng: float) -> dict:
 
 
 def driver_was_at_rank(trip, *, grace_before=CHECK_IN_GRACE_BEFORE, grace_after=CHECK_IN_GRACE_AFTER) -> bool:
-    """True when a ping put the driver at the rank around the trip's start time.
-
-    A check-in outside the grace window still counts if it happened before the
-    trip departed: a driver waiting at the rank for an hour is not a no-show.
-    """
+    """Accept check-in evidence from the departure window only."""
     if trip.driver_at_rank_at is None:
         return False
 
@@ -144,10 +140,7 @@ def driver_was_at_rank(trip, *, grace_before=CHECK_IN_GRACE_BEFORE, grace_after=
         return True
 
     check_in = trip.driver_at_rank_at
-    if check_in <= departure:
-        # Arrived any time before departure (even hours early) — that is fine.
-        return True
-    return (check_in - departure).total_seconds() <= grace_after
+    return -grace_before <= (check_in - departure).total_seconds() <= grace_after
 
 
 def driver_no_show(trip) -> bool:

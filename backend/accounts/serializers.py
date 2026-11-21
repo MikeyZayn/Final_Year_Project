@@ -20,16 +20,28 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class LoginSerializer(serializers.Serializer):
-    phone = serializers.CharField()
+    phone = serializers.CharField(max_length=254)
     password = serializers.CharField(write_only=True)
 
     def validate(self, attrs):
-        user = authenticate(username=attrs["phone"], password=attrs["password"])
+        identifier = attrs["phone"]
+        if "@" in identifier:
+            matches = list(User.objects.filter(email__iexact=identifier).values_list("phone", flat=True)[:2])
+            phone = matches[0] if len(matches) == 1 else ""
+        else:
+            phone = identifier
+        user = authenticate(username=phone, password=attrs["password"])
+        if user and user.account_status == User.AccountStatus.PENDING:
+            raise serializers.ValidationError("Email verified. Your application is awaiting administrator approval.")
         if not user:
-            maybe = User.objects.filter(phone=attrs["phone"], is_active=False).first()
-            if maybe and maybe.check_password(attrs["password"]):
+            maybe = User.objects.filter(phone=phone, is_active=False).first()
+            if maybe and maybe.account_status == User.AccountStatus.ACTIVE and maybe.check_password(attrs["password"]):
                 raise serializers.ValidationError("Confirm the verification code sent to your email before signing in.")
-            raise serializers.ValidationError("Invalid phone number or password.")
+            if maybe and maybe.account_status == User.AccountStatus.PENDING and maybe.check_password(attrs["password"]):
+                raise serializers.ValidationError("Confirm your email before your application can be reviewed.")
+            if maybe and maybe.account_status in (User.AccountStatus.REJECTED, User.AccountStatus.DISABLED, User.AccountStatus.ARCHIVED) and maybe.check_password(attrs["password"]):
+                raise serializers.ValidationError("This account cannot sign in. Contact your rank administrator.")
+            raise serializers.ValidationError("Invalid phone number, email or password.")
         attrs["user"] = user
         return attrs
 
@@ -112,6 +124,7 @@ class DriverRegisterSerializer(RegistrationEmailMixin, serializers.Serializer):
         ext_status = DriverProfile.ExternalVerification.UNVERIFIED
 
         user = User(**data, role=User.Role.DRIVER)
+        user.account_status = User.AccountStatus.PENDING
         user.username = user.phone
         user.is_active = False  # Activated only after email OTP confirmation
         user.set_password(password)
@@ -151,6 +164,7 @@ class OperatorRegisterSerializer(RegistrationEmailMixin, serializers.Serializer)
         data.pop("rank_code")
         phone = data["phone"]
         user = User(phone=phone, email=data.get("email", ""), role=User.Role.OPERATOR)
+        user.account_status = User.AccountStatus.PENDING
         user.username = phone
         user.is_active = False  # Activated only after email OTP confirmation
         user.set_password(password)
@@ -174,3 +188,17 @@ class EmailVerificationSerializer(serializers.Serializer):
 
 class EmailVerificationResendSerializer(serializers.Serializer):
     phone = serializers.CharField(max_length=15)
+
+
+class PassengerSettingsSerializer(serializers.Serializer):
+    first_name = serializers.CharField(max_length=150)
+    last_name = serializers.CharField(max_length=150)
+    next_of_kin_name = serializers.CharField(max_length=150)
+    next_of_kin_phone = serializers.RegexField(r"^\+?[0-9]{7,15}$", max_length=15)
+    second_next_of_kin_name = serializers.CharField(max_length=150, allow_blank=True)
+    second_next_of_kin_phone = serializers.RegexField(r"^\+?[0-9]{7,15}$", allow_blank=True, max_length=15)
+
+    def validate(self, data):
+        if bool(data["second_next_of_kin_name"]) != bool(data["second_next_of_kin_phone"]):
+            raise serializers.ValidationError("Enter both details for the second emergency contact, or leave both blank.")
+        return data

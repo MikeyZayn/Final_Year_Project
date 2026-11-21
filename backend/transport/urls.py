@@ -1,5 +1,5 @@
 from django.urls import path
-from . import views, feature_views, trip_management, trip_groups
+from . import views, feature_views, trip_management, trip_groups, accounts_review
 
 urlpatterns = [
     path("api/trips/<int:trip_id>/history/", trip_management.history, name="trip_history"),
@@ -59,6 +59,7 @@ urlpatterns = [
     path("api/admin/feedback/<int:feedback_id>/confirm-incident/", views.api_admin_confirm_incident, name="api_admin_confirm_incident"),
     path("api/admin/feedback/<int:feedback_id>/dismiss/", views.api_admin_dismiss, name="api_admin_dismiss"),
     path("api/my-bookings/<int:booking_id>/cancel/", views.api_cancel_booking, name="api_cancel_booking"),
+    path("api/my-trips/<int:trip_id>/bookings/<int:booking_id>/verify-pass/", views.api_verify_cash_payment, {"method": "pass"}),
     path("api/my-trips/<int:trip_id>/bookings/<int:booking_id>/verify-cash/", views.api_verify_cash_payment, name="api_verify_cash_payment"),
     path("api/my-trips/<int:trip_id>/driver-no-show-refunds/", views.api_trip_driver_no_show_refunds, name="api_trip_driver_no_show_refunds"),
     # Admin (rank-scoped)
@@ -99,14 +100,18 @@ urlpatterns = [
 
     # Admin — queue
     path("api/admin/queue/", views.api_admin_queue, name="api_admin_queue"),
+    path("api/admin/commuter-pass-usage/", views.api_admin_commuter_pass_usage),
+    path("api/operator/queue/", views.api_operator_queue),
     path("api/admin/queue/<int:entry_id>/remove/", views.api_admin_queue_remove, name="api_admin_queue_remove"),
     path("api/admin/queue/<int:entry_id>/move/", views.api_admin_queue_move, name="api_admin_queue_move"),
 
     # Admin — accounts
-    path("api/admin/users/", views.api_admin_users, name="api_admin_users"),
-    path("api/admin/users/<int:user_id>/disable/", views.api_admin_disable_user, name="api_admin_disable_user"),
-    path("api/admin/users/<int:user_id>/enable/", views.api_admin_enable_user, name="api_admin_enable_user"),
-    path("api/admin/users/<int:user_id>/archive/", views.api_admin_archive_user, name="api_admin_archive_user"),
+    path("api/admin/users/", accounts_review.directory, name="api_admin_users"),
+    path("api/admin/users/<int:user_id>/approve/", accounts_review.decide, {"action": "approve"}),
+    path("api/admin/users/<int:user_id>/reject/", accounts_review.decide, {"action": "reject"}),
+    path("api/admin/users/<int:user_id>/disable/", accounts_review.decide, {"action": "disable"}, name="api_admin_disable_user"),
+    path("api/admin/users/<int:user_id>/enable/", accounts_review.decide, {"action": "enable"}, name="api_admin_enable_user"),
+    path("api/admin/users/<int:user_id>/archive/", accounts_review.decide, {"action": "archive"}, name="api_admin_archive_user"),
 
     # Admin/operator — driver detail
     path("api/admin/users/<int:user_id>/reset-code/", views.api_admin_generate_reset_code, name="api_admin_generate_reset_code"),

@@ -12,18 +12,6 @@ import {
 } from '../components/Icons.jsx';
 import '../styles/passengerBooking.css';
 
-/**
- * Payment gate for booking a trip.
- *
- * A booking cannot be created without choosing card or cash:
- *   - card: 16-digit number, MM/YY expiry, CVV from the back of the card.
- *           Paying returns the passenger as VERIFIED immediately.
- *   - cash: no money is taken now. The booking is PENDING until the operator
- *           verifies it at the rank, at least 30 minutes before departure.
- *
- * `onComplete(payload)` performs the real API call and must return the created
- * booking (including `passenger_display_status`).
- */
 export default function PaymentModal({
   trip,
   fare,
@@ -37,7 +25,7 @@ export default function PaymentModal({
   const [step, setStep] = useState('method');
   const [method, setMethod] = useState(null);
   const [error, setError] = useState('');
-  const [card, setCard] = useState({ name: '', number: '', expiry: '', cvv: '' });
+  const [cardToken, setCardToken] = useState('demo_visa');
   const [cashConfirmed, setCashConfirmed] = useState(false);
   const [result, setResult] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -49,7 +37,7 @@ export default function PaymentModal({
     setStep('method');
     setMethod(null);
     setError('');
-    setCard({ name: '', number: '', expiry: '', cvv: '' });
+    setCardToken('demo_visa');
     setCashConfirmed(false);
     setResult(null);
   }, [open, tripId]);
@@ -78,7 +66,7 @@ export default function PaymentModal({
   function continueToDetails() {
     if (!method) {
       setError(
-        'Choose a payment option to continue. You cannot book without selecting card or cash.'
+        'Choose a payment option to continue.'
       );
       return;
     }
@@ -97,10 +85,7 @@ export default function PaymentModal({
       const data = err?.response?.data;
       const message =
         (typeof data?.detail === 'string' && data.detail) ||
-        data?.card_number?.[0] ||
-        data?.card_expiry?.[0] ||
-        data?.card_cvv?.[0] ||
-        data?.card_holder_name?.[0] ||
+        data?.card_token?.[0] ||
         data?.payment_method?.[0] ||
         data?.non_field_errors?.[0] ||
         err?.message ||
@@ -113,50 +98,15 @@ export default function PaymentModal({
 
   function submitCard(event) {
     event.preventDefault();
-    const digits = card.number.replace(/\s/g, '');
-    if (!card.name.trim()) {
-      setError('Enter the name printed on the card.');
-      return;
-    }
-    if (digits.length !== 16) {
-      setError('Enter the 16-digit card number printed on the card.');
-      return;
-    }
-    if (!/^\d{2}\/\d{2}$/.test(card.expiry)) {
-      setError('Enter the expiry date as MM/YY.');
-      return;
-    }
-    if (!/^\d{3,4}$/.test(card.cvv)) {
-      setError('Enter the 3 or 4 digit CVV from the back of the card.');
-      return;
-    }
-    submit({
-      payment_method: 'card',
-      card_holder_name: card.name.trim(),
-      card_number: digits,
-      card_expiry: card.expiry,
-      card_cvv: card.cvv,
-    });
+    submit({ payment_method: 'card', card_token: cardToken });
   }
 
   function submitCash() {
     if (!cashConfirmed) {
-      setError('Confirm that you will arrive 30 minutes early with cash.');
+      setError('Confirm how you will pay at the rank.');
       return;
     }
-    submit({ payment_method: 'cash' });
-  }
-
-  function updateNumber(value) {
-    const digits = value.replace(/\D/g, '').slice(0, 16);
-    const grouped = digits.replace(/(.{4})/g, '$1 ').trim();
-    setCard((current) => ({ ...current, number: grouped }));
-  }
-
-  function updateExpiry(value) {
-    const digits = value.replace(/\D/g, '').slice(0, 4);
-    const formatted = digits.length > 2 ? `${digits.slice(0, 2)}/${digits.slice(2)}` : digits;
-    setCard((current) => ({ ...current, expiry: formatted }));
+    submit({ payment_method: method });
   }
 
   /* ------------------------------- success -------------------------------- */
@@ -180,7 +130,7 @@ export default function PaymentModal({
           <p className="pb-modal-intro">
             {verified
               ? 'You are a verified passenger on this trip. This notification is your proof of travel — show it when you board. Arrive on time; late arrivals are not refunded.'
-              : 'You are a pending passenger. Arrive at least 30 minutes early with cash. The operator must verify you before departure, otherwise your seat may be released.'}
+              : (method === 'pass' ? 'Present your demo commuter pass to the operator before boarding.' : 'Your booking is pending. Pay the operator at the rank before boarding.')}
           </p>
 
           <div className="pb-ticket">
@@ -224,15 +174,15 @@ export default function PaymentModal({
           {step === 'method'
             ? 'How would you like to pay?'
             : method === 'card'
-              ? 'Enter your card details'
-              : 'Confirm cash booking'}
+              ? 'Choose a demo card'
+              : method === 'pass' ? 'Confirm commuter pass booking' : 'Confirm cash booking'}
         </h2>
         <p className="pb-modal-intro">
           {step === 'method'
             ? 'You must choose a payment option before your trip can be booked.'
             : method === 'card'
-              ? `Secure demo payment of R${price.toFixed(2)}. No card details are stored.`
-              : 'No payment is taken now. Pay the driver before boarding.'}
+              ? `Simulate a payment of R${price.toFixed(2)}.`
+              : method === 'pass' ? 'Present a demo commuter pass to the operator before boarding.' : 'Pay the operator at the rank before boarding.'}
         </p>
 
         {step === 'method' && (
@@ -247,7 +197,7 @@ export default function PaymentModal({
                 <span><CreditCard size={22} /></span>
                 <div>
                   <strong>Pay with card</strong>
-                  <small>Instant verification and proof of payment</small>
+                  <small>Simulated payment confirmation</small>
                 </div>
                 <i>{method === 'card' && <Check size={13} />}</i>
               </button>
@@ -264,6 +214,12 @@ export default function PaymentModal({
                   <small>Booking stays pending until operator verification</small>
                 </div>
                 <i>{method === 'cash' && <Check size={13} />}</i>
+              </button>
+              <button className={`pb-pay-option ${method === 'pass' ? 'pb-selected' : ''}`}
+                type="button" disabled={seats > 1} onClick={() => chooseMethod('pass')} aria-pressed={method === 'pass'}>
+                <span><CheckCircle2 size={22} /></span>
+                <div><strong>Commuter pass</strong><small>{seats > 1 ? 'Book each pass holder individually' : 'Present your physical pass when boarding'}</small></div>
+                <i>{method === 'pass' && <Check size={13} />}</i>
               </button>
             </div>
 
@@ -288,66 +244,22 @@ export default function PaymentModal({
 
         {step === 'details' && method === 'card' && (
           <form className="pb-form" onSubmit={submitCard}>
-            <label className="pb-field">
-              <span>NAME ON CARD</span>
-              <input
-                value={card.name}
-                onChange={(event) => setCard({ ...card, name: event.target.value })}
-                autoComplete="cc-name"
-                placeholder="As printed on the card"
-              />
+            <label className="pb-field">Demo card
+              <select value={cardToken} onChange={event => setCardToken(event.target.value)}>
+                <option value="demo_visa">Visa test card ending 4242 · approve</option>
+                <option value="demo_mastercard">Mastercard test card ending 4444 · approve</option>
+                <option value="demo_declined">Test a decline</option>
+              </select>
             </label>
-
-            <label className="pb-field">
-              <span>CARD NUMBER</span>
-              <div className="pb-input-wrap">
-                <CreditCard size={17} />
-                <input
-                  value={card.number}
-                  onChange={(event) => updateNumber(event.target.value)}
-                  inputMode="numeric"
-                  autoComplete="cc-number"
-                  maxLength={19}
-                  placeholder="0000 0000 0000 0000"
-                />
-              </div>
-            </label>
-
-            <div className="pb-form-row">
-              <label className="pb-field">
-                <span>EXPIRY DATE</span>
-                <input
-                  value={card.expiry}
-                  onChange={(event) => updateExpiry(event.target.value)}
-                  inputMode="numeric"
-                  autoComplete="cc-exp"
-                  maxLength={5}
-                  placeholder="MM/YY"
-                />
-              </label>
-              <label className="pb-field">
-                <span>CVV — BACK OF CARD</span>
-                <input
-                  value={card.cvv}
-                  onChange={(event) =>
-                    setCard({ ...card, cvv: event.target.value.replace(/\D/g, '').slice(0, 4) })
-                  }
-                  inputMode="numeric"
-                  autoComplete="cc-csc"
-                  maxLength={4}
-                  placeholder="123"
-                />
-              </label>
-            </div>
 
             {error && <p className="pb-error" role="alert">{error}</p>}
 
             <p className="pb-secure">
-              <ShieldCheck size={15} /> Demo payment only. No card information is stored.
+              <ShieldCheck size={15} /> Simulation only. No card details are needed and no money moves.
             </p>
 
             <button className="pb-primary pb-wide" type="submit" disabled={busy || submitting}>
-              {submitting || busy ? 'Processing…' : `Pay R${price.toFixed(2)} securely`}
+              {submitting || busy ? 'Processing…' : `Simulate R${price.toFixed(2)} payment`}
               {!submitting && !busy && <ArrowRight size={16} />}
             </button>
 
@@ -357,7 +269,7 @@ export default function PaymentModal({
           </form>
         )}
 
-        {step === 'details' && method === 'cash' && (
+        {step === 'details' && (method === 'cash' || method === 'pass') && (
           <div className="pb-cash">
             <div className="pb-notice">
               <Clock3 size={19} />
@@ -372,7 +284,7 @@ export default function PaymentModal({
 
             <ul>
               <li><CheckCircle2 size={16} /> A pending notification is sent immediately</li>
-              <li><CheckCircle2 size={16} /> Pay R{price.toFixed(2)} at the rank before boarding</li>
+              <li><CheckCircle2 size={16} /> {method === 'pass' ? 'Present your demo commuter pass' : `Pay R${price.toFixed(2)} at the rank before boarding`}</li>
               <li><CheckCircle2 size={16} /> Keep your notification as proof of booking</li>
             </ul>
 
@@ -382,7 +294,7 @@ export default function PaymentModal({
                 checked={cashConfirmed}
                 onChange={(event) => setCashConfirmed(event.target.checked)}
               />
-              I will arrive 30 minutes before departure with cash in hand.
+              {method === 'pass' ? 'I will bring a demo commuter pass to the rank.' : 'I will arrive early with cash for the fare.'}
             </label>
 
             {error && <p className="pb-error" role="alert">{error}</p>}
@@ -393,7 +305,7 @@ export default function PaymentModal({
               disabled={busy || submitting || !cashConfirmed}
               onClick={submitCash}
             >
-              {submitting || busy ? 'Booking…' : 'Confirm cash booking'}
+              {submitting || busy ? 'Booking…' : method === 'pass' ? 'Confirm pass booking' : 'Confirm cash booking'}
               {!submitting && !busy && <ArrowRight size={16} />}
             </button>
 

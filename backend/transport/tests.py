@@ -10,15 +10,7 @@ from .models import (
 )
 
 
-# A valid demo card. The backend and the PaymentModal enforce the same rules
-# (16 digits, MM/YY expiry, 3-4 digit CVV), so tests use the same shape.
-CARD_PAYMENT = {
-    'payment_method': 'card',
-    'card_holder_name': 'Test Passenger',
-    'card_number': '4111111111111111',
-    'card_expiry': '12/30',
-    'card_cvv': '123',
-}
+CARD_PAYMENT = {'payment_method': 'card', 'card_token': 'demo_visa'}
 
 
 class TripWorkflowTests(TestCase):
@@ -35,6 +27,9 @@ class TripWorkflowTests(TestCase):
         self.client.force_authenticate(self.operator)
 
     def post(self, action, payload=None):
+        if action == 'verify-assets' and payload is None:
+            payload = {'driver_id': self.trip.driver_id, 'vehicle_id': self.trip.vehicle_id,
+                'checks': {'face': True, 'details': True, 'vehicle': True}}
         return self.client.post(f'/transport/api/my-trips/{self.trip.pk}/{action}/', payload or {}, format='json')
 
     def ready(self):
@@ -317,6 +312,11 @@ class NewFeatureTests(TripWorkflowTests):
         body = {"route_id": self.trip.route_id, "operator_id": self.op.pk,
             "departure_date": timezone.localdate().isoformat(), "expected_departure_time": "10:00",
             "driver_id": self.trip.driver_id, "vehicle_id": self.trip.vehicle_id}
+        overlap = self.client.post('/transport/api/admin/schedule-trip/', body, format='json')
+        self.assertEqual(overlap.status_code, 400, overlap.data)
+        self.assertIn('overlaps', str(overlap.data))
+        self.trip.status = 'completed'
+        self.trip.save(update_fields=['status'])
         response = self.client.post('/transport/api/admin/schedule-trip/', body, format='json')
         self.assertEqual(response.status_code, 201, response.data)
         self.assertIsNotNone(response.data['queue_expires_at'])
@@ -398,6 +398,8 @@ class PaymentAndTrackingTests(TripWorkflowTests):
     def book(self, **overrides):
         payload = {'trip_id': self.trip.pk, **CARD_PAYMENT}
         payload.update(overrides)
+        if payload['payment_method'] != 'card':
+            payload.pop('card_token', None)
         return self.client.post('/transport/api/my-bookings/', payload, format='json')
 
     def set_departure_in(self, minutes):
@@ -424,6 +426,8 @@ class PaymentAndTrackingTests(TripWorkflowTests):
             {'card_expiry': '2030-12'},
             {'card_cvv': '1'},
             {'card_holder_name': '   '},
+            {'card_token': 'demo_declined'},
+            {'card_token': 'unknown_test_card'},
         ):
             response = self.book(**bad)
             self.assertEqual(response.status_code, 400, bad)
@@ -435,14 +439,14 @@ class PaymentAndTrackingTests(TripWorkflowTests):
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(response.data['payment_status'], 'paid')
         self.assertEqual(response.data['passenger_display_status'], 'verified')
-        self.assertEqual(response.data['card_last_four'], '1111')
-        self.assertIn('verified passenger', response.data['notification'])
+        self.assertEqual(response.data['card_last_four'], '4242')
+        self.assertIn('seat reserved', response.data['notification'])
 
         feed = self.client.get('/transport/api/my-notifications/').data
         kinds = [item['kind'] for item in feed]
         self.assertIn('booking_verified', kinds)
         verified = next(item for item in feed if item['kind'] == 'booking_verified')
-        self.assertTrue(verified['proof'])
+        self.assertFalse(verified['proof'])
         self.assertEqual(verified['trip_code'], 'TEST')
 
     def test_cash_booking_stays_pending_until_the_operator_verifies_it(self):
@@ -908,9 +912,10 @@ class AutomaticDriverNoShowRefundTests(TripWorkflowTests):
         from .services.auto_no_show import refund_overdue_trip
         from .services.driver_location import record_driver_location
         now = timezone.now().replace(microsecond=0)
-        self.set_time(now, 10)
-        record_driver_location(self.trip, -28.742, 31.893)
         self.set_time(now, -16)
+        from unittest.mock import patch
+        with patch('transport.services.driver_location.timezone.now', return_value=now - timedelta(minutes=10)):
+            record_driver_location(self.trip, -28.742, 31.893)
         booking = Booking.objects.create(trip=self.trip, passenger=self.passenger,
             payment_status='paid', fare_amount='25.00', amount_paid='25.00')
         self.assertEqual(refund_overdue_trip(self.trip.id, now=now)['status'], 'checked_in')
@@ -1069,7 +1074,7 @@ class OperatorTripLifecycleTests(TestCase):
 
     def test_admin_cancellation_unlocks_operator_and_preserves_cancelled_status(self):
         from accounts.models import AdminProfile
-        admin_user = User.objects.create_user('0825550012', 'Passw0rd!', role='administrator')
+        admin_user = User.objects.create_user('0825550012', 'Passw0rd!', role='admin')
         AdminProfile.objects.create(user=admin_user, institution_name='Test rank admin', rank=self.rank)
         self.trip.engaged_by = self.op
         self.trip.engaged_at = timezone.now()

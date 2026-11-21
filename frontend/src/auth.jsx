@@ -64,6 +64,7 @@ export function AuthProvider({ children }) {
 
   const verifyEmail = async (phone, code) => {
     const { data } = await api.post('/accounts/api/email/verify/', { phone, code });
+    if (data.requires_admin_approval) return data;
     sessionStorage.setItem('token', data.token);
     setUser(data.user);
     return data.user;
@@ -81,7 +82,7 @@ export function AuthProvider({ children }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, login, register, verifyEmail, resendEmailCode, logout }}
+      value={{ user, loading, login, register, verifyEmail, resendEmailCode, logout, updateProfile: setUser }}
     >
       {children}
     </AuthContext.Provider>

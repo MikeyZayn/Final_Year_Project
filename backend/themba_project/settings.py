@@ -184,7 +184,8 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
-
+if DEBUG:
+    CORS_ALLOWED_ORIGINS += ["http://127.0.0.1:5181", "http://localhost:5181"]
 
 # Real email delivery for registration and password-reset OTPs.
 # Local tests override EMAIL_BACKEND with the in-memory backend.

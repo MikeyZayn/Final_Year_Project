@@ -54,6 +54,8 @@ def cancel_overdue_trips(now=None):
     for pk in candidate_ids:
         with transaction.atomic():
             trip = Trip.objects.select_for_update().select_related('route').get(pk=pk)
+            if trip.bookings.filter(status=Booking.Status.BOARDED).exists():
+                continue
             reason = overdue_reason(trip, now)
             if reason is None:
                 continue

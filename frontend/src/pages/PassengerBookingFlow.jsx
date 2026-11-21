@@ -45,7 +45,6 @@ import '../styles/passengerBooking.css';
  *   POST /transport/api/routing/directions/
  */
 
-export const TOWNS = ['Empangeni', 'Richards Bay', 'Esikhawini', 'Ongoye'];
 
 const PANELS = [
   { id: 'search', label: 'Search trip', path: '/passenger/search', icon: Search },
@@ -277,7 +276,11 @@ function TripCard({ trip, booked, signedIn, onDetails, onBook, onSignIn }) {
   );
 }
 
-function SearchPanel({ from, to, onFrom, onTo, onSearch, valid, loading, error, trips, hasSearched, bookedTripIds, signedIn, onSignIn, onBook, onDetails }) {
+function SearchPanel({ from, to, onFrom, onTo, onSearch, valid, loading, error, trips, routes, routeError, hasSearched, bookedTripIds, signedIn, onSignIn, onBook, onDetails }) {
+  const origins = [...new Map(routes.map(route => [route.departure.id, route.departure])).values()];
+  const destinations = [...new Map(routes.filter(route => String(route.departure.id) === from).map(route => [route.destination.id, route.destination])).values()];
+  const selectedRoute = routes.find(route => String(route.departure.id) === from && String(route.destination.id) === to);
+  const informationOnly = selectedRoute?.service_category === 'unstructured';
   const nextTrip = trips[0];
   const others = trips.slice(1);
 
@@ -288,7 +291,7 @@ function SearchPanel({ from, to, onFrom, onTo, onSearch, valid, loading, error, 
         <div className="pb-search-head">
           <div>
             <h1>Where are you going?</h1>
-            <p>Pick your starting town and destination. We resolve the ranks for you.</p>
+            <p>Choose your departure rank and destination to see fares and departures.</p>
           </div>
           <span className="pb-dir-icon" aria-hidden="true">
             <LocateFixed size={20} />
@@ -300,11 +303,9 @@ function SearchPanel({ from, to, onFrom, onTo, onSearch, valid, loading, error, 
             <span>STARTING POINT</span>
             <div className="pb-select">
               <LocateFixed size={18} />
-              <select value={from} onChange={(event) => onFrom(event.target.value)}>
-                <option value="">Choose your town</option>
-                {TOWNS.map((town) => (
-                  <option key={town} value={town}>{town}</option>
-                ))}
+              <select value={from} onChange={(event) => { onFrom(event.target.value); onTo(''); }}>
+                <option value="">Choose a rank</option>
+                {origins.map(rank => <option key={rank.id} value={rank.id}>{rank.name}{rank.area ? ' · ' + rank.area : ''}</option>)}
               </select>
               <ChevronDown size={16} />
             </div>
@@ -316,41 +317,38 @@ function SearchPanel({ from, to, onFrom, onTo, onSearch, valid, loading, error, 
             <span>DESTINATION</span>
             <div className="pb-select">
               <MapPin size={18} />
-              <select value={to} onChange={(event) => onTo(event.target.value)}>
+              <select value={to} disabled={!from} onChange={(event) => onTo(event.target.value)}>
                 <option value="">Where to?</option>
-                {TOWNS.map((town) => (
-                  <option key={town} value={town}>{town}</option>
-                ))}
+                {destinations.map(destination => <option key={destination.id} value={destination.id}>{destination.name}</option>)}
               </select>
               <ChevronDown size={16} />
             </div>
           </label>
         </div>
 
-        {from && to && from === to && (
-          <p className="pb-error">Choose two different towns to search.</p>
-        )}
+        {routeError && <p className="pb-error" role="alert">{routeError}</p>}
 
         <div className="pb-search-footer">
           <p className="pb-note">
-            <ShieldCheck size={15} /> Your exact rank is selected automatically.
+            <ShieldCheck size={15} /> {selectedRoute ? 'Fare R' + Number(selectedRoute.fare).toFixed(2) + ' per seat' : 'Choose a route to see its fare.'}
           </p>
-          <button className="pb-primary" type="button" disabled={!valid || loading} onClick={onSearch}>
+          <button className="pb-primary" type="button" disabled={!valid || !selectedRoute || informationOnly || loading} onClick={onSearch}>
             <Search size={16} /> {loading ? 'Searching…' : 'Search trip'}
           </button>
         </div>
       </section>
 
+      {informationOnly && <section className="pb-route-empty"><p>Travel information only. Check departure times and pay at the rank.</p></section>}
       {error && <p className="pb-error">{error}</p>}
 
-      {hasSearched && !loading && !error && trips.length === 0 && (
+      {!informationOnly && hasSearched && !loading && !error && trips.length === 0 && (
         <section className="pb-route-empty">
           <MapPin size={22} />
           <p>No trips match that journey right now. Try another pair of towns.</p>
         </section>
       )}
 
-      {hasSearched && nextTrip && (
+      {!informationOnly && hasSearched && nextTrip && (
         <>
           <div className="pb-section-head">
             <div>
@@ -433,8 +431,10 @@ function TicketCard({ booking, notification, onDetails, onCancel, onPanic }) {
           <p className="pb-ticket-message">
             {notification?.body ||
               (status.tone === 'verified'
-                ? 'Keep this notification as proof of travel.'
-                : 'The operator must verify your cash booking before departure.')}
+                ? 'Your seat is reserved. Boarding is confirmed at the rank.'
+                : booking.payment_method === 'pass' ? 'Present your demo commuter pass before departure.' : 'The operator must verify your cash booking before departure.')}
+            {booking.passenger_confirmed_at && <small>Trip verified automatically</small>}
+            {booking.commuter_pass_used_at && <small>Commuter pass use recorded</small>}
           </p>
         </div>
         <div className="pb-fare">
@@ -984,12 +984,21 @@ export default function PassengerBookingFlow({
   const [localFrom, setLocalFrom] = useState(from || '');
   const [localTo, setLocalTo] = useState(to || '');
   const [hasSearched, setHasSearched] = useState(false);
+  const [routes, setRoutes] = useState([]);
+  const [routeError, setRouteError] = useState('');
+  useEffect(() => {
+    let current = true;
+    api.get('/transport/api/routes/').then(({ data }) => {
+      if (current) setRoutes(data);
+    }).catch(() => { if (current) setRouteError('Routes could not load. Refresh to try again.'); });
+    return () => { current = false; };
+  }, []);
 
   const searchRef = useRef(onSearch);
   searchRef.current = onSearch;
   const detailRequest = useRef(0);
 
-  const valid = Boolean(localFrom && localTo && localFrom !== localTo);
+  const valid = Boolean(localFrom && localTo);
 
   const activeBookings = useMemo(
     () => bookings.filter((booking) => ['reserved', 'boarded'].includes(booking.status)),
@@ -1185,6 +1194,8 @@ export default function PassengerBookingFlow({
 
         {panel === 'search' && !detail && (
           <SearchPanel
+            routes={routes}
+            routeError={routeError}
             from={localFrom}
             to={localTo}
             onFrom={(value) => {

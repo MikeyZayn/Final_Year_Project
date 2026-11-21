@@ -32,6 +32,8 @@ class User(AbstractUser):
 
     class AccountStatus(models.TextChoices):
         ACTIVE = "active", "Active"
+        PENDING = "pending", "Pending administrator review"
+        REJECTED = "rejected", "Rejected"
         DISABLED = "disabled", "Disabled"
         ARCHIVED = "archived", "Archived"
 
@@ -50,6 +52,15 @@ class User(AbstractUser):
     USERNAME_FIELD = "phone"
     REQUIRED_FIELDS = []
     objects = UserManager()
+
+
+class AccountDecision(models.Model):
+    account = models.ForeignKey(User, on_delete=models.PROTECT, related_name="account_decisions")
+    actor = models.ForeignKey(User, on_delete=models.PROTECT, related_name="account_decisions_made")
+    previous_status = models.CharField(max_length=20)
+    status = models.CharField(max_length=20)
+    reason = models.CharField(max_length=1000)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 class PassengerProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="passenger_profile")

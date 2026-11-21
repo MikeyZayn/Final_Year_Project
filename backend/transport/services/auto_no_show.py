@@ -35,6 +35,8 @@ def refund_overdue_trip(trip_id, now=None, *, override=False):
             return {"status": "already_processed", "refunded": []}
         if trip.status not in OPEN_STATUSES:
             return {"status": "not_active", "refunded": []}
+        if trip.bookings.filter(status__in=[Booking.Status.BOARDED, Booking.Status.COMPLETED]).exists():
+            return {"status": "passengers_boarded", "refunded": []}
         if driver_was_at_rank(trip) and not override:
             return {"status": "checked_in", "refunded": []}
 
@@ -44,7 +46,11 @@ def refund_overdue_trip(trip_id, now=None, *, override=False):
         bookings = list(Booking.objects.select_for_update().filter(trip=trip)
                         .exclude(status=Booking.Status.CANCELLED).order_by('pk'))
         for booking in bookings:
-            if booking.payment_status == Booking.PaymentStatus.PAID:
+            if booking.payment_method == Booking.PaymentMethod.COMMUTER_PASS:
+                booking.payment_status = ""
+                booking.refund_reason = "Driver did not check in. No fare was charged to the commuter pass."
+                booking.save(update_fields=['payment_status', 'refund_reason'])
+            elif booking.payment_status == Booking.PaymentStatus.PAID:
                 refund_driver_no_show(booking)
                 refunded.append(booking.pk)
             elif booking.payment_status == Booking.PaymentStatus.PENDING:

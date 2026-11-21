@@ -14,7 +14,7 @@ import random
 from datetime import timedelta
 from .models import (
     Rank, Destination, OperatorAtRank, Route,
-    Vehicle, Trip, Booking, VerificationCode,
+    Vehicle, Trip, Booking, VerificationCode, CommuterPassUsage,
     TripFlag, TripAssetChange, Feedback,
     QueueEntry, DriverVehicle, Announcement, PanicAlert, DriverAtRank,
 )
@@ -95,7 +95,9 @@ def api_list_trips(request):
     qs = Trip.objects.filter(
         status__in=[Trip.Status.SCHEDULED, Trip.Status.BOARDING],
         departure_date__gte=today,
-    ).select_related(
+        route__active=True,
+        route__service_category=Route.ServiceCategory.STRUCTURED,
+    ).exclude(trip_code__startswith="DEMO-").select_related(
         "route__departure", "route__destination",
         "operator__association", "vehicle",
     ).order_by("departure_date", "expected_departure_time")
@@ -158,7 +160,7 @@ def api_trip_detail(request, trip_id):
         .filter(pk=trip_id)
         .first()
     )
-    if trip is None:
+    if trip is None or trip.trip_code.startswith("DEMO-") or trip.route.service_category != Route.ServiceCategory.STRUCTURED:
         return Response({"detail": "Trip not found."}, status=404)
 
     data = TripSerializer(trip).data
@@ -488,17 +490,7 @@ def api_admin_trips(request):
         ).order_by("-departure_date")
         return Response(TripSerializer(qs, many=True).data)
 
-    s = TripWriteSerializer(data=request.data)
-    s.is_valid(raise_exception=True)
-    route = s.validated_data["route"]
-    selected_driver_id = s.validated_data.get("driver_id")
-    selected_driver = DriverProfile.objects.filter(pk=selected_driver_id).first() if selected_driver_id else None
-    if selected_driver_id and not selected_driver:
-        return Response({"detail": "Driver not found."}, status=400)
-    if selected_driver and not DriverAtRank.objects.filter(driver=selected_driver, rank=route.departure, status=OperatorAtRank.Status.ACTIVE).exists():
-        return Response({"detail": "Driver must be approved at this rank."}, status=400)
-    trip = s.save(trip_code=_generate_trip_code(route))
-    return Response(TripSerializer(trip).data, status=201)
+    return _schedule_rank_trip(request, admin_profile)
 
 
 @api_view(["GET"])
@@ -674,6 +666,8 @@ def api_engage_trip(request, trip_id):
     if departure and timezone.now() >= departure + timedelta(minutes=15):
         return Response({"detail": "This trip missed its departure window and cannot be engaged."}, status=400)
 
+    if not trip.route.active or trip.route.service_category != Route.ServiceCategory.STRUCTURED or trip.departure_date < timezone.localdate():
+        return Response({"detail": "This departure is not available for boarding."}, status=400)
     trip.engaged_by = op
     trip.engaged_at = timezone.now()
     trip.status = Trip.Status.BOARDING
@@ -746,6 +740,9 @@ def api_verify_booking(request, trip_id, booking_id):
 
     if booking.status != Booking.Status.RESERVED:
         return Response({"detail": f"Booking is already {booking.status}."}, status=400)
+    if (booking.payment_method == Booking.PaymentMethod.COMMUTER_PASS
+            and not CommuterPassUsage.objects.filter(booking=booking).exists()):
+        return Response({"detail": "Record the physical commuter pass before confirming boarding."}, status=400)
 
     booking.status = Booking.Status.BOARDED
     booking.boarded_at = timezone.now()
@@ -788,12 +785,15 @@ def api_my_bookings(request):
 
     if trip.status not in [Trip.Status.SCHEDULED, Trip.Status.BOARDING]:
         return Response({"detail": "This trip is not open for booking."}, status=400)
+    if (trip.departure_date < timezone.localdate() or trip.trip_code.startswith("DEMO-")
+            or not trip.route.active or trip.route.service_category != Route.ServiceCategory.STRUCTURED):
+        return Response({"detail": "This departure is not available for public bookings."}, status=400)
     if request.user.role != User.Role.PASSENGER:
         return Response({"detail": "Only passenger accounts can book trips."}, status=403)
     from .feature_serializers import GroupBookingRequestSerializer
     from .services.payment import (
         apply_card_payment,
-        apply_cash_pending,
+        apply_rank_payment_pending,
         fare_for_trip,
         trip_departure_dt,
     )
@@ -801,6 +801,8 @@ def api_my_bookings(request):
     form.is_valid(raise_exception=True)
     companions = form.validated_data.get("companions", [])
     payment_method = form.validated_data["payment_method"]
+    if payment_method == Booking.PaymentMethod.COMMUTER_PASS and companions:
+        return Response({"detail": "Book commuter-pass seats individually so each passenger can present their own pass."}, status=400)
     departure = trip_departure_dt(trip)
     if trip.expected_departure_time and departure and timezone.now() >= departure:
         return Response(
@@ -815,6 +817,9 @@ def api_my_bookings(request):
     booking = Booking.objects.filter(trip=trip, passenger=request.user).first()
     if booking and booking.status != Booking.Status.CANCELLED:
         return Response({"detail": "You already booked this trip."}, status=400)
+    if (booking and payment_method == Booking.PaymentMethod.COMMUTER_PASS
+            and CommuterPassUsage.objects.filter(booking=booking).exists()):
+        return Response({"detail": "This boarding pass presentation already has a record for this trip."}, status=409)
     if booking:
         booking.companions.filter(passenger__isnull=True).delete()
         booking.companions.filter(passenger__isnull=False).update(group_leader=None)
@@ -840,22 +845,17 @@ def api_my_bookings(request):
     booking.save(update_fields=["fare_amount"])
 
     if payment_method == "card":
-        apply_card_payment(
-            booking,
-            form.validated_data.get("card_holder_name", ""),
-            form.validated_data.get("card_number", ""),
-        )
-        notification = (
-            "Payment successful. You are a verified passenger. "
-            "Show this confirmation when you board — arrive on time at the departure rank."
-        )
+        apply_card_payment(booking, form.validated_data["card_token"])
+        notification = "Demo payment approved and seat reserved. The operator confirms boarding separately."
     else:
-        apply_cash_pending(booking)
+        apply_rank_payment_pending(booking, payment_method)
         notification = (
             "Cash booking received. You are a pending passenger. "
             "Arrive at least 30 minutes early with cash. The operator must verify you "
             "before the trip or you may lose your seat."
         )
+        if payment_method == Booking.PaymentMethod.COMMUTER_PASS:
+            notification = "Seat reserved. Present your commuter pass to the operator when boarding."
 
     data = BookingSerializer(booking).data
     data["notification"] = notification
@@ -1287,10 +1287,8 @@ def api_driver_confirm_trip(request):
             status=403,
         )
 
-    # If unassigned, assign to this driver
-    if trip.driver_id is None:
-        trip.driver = profile
-        trip.save()
+    if trip.driver_id is None or profile.status != DriverProfile.VerificationStatus.VERIFIED:
+        return Response({"detail": "An approved driver must be assigned first."}, status=403)
 
     return Response(TripSerializer(trip).data)
 
@@ -1308,7 +1306,9 @@ def api_driver_post_location(request, vehicle_id):
     from .services.driver_location import parse_coordinate, record_driver_location
 
     profile = getattr(request.user, "driver_profile", None)
-    if profile is None:
+    if (profile is None or request.user.role != User.Role.DRIVER
+            or profile.status != DriverProfile.VerificationStatus.VERIFIED
+            or profile.external_verification_status in ("failed", "suspended")):
         return Response({"detail": "Not a driver account."}, status=403)
 
     try:
@@ -1906,74 +1906,32 @@ def api_admin_schedule_trip(request):
     if admin_profile is None:
         return Response({"detail": "Not an admin account."}, status=403)
 
-    route_id = request.data.get("route_id")
-    operator_id = request.data.get("operator_id")
-    departure_date = request.data.get("departure_date")
-    time_str = request.data.get("expected_departure_time")  # "HH:MM" or null
-    capacity = request.data.get("seat_capacity", 15)
-    driver_id = request.data.get("driver_id")
-    vehicle_id = request.data.get("vehicle_id")
-    notes = request.data.get("notes", "")
+    return _schedule_rank_trip(request, admin_profile)
 
-    if not (route_id and operator_id and departure_date):
-        return Response(
-            {"detail": "route_id, operator_id and departure_date are required."},
-            status=400,
-        )
 
-    try:
-        route = Route.objects.get(pk=route_id, departure=admin_profile.rank)
-    except Route.DoesNotExist:
-        return Response({"detail": "Route not found or not from your rank."}, status=404)
+@transaction.atomic
+def _schedule_rank_trip(request, admin_profile):
+    from .trip_management import validate_assignment, record
 
-    try:
-        operator = OperatorProfile.objects.get(pk=operator_id)
-    except OperatorProfile.DoesNotExist:
-        return Response({"detail": "Operator not found."}, status=404)
-
-    # Operator must be active at this rank
-    if not OperatorAtRank.objects.filter(
-        operator=operator, rank=admin_profile.rank,
-        status=OperatorAtRank.Status.ACTIVE,
-    ).exists():
-        return Response(
-            {"detail": "That operator is not active at your rank."}, status=400
-        )
-
-    # Optional driver and vehicle
-    driver = None
-    if driver_id:
-        from accounts.models import DriverProfile
-        driver = DriverProfile.objects.filter(pk=driver_id).first()
-
-    if driver_id and (not driver or not DriverAtRank.objects.filter(driver=driver, rank=admin_profile.rank, status=OperatorAtRank.Status.ACTIVE).exists()):
-        return Response({"detail": "Driver must be approved at this rank."}, status=400)
-
-    vehicle = None
-    if vehicle_id:
-        vehicle = Vehicle.objects.filter(pk=vehicle_id).first()
-
-    # Time parsing
-    from datetime import time as dt_time
-    parsed_time = None
-    if time_str:
-        try:
-            hh, mm = time_str.split(":")[:2]
-            parsed_time = dt_time(int(hh), int(mm))
-        except Exception:
-            return Response({"detail": "Invalid time format, use HH:MM."}, status=400)
-
-    trip = Trip.objects.create(
-        operator=operator,
-        route=route,
-        departure_date=departure_date,
-        expected_departure_time=parsed_time,
-        seat_capacity=int(capacity) if capacity else 15,
-        driver=driver,
-        vehicle=vehicle,
-        notes=notes,
-        trip_code=_generate_trip_code(route),
-    )
+    form = TripWriteSerializer(data=request.data)
+    form.is_valid(raise_exception=True)
+    values = form.validated_data
+    route = values["route"]
+    operator = values["operator"]
+    if (not admin_profile.rank_id or route.departure_id != admin_profile.rank_id
+            or not route.active or route.service_category != Route.ServiceCategory.STRUCTURED):
+        return Response({"detail": "Choose an active structured route from your rank."}, status=400)
+    if not operator.user.is_active or not OperatorAtRank.objects.filter(
+            operator=operator, rank_id=admin_profile.rank_id, status=OperatorAtRank.Status.ACTIVE).exists():
+        return Response({"detail": "That operator is not active at your rank."}, status=400)
+    if values["departure_date"] < timezone.localdate():
+        return Response({"detail": "Choose today or a future departure date."}, status=400)
+    for field, model in (("driver_id", DriverProfile), ("vehicle_id", Vehicle)):
+        if values.get(field) and not model.objects.filter(pk=values[field]).exists():
+            return Response({"detail": "The selected driver or vehicle does not exist."}, status=400)
+    trip = form.save(trip_code=_generate_trip_code(route))
+    validate_assignment(trip)
+    record(trip, request.user, "Administrator scheduled trip.", {})
     return Response(TripSerializer(trip).data, status=201)
 
 
@@ -1986,7 +1944,8 @@ def api_admin_available_for_rank(request):
     if admin_profile is None:
         return Response({"detail": "Not an admin account."}, status=403)
 
-    routes = Route.objects.filter(departure=admin_profile.rank, active=True)
+    routes = Route.objects.filter(departure=admin_profile.rank, active=True,
+        service_category=Route.ServiceCategory.STRUCTURED)
     route_data = RouteSerializer(routes, many=True).data
 
     memberships = OperatorAtRank.objects.filter(
@@ -2091,8 +2050,24 @@ def api_admin_edit_trip(request, trip_id):
 
 # ---------- Manage queue ----------
 
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_operator_queue(request):
+    operator = _get_operator_or_none(request)
+    if not operator or request.user.role != User.Role.OPERATOR:
+        return Response({"detail": "An operator account is required."}, status=403)
+    expire_queues()
+    ranks = OperatorAtRank.objects.filter(operator=operator, status="active").values("rank_id")
+    entries = QueueEntry.objects.filter(rank_id__in=ranks, active=True).select_related("rank", "vehicle")
+    return Response([{
+        "id": entry.pk, "position": entry.position, "plate_number": entry.vehicle.plate_number,
+        "rank_name": entry.rank.name, "vehicle_label": f"{entry.vehicle.make} {entry.vehicle.model}".strip(),
+    } for entry in entries.order_by("rank__name", "position", "pk")])
+
+
 @api_view(["GET", "POST"])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def api_admin_queue(request):
     expire_queues()
     admin_profile = _get_admin_or_none(request)
@@ -2130,9 +2105,16 @@ def api_admin_queue(request):
     vehicle_id = request.data.get("vehicle_id")
     if not vehicle_id:
         return Response({"detail": "vehicle_id is required."}, status=400)
-    vehicle = Vehicle.objects.filter(pk=vehicle_id).first()
+    from rest_framework import serializers as drf_serializers
+    vehicle_id = drf_serializers.IntegerField(min_value=1).run_validation(vehicle_id)
+    Rank.objects.select_for_update().get(pk=rank.pk)
+    vehicle = Vehicle.objects.select_for_update().filter(pk=vehicle_id, roadworthy=True).first()
     if not vehicle:
         return Response({"detail": "Vehicle not found."}, status=404)
+    if not Route.objects.filter(departure=rank, active=True, service_category=Route.ServiceCategory.STRUCTURED).exists():
+        return Response({"detail": "A vehicle queue is available only at structured ranks."}, status=400)
+    if QueueEntry.objects.filter(vehicle=vehicle, active=True).exists():
+        return Response({"detail": "This vehicle is already in an active queue."}, status=409)
 
     driver_id = request.data.get("driver_id")
     operator_id = request.data.get("operator_id")
@@ -2152,13 +2134,15 @@ def api_admin_queue(request):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def api_admin_queue_remove(request, entry_id):
     expire_queues()
     admin_profile = _get_admin_or_none(request)
     if admin_profile is None:
         return Response({"detail": "Not an admin account."}, status=403)
     try:
-        entry = QueueEntry.objects.get(pk=entry_id, rank=admin_profile.rank)
+        Rank.objects.filter(pk=admin_profile.rank_id).select_for_update().first()
+        entry = QueueEntry.objects.get(pk=entry_id, rank=admin_profile.rank, active=True)
     except QueueEntry.DoesNotExist:
         return Response({"detail": "Entry not found."}, status=404)
 
@@ -2177,6 +2161,7 @@ def api_admin_queue_remove(request, entry_id):
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
+@transaction.atomic
 def api_admin_queue_move(request, entry_id):
     expire_queues()
     admin_profile = _get_admin_or_none(request)
@@ -2188,6 +2173,7 @@ def api_admin_queue_move(request, entry_id):
         return Response({"detail": "direction must be 'up' or 'down'."}, status=400)
 
     try:
+        Rank.objects.filter(pk=admin_profile.rank_id).select_for_update().first()
         entry = QueueEntry.objects.get(pk=entry_id, rank=admin_profile.rank, active=True)
     except QueueEntry.DoesNotExist:
         return Response({"detail": "Entry not found."}, status=404)
@@ -2458,7 +2444,10 @@ def api_admin_drivers(request):
     if admin_profile is None and not request.user.is_superuser:
         return Response({"detail": "Not an admin account."}, status=403)
 
-    qs = DriverProfile.objects.select_related("user", "association").all()
+    qs = DriverProfile.objects.select_related("user", "association")
+    if not request.user.is_superuser:
+        from .accounts_review import rank_accounts
+        qs = qs.filter(user__in=rank_accounts(request.user)[1].values("pk"))
     scope = request.query_params.get("scope", "pending")
     if scope == "pending":
         qs = qs.filter(external_verification_status="unverified")
@@ -2487,7 +2476,11 @@ def api_admin_verify_driver(request, driver_id):
         return Response({"detail": "Not an admin account."}, status=403)
 
     try:
-        d = DriverProfile.objects.get(pk=driver_id)
+        candidates = DriverProfile.objects.all()
+        if not request.user.is_superuser:
+            from .accounts_review import rank_accounts
+            candidates = candidates.filter(user__in=rank_accounts(request.user)[1].values("pk"))
+        d = candidates.get(pk=driver_id)
     except DriverProfile.DoesNotExist:
         return Response({"detail": "Driver not found."}, status=404)
 
@@ -2550,9 +2543,19 @@ def api_verify_trip_assets(request, trip_id):
     if trip.driver.external_verification_status in ["failed", "suspended"]:
         return Response({"detail": "Driver failed DOT verification."}, status=400)
 
-    trip.assets_verified_at = timezone.now()
-    trip.assets_verified_by = request.user
-    trip.save()
+    checks = request.data.get("checks")
+    if not isinstance(checks, dict) or any(checks.get(key) is not True for key in ("face", "details", "vehicle")):
+        return Response({"detail": "Confirm the face, details and vehicle checks on site."}, status=400)
+    if request.data.get("driver_id") != trip.driver_id or request.data.get("vehicle_id") != trip.vehicle_id:
+        return Response({"detail": "The assignment changed. Refresh and check the new driver or vehicle."}, status=409)
+    if not trip.assets_verified_at:
+        from .models import TripChange
+        TripChange.objects.create(trip=trip, changed_by=request.user, actor_name=request.user.get_full_name() or request.user.phone,
+            actor_role=request.user.role, reason="Operator confirmed on-site face, details and vehicle checks.",
+            before={"assets_verified": False}, after={"assets_verified": True, "driver_id": trip.driver_id, "vehicle_id": trip.vehicle_id})
+        trip.assets_verified_at = timezone.now()
+        trip.assets_verified_by = request.user
+        trip.save(update_fields=["assets_verified_at", "assets_verified_by"])
     return Response(TripSerializer(trip).data)
 
 # ---------- Payment verification & driver-location refunds ----------
@@ -2560,27 +2563,23 @@ def api_verify_trip_assets(request, trip_id):
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 @transaction.atomic
-def api_verify_cash_payment(request, trip_id, booking_id):
-    """Operator marks a cash passenger as paid / verified on the day of travel.
-
-    Cash passengers stay PENDING until this call. They must be verified at the
-    rank before the trip starts, otherwise the seat may be released.
-    """
+def api_verify_cash_payment(request, trip_id, booking_id, method=Booking.PaymentMethod.CASH):
+    """Record a payment confirmed by the operator at the rank."""
     op = _get_operator_or_none(request)
     if op is None and not request.user.is_superuser:
         return Response({"detail": "Only operators can verify cash payments."}, status=403)
     try:
-        trip = Trip.objects.select_related("route__departure").get(pk=trip_id)
-        booking = Booking.objects.get(pk=booking_id, trip=trip)
+        trip = Trip.objects.select_for_update().get(pk=trip_id)
+        booking = Booking.objects.select_for_update().get(pk=booking_id, trip=trip)
     except (Trip.DoesNotExist, Booking.DoesNotExist):
         return Response({"detail": "Booking not found on this trip."}, status=404)
 
     if op is not None and trip.operator_id != op.id:
         return Response({"detail": "This trip belongs to another operator."}, status=404)
-    if booking.payment_method != Booking.PaymentMethod.CASH:
-        return Response({"detail": "This booking is not a cash payment."}, status=400)
-    if booking.status == Booking.Status.CANCELLED:
-        return Response({"detail": "Booking is cancelled."}, status=400)
+    if booking.payment_method != method:
+        return Response({"detail": "This booking uses a different payment method."}, status=400)
+    if booking.status not in (Booking.Status.RESERVED, Booking.Status.BOARDED):
+        return Response({"detail": "This booking cannot receive a payment."}, status=400)
     if trip.status in (
         Trip.Status.IN_PROGRESS,
         Trip.Status.COMPLETED,
@@ -2591,17 +2590,44 @@ def api_verify_cash_payment(request, trip_id, booking_id):
             status=400,
         )
 
-    from .services.payment import operator_verify_cash
+    if method == Booking.PaymentMethod.COMMUTER_PASS and (
+            not op or trip.engaged_by_id != op.pk or trip.status != Trip.Status.BOARDING or not trip.assets_verified_at):
+        return Response({"detail": "Engage and check this departure before confirming the commuter pass."}, status=400)
+    if method == Booking.PaymentMethod.COMMUTER_PASS:
+        if request.data.get("pass_presented") is not True:
+            return Response({"detail": "Confirm the passenger presented their physical pass."}, status=400)
+        if booking.group_leader_id or booking.companions.exists():
+            return Response({"detail": "Record each commuter-pass passenger on an individual booking."}, status=400)
+        CommuterPassUsage.objects.get_or_create(booking=booking, defaults={"recorded_by": request.user})
+    from .services.payment import operator_verify_rank_payment
     try:
-        operator_verify_cash(booking, request.user)
+        operator_verify_rank_payment(booking, request.user)
     except ValueError as exc:
         return Response({"detail": str(exc)}, status=400)
 
     return Response({
         "booking": BookingSerializer(booking).data,
         "passenger_display_status": booking.passenger_display_status(),
-        "notification": f"{booking.display_name()} is now a verified (cash paid) passenger.",
+        "notification": ("Commuter pass use recorded. Confirm boarding separately."
+                         if method == Booking.PaymentMethod.COMMUTER_PASS else
+                         "Cash payment recorded. Confirm boarding separately."),
     })
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_admin_commuter_pass_usage(request):
+    admin = _get_admin_or_none(request)
+    if not admin or not admin.rank_id or request.user.role != User.Role.ADMIN:
+        return Response({"detail": "A rank administrator is required."}, status=403)
+    usage = CommuterPassUsage.objects.filter(booking__trip__route__departure_id=admin.rank_id).select_related(
+        "booking__trip", "recorded_by",
+    )
+    return Response([{
+        "id": item.pk, "trip_code": item.booking.trip.trip_code, "booking_id": item.booking_id,
+        "recorded_at": item.recorded_at,
+        "operator_name": item.recorded_by.get_full_name() if item.recorded_by else "",
+    } for item in usage[:100]])
 
 
 @api_view(["POST"])
@@ -2618,15 +2644,12 @@ def api_trip_driver_no_show_refunds(request, trip_id):
     except Trip.DoesNotExist:
         return Response({"detail": "Trip not found."}, status=404)
     op = _get_operator_or_none(request)
-    authorised = (op is not None and trip.operator_id == op.pk) or (
-        request.user.role == User.Role.ADMIN or request.user.is_superuser
-    )
+    admin = _get_admin_or_none(request)
+    can_administer = request.user.is_superuser or bool(admin and admin.rank_id == trip.route.departure_id)
+    authorised = (op is not None and trip.operator_id == op.pk) or can_administer
     if not authorised:
         return Response({"detail": "Only the trip operator or administrator can review driver no-show refunds."}, status=403)
-    # No earlier refunds, even if a caller sends force=true.
-    # Only administrators can override contradictory GPS evidence.
-    override = request.user.role == User.Role.ADMIN and request.data.get('override') is True
-    result = refund_overdue_trip(trip.pk, override=override)
+    result = refund_overdue_trip(trip.pk)
     if result['status'] == 'too_early':
         return Response({"detail": "The 15-minute arrival period has not ended.", **result}, status=400)
     messages = {
@@ -2634,5 +2657,6 @@ def api_trip_driver_no_show_refunds(request, trip_id):
         'already_processed': 'Driver no-show refunds were already processed.',
         'checked_in': 'Driver checked in at rank A within the permitted time; no refunds due.',
         'not_active': 'This trip is not eligible for driver no-show processing.',
+        'passengers_boarded': 'Passengers have boarded. Review the trip before changing their records.',
     }
     return Response({"detail": messages.get(result['status'], result['status']), **result})

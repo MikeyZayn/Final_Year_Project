@@ -261,9 +261,10 @@ class Booking(models.Model):
     class PaymentMethod(models.TextChoices):
         CARD = "card", "Pay with card"
         CASH = "cash", "Pay with cash"
+        COMMUTER_PASS = "pass", "Commuter pass at rank"
 
     class PaymentStatus(models.TextChoices):
-        PENDING = "pending", "Pending cash verification"
+        PENDING = "pending", "Pending payment verification"
         PAID = "paid", "Paid / verified"
         REFUNDED = "refunded", "Fully refunded"
         PARTIAL_REFUND = "partial_refund", "Partial refund (cancellation fee)"
@@ -320,6 +321,17 @@ class Booking(models.Model):
 
     def __str__(self):
         return f"{self.display_name()} → {self.trip.trip_code} ({self.status})"
+
+
+class CommuterPassUsage(models.Model):
+    """Operator-confirmed presentation of a physical commuter pass."""
+
+    booking = models.OneToOneField(Booking, on_delete=models.PROTECT, related_name="commuter_pass_usage")
+    recorded_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-recorded_at", "-id"]
 
 
 class VerificationCode(models.Model):

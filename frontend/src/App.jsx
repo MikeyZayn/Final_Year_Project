@@ -13,6 +13,9 @@ import ThembaMap from './components/ThembaMap.jsx';
 import { TripEditor, TripGroupEditor, apiMessage } from './features/TripManagement.jsx';
 import PassengerBookingFlow from './pages/PassengerBookingFlow.jsx';
 import PaymentModal from './features/PaymentModal.jsx';
+import PassengerSettings from './features/PassengerSettings.jsx';
+import RankVehicleQueue from './features/RankVehicleQueue.jsx';
+import CommuterPassUsage from './features/CommuterPassUsage.jsx';
 
 const demoUsers = {
   passenger: 'Sibusiso Dlamini',
@@ -148,7 +151,7 @@ function getProfileDefaults(role) {
 }
 
 function App() {
-  const { user: sessionUser } = useAuth();
+  const { user: sessionUser, updateProfile } = useAuth();
   const [screen, setScreen] = useState('welcome');
   const [role, setRole] = useState('passenger');
   const [activeTrip, setActiveTrip] = useState(null);
@@ -276,7 +279,12 @@ function App() {
         )}
       </main>
 
-      {settingsOpen && (
+      {settingsOpen && (role === 'passenger' ? (
+        <PassengerSettings onClose={() => setSettingsOpen(false)} notify={(saved) => {
+          updateProfile(saved);
+          notify('Profile saved.');
+        }} />
+      ) : (
         <ProfileSettings
           role={role}
           profile={profile}
@@ -284,7 +292,7 @@ function App() {
           onClose={() => setSettingsOpen(false)}
           notify={notify}
         />
-      )}
+      ))}
 
       {notice && <div className="toast" role="status">{notice}</div>}
     </div>
@@ -503,7 +511,7 @@ function Login({ role, setRole, onBack, onAuthed, notify }) {
     e?.preventDefault?.();
     setError('');
     if (!phone || !password) {
-      setError('Phone number and password are required.');
+      setError('Enter your phone number or email and your password.');
       return;
     }
     setBusy(true);
@@ -528,15 +536,15 @@ function Login({ role, setRole, onBack, onAuthed, notify }) {
       <button className="back-link" onClick={onBack} type="button">← Back</button>
       <div className="eyebrow">Secure access</div>
       <h2>Welcome back.</h2>
-      <p className="muted">Sign in with the phone number you registered with.</p>
+      <p className="muted">Sign in with your registered phone number or email.</p>
 
       <label>
-        Phone number
+        Phone number or email
         <input
           value={phone}
           onChange={(e) => setPhone(e.target.value)}
-          placeholder="0821234567"
-          autoComplete="tel"
+          placeholder="0821234567 or name@example.com"
+          autoComplete="username"
         />
       </label>
 
@@ -598,6 +606,7 @@ function Register({ role, setRole, onBack, onAuthed }) {
     rank_code: '',
   });
   const [pendingPhone, setPendingPhone] = useState(null);
+  const [awaitingApproval, setAwaitingApproval] = useState('');
   const [emailCode, setEmailCode] = useState('');
   const [codeMessage, setCodeMessage] = useState('');
   const [error, setError] = useState('');
@@ -667,6 +676,10 @@ function Register({ role, setRole, onBack, onAuthed }) {
     setBusy(true);
     try {
       const user = await verifyEmail(pendingPhone, emailCode.trim());
+      if (user.requires_admin_approval) {
+        setAwaitingApproval(user.detail);
+        return;
+      }
       onAuthed(user.role);
     } catch (err) {
       setError(err.response?.data?.detail || 'Could not verify the code.');
@@ -683,6 +696,13 @@ function Register({ role, setRole, onBack, onAuthed }) {
       setError(err.response?.data?.detail || 'Could not resend the code.');
     } finally { setBusy(false); }
   }
+
+  if (awaitingApproval) return (
+    <section className="auth-panel">
+      <h2>Email verified</h2><p role="status">{awaitingApproval}</p>
+      <button className="primary-button" type="button" onClick={onBack}>Return to sign in</button>
+    </section>
+  );
 
   if (pendingPhone) return (
     <section className="auth-panel">
@@ -709,7 +729,7 @@ function Register({ role, setRole, onBack, onAuthed }) {
       <div className="eyebrow">Account registration</div>
       <h2>Join THEMBA.</h2>
       <p className="muted">
-        Enter your email to receive a verification code. Driver accounts also require administrator approval.
+        Enter your email to receive a verification code. Driver and operator accounts also require administrator approval.
       </p>
 
       <RolePicker role={role} setRole={setRole} />
@@ -977,8 +997,8 @@ function Passenger({ notify, onSignIn, onOpenSettings }) {
     setError('');
     try {
       const query = new URLSearchParams();
-      if (params.from) query.set('from', params.from);
-      if (params.to) query.set('to', params.to);
+      if (params.from) query.set(/^\d+$/.test(params.from) ? 'departure_id' : 'from', params.from);
+      if (params.to) query.set(/^\d+$/.test(params.to) ? 'destination_id' : 'to', params.to);
       if (params.departureId) query.set('departure_id', params.departureId);
       if (params.destinationId) query.set('destination_id', params.destinationId);
       const qs = query.toString() ? `?${query.toString()}` : '';
@@ -1791,6 +1811,7 @@ function Operator({ notify }) {
       <DrawerTile title="All my trips" description="All assigned trips, including completed, cancelled and refunded trips" icon="↗">
         <OperatorTripsList trips={trips} title="All my trips" showHistory onSelectTrip={setSelectedTripId} />
       </DrawerTile>
+      <DrawerTile title="Rank vehicle queue" description="Waiting vehicles at your approved ranks" icon="↗"><RankVehicleQueue /></DrawerTile>
       <DrawerTile title="Passenger alerts" description="Review and respond to active alerts" icon="!">
         <OperatorAlerts notify={notify} />
       </DrawerTile>
@@ -2307,18 +2328,18 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
     }
   }
 
-  // Cash passengers stay PENDING until the operator confirms the cash at the
-  // rank. This is the step that converts them to a verified passenger.
-  async function verifyCashPayment(bookingId) {
+  async function verifyCashPayment(bookingId, method) {
+    if (method === 'pass' && !window.confirm('Confirm that this passenger presented their physical commuter pass.')) return;
     setVerifyingCashId(bookingId);
     try {
       const { data } = await api.post(
-        `/transport/api/my-trips/${tripId}/bookings/${bookingId}/verify-cash/`
+        `/transport/api/my-trips/${tripId}/bookings/${bookingId}/verify-${method === 'pass' ? 'pass' : 'cash'}/`,
+        method === 'pass' ? { pass_presented: true } : {}
       );
-      notify(data.notification || 'Cash payment verified.');
+      notify(data.notification || 'Payment confirmed.');
       load();
     } catch (err) {
-      notify(err.response?.data?.detail || 'Could not verify cash payment.');
+      notify(err.response?.data?.detail || 'Could not confirm this payment.');
     } finally {
       setVerifyingCashId(null);
     }
@@ -2479,10 +2500,13 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
             <button
               className="primary-button"
               onClick={async () => {
+                if (!window.confirm('Before verifying, check that the person’s face matches their ID, their licence details match the assignment, and the vehicle plate and condition are correct. Have you completed all three checks in person?')) return;
                 setAssetVerificationError('');
                 setVerifyingAssets(true);
                 try {
-                  await api.post(`/transport/api/my-trips/${tripId}/verify-assets/`);
+                  await api.post(`/transport/api/my-trips/${tripId}/verify-assets/`, {
+                    checks: { face: true, details: true, vehicle: true }, driver_id: trip.driver_id, vehicle_id: trip.vehicle_id,
+                  });
                   notify('Assets verified. You can now register passengers.');
                   await load();
                 } catch (err) {
@@ -2533,7 +2557,7 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
                   {b.passenger_display_status === 'verified'
                     ? 'Verified passenger'
                     : b.passenger_display_status === 'pending'
-                      ? 'Cash pending — verify before departure'
+                      ? (b.payment_method === 'pass' ? 'Commuter pass pending' : 'Cash pending — verify before departure')
                       : b.passenger_display_status || b.payment_status || b.status}
                 </strong>
                 {b.payment_status === 'refunded' ? ' · refunded' : ''}
@@ -2543,11 +2567,11 @@ function OperatorTripDetail({ tripId, onBack, notify }) {
               {b.payment_status === 'pending' && b.status === 'reserved' && (
                 <button
                   className="secondary-button"
-                  onClick={() => verifyCashPayment(b.booking_id)}
+                  onClick={() => verifyCashPayment(b.booking_id, b.payment_method)}
                   disabled={verifyingCashId !== null}
                   type="button"
                 >
-                  {verifyingCashId === b.booking_id ? 'Verifying cash…' : 'Verify cash'}
+                  {verifyingCashId === b.booking_id ? 'Recording…' : b.payment_method === 'pass' ? 'Record pass use' : 'Verify cash'}
                 </button>
               )}
               {b.status === 'reserved' ? (
@@ -2678,9 +2702,10 @@ function Administrator({ notify }) {
         </p>
       </article>
 
-      <DrawerTile title="Departure queue" description="Waiting taxis, queue expiry and new departures" icon="↗"><DepartureQueue /><AdminScheduleTrip notify={notify} /></DrawerTile>
+      <DrawerTile title="Departure queue" description="Waiting taxis, queue expiry and new departures" icon="↗"><RankVehicleQueue editable /><DepartureQueue /><AdminScheduleTrip notify={notify} /></DrawerTile>
       <DrawerTile title="Drivers & DOT checks" description="Licences, demo registry checks and verification status" icon="✓"><AdminDrivers notify={notify} /></DrawerTile>
       <DrawerTile title="Accounts" description="Search people and manage account access" icon="◎"><AdminAccounts notify={notify} /></DrawerTile>
+      <DrawerTile title="Commuter pass usage" description="See passes recorded at this rank" icon="◎"><CommuterPassUsage /></DrawerTile>
       <DrawerTile title="Trip management" description="Journey history and trip controls" icon="↔"><AdminTrips notify={notify} /></DrawerTile>
       <DrawerTile title="Trip progression demo" description="Show sample trip stages to clients without changing live data" icon="▷"><AdminTripProgressDemo notify={notify} /></DrawerTile>
       <DrawerTile title="Announcements" description="Publish rank notices for your operators and drivers" icon="↗"><AdminAnnouncements notify={notify} rank={adminInfo.rank} /></DrawerTile>
@@ -3309,6 +3334,10 @@ function AdminAccounts({ notify }) {
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState('');
   const [role, setRole] = useState('');
+  const [accountStatus, setAccountStatus] = useState('');
+  const [decision, setDecision] = useState(null);
+  const [reason, setReason] = useState('');
+  const [saving, setSaving] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -3316,6 +3345,7 @@ function AdminAccounts({ notify }) {
       const params = new URLSearchParams();
       if (q) params.set('q', q);
       if (role) params.set('role', role);
+      if (accountStatus) params.set('status', accountStatus);
       const { data } = await api.get(`/transport/api/admin/users/?${params.toString()}`);
       setItems(data); setPage(0);
     } catch { /* ignore */ }
@@ -3323,6 +3353,21 @@ function AdminAccounts({ notify }) {
   }
 
   useEffect(() => { load(); }, []);
+
+  async function saveDecision(event) {
+    event.preventDefault();
+    setSaving(true);
+    try {
+      await api.post(`/transport/api/admin/users/${decision.user.id}/${decision.action}/`, { reason });
+      setDecision(null);
+      notify('Account decision recorded.');
+      await load();
+    } catch (err) {
+      notify(apiMessage(err, 'Could not save the account decision.'));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   async function generateReset(u) {
     try {
@@ -3355,6 +3400,16 @@ function AdminAccounts({ notify }) {
             <option value="admin">Admin</option>
           </select>
         </label>
+        <label>Status
+          <select value={accountStatus} onChange={(e) => setAccountStatus(e.target.value)}>
+            <option value="">All statuses</option>
+            <option value="pending">Pending review</option>
+            <option value="active">Active</option>
+            <option value="disabled">Disabled</option>
+            <option value="rejected">Rejected</option>
+            <option value="archived">Archived</option>
+          </select>
+        </label>
       </div>
       <button className="primary-button" onClick={load} type="button">Search</button>
 
@@ -3366,6 +3421,8 @@ function AdminAccounts({ notify }) {
           <span>
             <strong>{u.name}</strong>
             <small>{u.phone} · {u.role} · joined {new Date(u.date_joined).toLocaleDateString()}</small>
+            {u.review_overdue && <small>Pending for more than 24 hours</small>}
+            {u.status_reason && <small>{u.status_reason}</small>}
           </span>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <span className="status-pill" style={{
@@ -3376,13 +3433,30 @@ function AdminAccounts({ notify }) {
             }}>
               {u.account_status}
             </span>
-            <button className="secondary-button" onClick={() => generateReset(u)} type="button">
+            {({
+              pending: u.is_active ? ['approve', 'reject'] : [],
+              active: ['disable', 'archive'],
+              disabled: ['enable', 'archive'],
+              rejected: ['archive'],
+            }[u.account_status] || []).map(action => (
+              <button key={action} className="secondary-button" type="button"
+                onClick={() => { setDecision({ user: u, action }); setReason(''); }}>
+                {action[0].toUpperCase() + action.slice(1)}
+              </button>
+            ))}
+            {u.account_status === 'active' && <button className="secondary-button" onClick={() => generateReset(u)} type="button">
               Email reset code
-            </button>
+            </button>}
           </div>
         </div>
       ))}
       <PageControls page={page} total={items.length} onChange={setPage} />
+      {decision && <form className="settings-section" onSubmit={saveDecision}>
+        <h3>{decision.action[0].toUpperCase() + decision.action.slice(1)} {decision.user.name}</h3>
+        <label>Reason<textarea required maxLength={1000} value={reason} onChange={e => setReason(e.target.value)} /></label>
+        <button type="submit" className="primary-button" disabled={saving || !reason.trim()}>Record decision</button>
+        <button type="button" className="text-button" disabled={saving} onClick={() => setDecision(null)}>Cancel</button>
+      </form>}
     </article>
   );
 }

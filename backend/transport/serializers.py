@@ -226,6 +226,7 @@ class BookingSerializer(serializers.ModelSerializer):
     )
     passenger_name = serializers.SerializerMethodField()
     passenger_display_status = serializers.SerializerMethodField()
+    commuter_pass_used_at = serializers.DateTimeField(source="commuter_pass_usage.recorded_at", read_only=True, default=None)
 
     class Meta:
         model = Booking
@@ -239,7 +240,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "payment_method", "payment_status", "fare_amount", "amount_paid",
             "cancellation_fee", "refund_amount", "refund_reason",
             "card_last_four", "card_holder_name", "paid_at",
-            "payment_verified_at", "passenger_display_status",
+            "payment_verified_at", "passenger_display_status", "commuter_pass_used_at",
         ]
 
         read_only_fields = ["status", "booked_at", "payment_status", "amount_paid",

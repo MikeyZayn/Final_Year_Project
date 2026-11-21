@@ -16,7 +16,7 @@ from datetime import timedelta
 import secrets
 from rest_framework import status
 
-from .models import PasswordResetCode, User, EmailVerificationCode
+from .models import PasswordResetCode, User, EmailVerificationCode, PassengerProfile
 from .email_otp import (
     generate_code, ensure_email_ready, deliver_code, send_registration_code,
     verify_registration_code, reset_code_matches, COOLDOWN_SECONDS,
@@ -42,6 +42,7 @@ from .serializers import (
     PasswordResetConfirmSerializer,
     EmailVerificationSerializer,
     EmailVerificationResendSerializer,
+    PassengerSettingsSerializer,
 )
 
 
@@ -73,7 +74,7 @@ def login_view(request):
                 username=form.cleaned_data["phone"],
                 password=form.cleaned_data["password"],
             )
-            if user is not None:
+            if user is not None and user.account_status == User.AccountStatus.ACTIVE:
                 login(request, user)
                 return redirect("dashboard")
             form.add_error(None, "Invalid phone number or password.")
@@ -152,6 +153,8 @@ def api_email_verify(request):
     try:
         with transaction.atomic():
             user = User.objects.select_for_update().get(phone=s.validated_data["phone"])
+            if user.account_status not in (User.AccountStatus.ACTIVE, User.AccountStatus.PENDING):
+                return Response({"detail": "Incorrect or expired code."}, status=400)
             if user.is_active:
                 return Response({"detail": "Email already verified. Please sign in."}, status=400)
             if not verify_registration_code(user, s.validated_data["code"]):
@@ -160,6 +163,8 @@ def api_email_verify(request):
             user.save(update_fields=["is_active"])
     except User.DoesNotExist:
         return Response({"detail": "Incorrect or expired code."}, status=400)
+    if user.account_status == User.AccountStatus.PENDING:
+        return Response({"requires_admin_approval": True, "detail": "Your email is verified. Your application is awaiting rank administrator approval."}, status=202)
     return _auth_response(user)
 
 
@@ -170,7 +175,8 @@ def api_email_resend(request):
     s.is_valid(raise_exception=True)
     try:
         with transaction.atomic():
-            user = User.objects.select_for_update().get(phone=s.validated_data["phone"], is_active=False)
+            user = User.objects.select_for_update().get(phone=s.validated_data["phone"], is_active=False,
+                account_status__in=[User.AccountStatus.ACTIVE, User.AccountStatus.PENDING])
             last = user.email_verification_codes.order_by("-created_at").first()
             now = timezone.now()
             if last and (now - last.last_sent_at).total_seconds() < COOLDOWN_SECONDS:
@@ -207,6 +213,33 @@ def api_logout(request):
 @permission_classes([IsAuthenticated])
 def api_me(request):
     return Response(UserSerializer(request.user).data)
+
+
+@api_view(["GET", "PUT"])
+@permission_classes([IsAuthenticated])
+@transaction.atomic
+def api_passenger_settings(request):
+    if request.user.role != User.Role.PASSENGER:
+        return Response({"detail": "This profile belongs to a passenger."}, status=403)
+    user = User.objects.select_for_update().get(pk=request.user.pk)
+    profile = PassengerProfile.objects.filter(user=user).first()
+    contact_fields = (
+        "next_of_kin_name", "next_of_kin_phone",
+        "second_next_of_kin_name", "second_next_of_kin_phone",
+    )
+    if request.method == "PUT":
+        form = PassengerSettingsSerializer(data=request.data)
+        form.is_valid(raise_exception=True)
+        for name in ("first_name", "last_name"):
+            setattr(user, name, form.validated_data[name])
+        user.save(update_fields=["first_name", "last_name"])
+        profile, _ = PassengerProfile.objects.update_or_create(
+            user=user, defaults={name: form.validated_data[name] for name in contact_fields}
+        )
+    return Response({
+        **UserSerializer(user).data,
+        **{name: getattr(profile, name, "") for name in contact_fields},
+    })
 
 @api_view(["POST"])
 @permission_classes([AllowAny])

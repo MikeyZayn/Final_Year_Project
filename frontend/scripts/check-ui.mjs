@@ -44,10 +44,11 @@ try {
   const { AuthProvider } = await server.ssrLoadModule('/src/auth.jsx');
   await act(async () => root.render(React.createElement(AuthProvider, null, React.createElement(App))));
   await click('Sign in');
-  await input(document.querySelector('input[autocomplete="tel"]'), '0821111111');
+  await input(document.querySelector('input[autocomplete="username"]'), '0821111111');
   await input(document.querySelector('input[type="password"]'), 'Passw0rd!');
   await click('Sign in');
-  assert.match(document.body.textContent, /Your journeys/);
+  assert.match(document.body.textContent, /Where are you going/);
+  await click('My trip');
   bookings = bookings.map(b => ({ ...b, status: 'boarded', boarded_at: new Date().toISOString(), verification_code: 'AUTO-CODE' }));
   // Receipt arrives after the passenger has already opened the dashboard.
   await act(async () => window.dispatchEvent(new Event('focus')));

@@ -34,6 +34,8 @@ def save_group(request, trip_id):
     ids = set(data["booking_ids"]) - {leader.pk}
     members = list(Booking.objects.filter(pk__in=ids, trip=trip))
     if len(members) != len(ids): reject("Every selected passenger must be booked on this trip.")
+    if any(booking.payment_method == Booking.PaymentMethod.COMMUTER_PASS for booking in [leader, *members]):
+        reject("Keep commuter-pass bookings separate so each pass can be recorded at boarding.")
     if any(b.status not in ("reserved", "boarded") or b.group_leader_id not in (None, leader.pk) or b.companions.exists() for b in members):
         reject("Choose active passengers who do not belong to another group.")
     companions = data.get("companions", [])

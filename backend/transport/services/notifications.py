@@ -23,6 +23,8 @@ URGENCY = {
     "refund": 1,
     "booking_verified": 2,
     "boarding_confirmed": 3,
+    "pass_pending": 0,
+    "trip_cancelled": 1,
 }
 
 
@@ -70,7 +72,14 @@ def booking_notifications(booking):
     base = _base(booking)
     events = []
 
-    if booking.payment_status == Booking.PaymentStatus.PAID:
+    if booking.status == Booking.Status.CANCELLED and booking.trip.status == "cancelled":
+        events.append({
+            **base, "id": f"booking-{booking.id}-trip-cancelled", "kind": "trip_cancelled",
+            "title": "Trip cancelled", "body": booking.refund_reason or "This departure was cancelled by the rank.",
+            "proof": False, "amount": None, "created_at": booking.trip.updated_at,
+        })
+
+    if booking.payment_status == Booking.PaymentStatus.PAID and booking.status != Booking.Status.CANCELLED:
         events.append(
             {
                 **base,
@@ -78,23 +87,23 @@ def booking_notifications(booking):
                 "kind": "booking_verified",
                 "title": "You're ready to travel",
                 "body": (
-                    "Payment received. You are a verified passenger on this trip. "
-                    "Show this notification when you board — arrive on time at the "
-                    "departure rank. Late arrivals are not refunded."
+                    "Payment recorded and seat reserved. The operator confirms boarding at the departure rank."
                 ),
-                "proof": True,
-                "amount": _money(booking.amount_paid or booking.fare_amount),
+                "proof": False,
+                "amount": _money(booking.amount_paid if booking.amount_paid is not None else booking.fare_amount),
                 "created_at": booking.paid_at or booking.booked_at,
             }
         )
     elif booking.payment_status == Booking.PaymentStatus.PENDING:
+        is_pass = booking.payment_method == Booking.PaymentMethod.COMMUTER_PASS
         events.append(
             {
                 **base,
                 "id": f"booking-{booking.id}-pending",
-                "kind": "cash_pending",
-                "title": "Cash booking pending",
+                "kind": "pass_pending" if is_pass else "cash_pending",
+                "title": "Commuter pass pending" if is_pass else "Cash booking pending",
                 "body": (
+                    "Present your commuter pass to the operator when boarding." if is_pass else
                     "You are a pending passenger. Arrive at least 30 minutes early "
                     "with cash. The operator must verify your payment before "
                     "departure or your seat may be released."
